@@ -1,78 +1,34 @@
 Canonical scene-render schema, vendored unchanged from sr-core
-(https://github.com/pedroanisio/sr-core), tag schema-1.1.3.
+(https://github.com/pedroanisio/sr-core), release 1.3.0: the annotated tag schema-1.3.0, commit
+56a9ad3d7761f037b7a752215563cbfb5a163ce5 (branch release/schema-1.3). Schema 1.2.0 is the annotated tag schema-1.2.0,
+commit d02d6cd4b581f15baa15aef1c3fcdd501d4f7040 (branch release/schema-1.2). The schema files of the tag are the ones
+below (checked: the sha256 of schema/scene-render.xsd and .sch at the tag equals the values here).
 
-  scene-render-1.1.xsd  <- schema/scene-render.xsd  sha256 c426d6aa15a8af7b8181b6b400e82ba3e5df62f66ad6f195342c657a9a9ac030
-  scene-render-1.1.sch  <- schema/scene-render.sch  sha256 bd1d5b4af24823f32545e0474bf47511bf7c5d80bc5adf030d1e5b19c950258e
+  scene-render-1.1.xsd  <- schema/scene-render.xsd  sha256 0975936b28417611f6a00197a87bd398d6e2336b197aaf5e634d88f335013075
+  scene-render-1.1.sch  <- schema/scene-render.sch  sha256 e84979657842c2d84550d0900c089fd607d965a06b8441318978f1bd88de7d38
 
-The files change only through an accepted SREP in sr-core (srep/, process in
-srep/srep-0000.md); a new release is vendored here by replacing both files and
-updating this record. Documents keep version="1.1".
+The files change only through an accepted SREP in sr-core (srep/, process in srep/srep-0000.md); a new release is
+vendored here by replacing both files and updating this record. (The local file names keep "1.1" for the tools that
+read them; the schema documents declare version 1.0 to 1.3.)
 
-Local additions pending in sr-core: SREPs 9 (map tiles and basemaps), 10
-(draped map ground and globes), 11 (rigid bodies on object3D) and 13
-(segments in outputs), in review, add their declarations and rules
-(R27-R29, R38-R41, C46-C48, C54-C59), scene/@version "1.2" and rule V5, and
-amend C20, C33 and R14. They are replaced by the sr-core 1.2.0 files once
-released.
+SREPs in this release: 9 to 11, 13, 15 to 21, 23, 24 and 26 to 39, 41 to 56 (schema 1.2.0); 40 (schema 1.3.0).
 
-Local cinematic implementation in progress: srep-0000-cinematic-impact.md
-introduces document version 1.3. The current patch adds bounded SRVOL/OpenVDB volume
-assets, numbered cache sequences and integrity-pinned SRVSEQ render bakes,
-explicit velocity-driven midpoint interpolation (advect and velocityGridX/Y/Z),
-object3D volume instances, medium shading with temperature emission, native pyro
-sources/impulses, scoped moving colliders and force fields, and
-native particles3D emission, appearance and rigid collider references, and
-ocean surfaces, image/mesh bathymetry, procedural swell, timed water impulses,
-bounded native foam/spray tracers, and globe elevation shared by rendering and
-rigid-body, particle and pyro colliders with explicit physical scale and DEM budgets,
-and numbered mesh-sequence rendering with explicit interpolation/missing-frame policies.
-The local rules are V8/VOL1-VOL9/PYRO1-PYRO8/P3D1-P3D6/OCN1-OCN5/GEO1-GEO3/MSQ1-MSQ4.
-The remaining proposal surface is tracked in tools/evidence/cinematic-impact.json;
-this is not an accepted upstream schema release.
+Accepted but not implemented by this engine yet (a use is reported as warning E22, which --strict counts; the table
+is crates/sr-eval/src/pending.rs, and each implementing branch deletes its own row): 16 (connectors), 17 (PDF pages
+and regions), 18 (render reports), 19 (legibility checks), 21 (pinned-font policy), 26 (repeat points). Their rules
+(C60 to C64, C66 to C80, R48 to R52, V9 to V11) are in the schema and not mirrored in rules.rs; the corpus coverage
+test lists them (PENDING_RULES in crates/sr-model/tests/corpus.rs).
 
-Local additions from the G2-lab and style-library fixes (branch engine/next, in main), each under an SREP draft in
-sr-core (srep/srep-0000-<slug>.md, at the sr-core commit named; the editor has not assigned numbers yet). Documents keep
-their version, and new attributes on 1.0 elements are accepted in every version (README):
-  - safeAreaForce (boolean) on every node and on symbol, with the enforcement it exempts (SA01) and the information
-    line SA02: srep-0000-safe-area-enforcement.md (eb16158).
-  - Rules R42 (pattern/@asset is an image), R43 (@emitterAsset is an image), R44 (displacement-map, difference-key and
-    shader @source name a composition node): srep-0000-asset-kind-rules.md (1e42bf8).
-  - Meaning given to existing attributes: halftone color (ink), paint (ground) and angle used as authored (default 0, a
-    visible change from 45); selective-color color and amount; and the gradient-map, matte-choke and halftone-edge
-    corrections: srep-0000-effect-parameter-meanings.md (c29e3f5).
-  - presetEase on textAnimator, and the counter, scramble and mask-reveal corrections: srep-0000-text-preset-ease.md
-    (4d21129).
-  - Evaluation warnings E19 (attribute accepted but not read: group/@collapse, a selective-color @channel, an effect
-    source at opacity 0) and E20 (mask outside its node): the amendment to SREP 18, srep-0000-srep18-amendment-inert-rules.md
-    (d14d384).
-  - Documentation-only edits in the xsd annotations (camera/@fov is horizontal, radial @aspect, textAnimator
-    @presetStart's time base, the colorType note on #RGB, the expression @property note, geoLayer polygon outlines):
-    srep-0000-annotation-clarifications.md (cee2b40). The annotations of the additions above travel with their drafts.
-  - key/@overshoot (back-* curves) and key/@period (elastic-* curves), with the warning for a parameter on a curve that
-    ignores it: srep-0000-key-overshoot-period.md (f3a83fb); engine commit 931422b.
-  - layer/@resample (linear, bicubic, mitchell): srep-0000-layer-resample.md (de85738).
-  - generator/@lineWidth and rule R45: srep-0000-grid-line-width.md (7dc4e1b).
-  - Stroke markers (markerStart, markerEnd, markerSize; rule C65), implemented as SREP 15 is written (Draft, srep-0015.md).
-  - geoLayer @progress traces polygon outlines as well as lines: srep-0000-geo-outline-progress.md (8f0bc2e).
-  - object3D @tracking on extruded 3D text (rule TXT2): srep-0000-text3d-tracking.md (926b015).
-  - object3D @node and @materialOverride on imported models (rule MOV1): srep-0000-model-node-material-select.md (2399e6f).
-  - material @unevenness, @unevennessScale and @unevennessSeed (a clay finish on any mesh): srep-0000-material-unevenness.md (1f65d9e).
-  - E19 for an effect attribute its type does not read (INERT-I13): the SREP 18 amendment, srep-0000-srep18-amendment-inert-rules.md (f199c27).
-  - object3D @shadowCatcher (a surface that draws only the shadow it receives): srep-0000-shadow-catcher.md (d433f8c).
-  - @materialOverride ids must name document materials (rule MOV2): the amendment in srep-0000-model-node-material-select.md (6202724).
-  - object3D @animationClipTo, @animationBlend and @animationOffsetTo (blend two clips of an imported model): srep-0000-clip-blend.md (18be05b).
-  - object3D and particles3D @parentJoint, transformConstraint @targetJoint (attach to a joint of an imported model): srep-0000-joint-sockets.md (b7aea96).
-  - E19 for key parameters the key's curve does not read, and for a default cubic-bezier key without handles: srep-0000-key-parameter-checks.md (66e5ee7).
-  - link @follow, @timeConstant and the spring parameters (a spring or exponential follower): srep-0000-link-follower.md (9a9e62b).
-  - Diagnostics gain the `info` severity: inert findings (E19, the engine's INERT rules) are reported at `info` and strict checks (`--strict`, `--deny-warnings`) count errors and warnings only, as SREP 18 resolved (18be760). E20 (a mask that misses its node, MASK-MISS) and the new E21 (default cubic-bezier handles) stay warnings because they change the result.
-  - object3D child element morph (a morph target by name; version 1.2, gated by V5): srep-0000-morph-by-name.md (ade4326).
-  - object3D child element joint (pose and aim a joint of an imported model; version 1.2, gated by V5): srep-0000-joint-pose.md (da55bb7).
-  - key/@carry (a spring segment released with the previous segment's velocity): srep-0000-spring-carry.md (1d43c06).
-  - expression built-ins penner() and propAtTime(): srep-0000-expression-penner-prop-at.md (b43bea3).
-  - motionPath/@additive (the path as an offset): srep-0000-motion-path-additive.md (1d7cff7).
-  - shapeModifier/@mode="smooth" for wiggle-path (a Catmull-Rom spline through the wiggled points): srep-0000-wiggle-path-smooth.md (266929c).
-  - expression wiggle() hold argument (on-twos and stepped wiggles): srep-0000-expression-wiggle-hold.md (c209023).
-  - strokeFont asset and shape="stroke-text" (text drawn in stroke order from single-line fonts; rules SFT1, SFT2, gated by V5): srep-0000-stroke-text.md (f7c1395).
-  - node @shutterAngle (per-node motion-blur shutter): srep-0000-node-shutter-angle.md (bb20097).
-  - A pole target and a soft reach for two-bone IK: srep-0000-ik-pole-soft-reach.md (d7b1909).
-The xsd and sch above differ from the vendored sha256 sums by these edits.
+Rule ids the engine emits keep their numbers. The grid lineWidth rule is R47 (SREP 30; R45 and R46 belong to SREP 17).
+
+The engine's differences from the canonical text are recorded in PALS-Notes/projects/sr-core-schema-1.3/work/DIFF.md.
+
+Added here, not in sr-core 1.3.0 (SREP 0 of this repository, the cinematic proposal, srep-0000-cinematic-impact.md):
+the elements blackHole and accretionDisk (blackHoleType, accretionDiskType; rules BH1 to BH8), camera/@geodesics,
+fracture/@source, fracture/@minImpulse and fracture/@energyFraction (rules FRX5 to FRX7), ocean/@density, crater/@mantle,
+crater/@bulking and crater/@repose (rules CRT10 to CRT12), and pyro/@follow, @followMargin and @followLoss (rules PYRO9 to
+PYRO11); the
+rest of the cinematic families (OCN, P3D, CRT, PYC, PYRO, VOL, FRX, MSQ, GEO) is in sr-core 1.3.0 as released. A
+release of sr-core that takes these in replaces them; until then a vendoring keeps them (the merge of
+2026-10-06 was done by component: every top-level type, group and pattern that sr-core changed since the previous
+vendoring is theirs, every one that only this repository changed is ours, and nothing was changed by both).

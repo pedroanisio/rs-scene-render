@@ -766,7 +766,7 @@ mod tests {
 
     #[test]
     fn nv12_blocks_match_piecewise_packing_byte_for_byte() {
-        let gpu = match crate::Gpu::new() {
+        let gpu = match crate::gpu::test_gpu() {
             Ok(gpu) => gpu,
             Err(error) => {
                 assert!(std::env::var("SR_REQUIRE_GPU").as_deref() != Ok("1"), "{error}");

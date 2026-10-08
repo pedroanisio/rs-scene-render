@@ -228,6 +228,9 @@ pub struct FrameNode {
     /// A crater that grows from an impact, once the impact has happened (`crater@source`).
     #[serde(skip)]
     pub crater_impact: Option<Arc<crate::crater::ImpactCrater>>,
+    /// An object of cells that can be cut, with the cuts it has had and the pieces that have come away.
+    #[serde(skip)]
+    pub voxels: Option<Arc<crate::voxel_cut::SimVoxels>>,
     /// A 3D rigid body's pose: the object's world matrix (column-major, scene space), replacing
     /// its own transform and parent.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1163,6 +1166,7 @@ fn evaluate_inner(p: &Program, t: f64, clocks: &[(u32, f64)], include_inactive: 
             sim_image: None,
             sim_volume: None,
             crater_impact: None,
+            voxels: None,
             pose3: None,
             joints: None,
             elem: node.elem.clone(),

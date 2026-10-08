@@ -15,6 +15,39 @@
     "bedresponse-value.scene.xml": [
       "S06"
     ],
+    "bh1-version.scene.xml": [
+      "BH1"
+    ],
+    "bh2-two-holes.scene.xml": [
+      "BH2"
+    ],
+    "bh3-disk-target.scene.xml": [
+      "BH3"
+    ],
+    "bh4-inside-isco.scene.xml": [
+      "BH4"
+    ],
+    "bh4-outer-not-beyond-inner.scene.xml": [
+      "BH4"
+    ],
+    "bh5-geodesics-without-hole.scene.xml": [
+      "BH5"
+    ],
+    "bh6-fluid.scene.xml": [
+      "BH6"
+    ],
+    "bh6-other-object.scene.xml": [
+      "BH6"
+    ],
+    "bh6-particles.scene.xml": [
+      "BH6"
+    ],
+    "bh7-inside-photon-sphere.scene.xml": [
+      "BH7"
+    ],
+    "bh8-two-cameras.scene.xml": [
+      "BH8"
+    ],
     "c1.scene.xml": [
       "C1"
     ],
@@ -207,11 +240,54 @@
     "crt1.scene.xml": [
       "CRT1"
     ],
+    "crt10-bulking-without-source.scene.xml": [
+      "CRT10",
+      "CRT11"
+    ],
+    "crt10-mantle-without-source.scene.xml": [
+      "CRT10"
+    ],
+    "crt10-repose-without-source.scene.xml": [
+      "CRT10"
+    ],
+    "crt11-bulking-range.scene.xml": [
+      "S06"
+    ],
+    "crt11-bulking-without-mantle.scene.xml": [
+      "CRT11"
+    ],
+    "crt12-repose-range.scene.xml": [
+      "S06"
+    ],
+    "crt12-repose-with-mantle.scene.xml": [
+      "CRT12"
+    ],
+    "crt13-mantle.scene.xml": [
+      "CRT13"
+    ],
+    "crt14-curve.scene.xml": [
+      "CRT14"
+    ],
+    "crt15-no-source.scene.xml": [
+      "CRT15"
+    ],
+    "crt16-count.scene.xml": [
+      "CRT16"
+    ],
+    "crt16-no-count.scene.xml": [
+      "CRT16"
+    ],
+    "crt17-angle.scene.xml": [
+      "CRT17"
+    ],
     "crt2.scene.xml": [
       "CRT2"
     ],
     "crt3.scene.xml": [
       "CRT3"
+    ],
+    "crt4-envelope.scene.xml": [
+      "CRT4"
     ],
     "crt4.scene.xml": [
       "CRT4"
@@ -240,6 +316,24 @@
     "frx1.scene.xml": [
       "FRX1"
     ],
+    "frx10-pieces.scene.xml": [
+      "FRX10"
+    ],
+    "frx11-infinite.scene.xml": [
+      "FRX11"
+    ],
+    "frx11-no-partition.scene.xml": [
+      "FRX11"
+    ],
+    "frx11-planes.scene.xml": [
+      "FRX11"
+    ],
+    "frx11-zero-normal.scene.xml": [
+      "FRX11"
+    ],
+    "frx12-labels.scene.xml": [
+      "FRX12"
+    ],
     "frx2.scene.xml": [
       "FRX2"
     ],
@@ -249,6 +343,27 @@
     "frx4.scene.xml": [
       "FRX4",
       "W01"
+    ],
+    "frx5-source-self.scene.xml": [
+      "FRX5"
+    ],
+    "frx5-source-static.scene.xml": [
+      "FRX5"
+    ],
+    "frx6-push.scene.xml": [
+      "FRX6"
+    ],
+    "frx6-timed.scene.xml": [
+      "FRX6"
+    ],
+    "frx7-orphan.scene.xml": [
+      "FRX7"
+    ],
+    "frx8-interior.scene.xml": [
+      "FRX8"
+    ],
+    "frx9-partition.scene.xml": [
+      "FRX9"
     ],
     "geo1.scene.xml": [
       "GEO1"
@@ -278,6 +393,9 @@
     "msq4.scene.xml": [
       "MSQ4"
     ],
+    "ocean-density-zero.scene.xml": [
+      "S06"
+    ],
     "ocean-order.scene.xml": [
       "S06"
     ],
@@ -298,6 +416,9 @@
     ],
     "ocn13-splash.scene.xml": [
       "OCN13"
+    ],
+    "ocn14-foam-radius.scene.xml": [
+      "OCN14"
     ],
     "ocn2.scene.xml": [
       "OCN2"
@@ -381,7 +502,16 @@
     "pyc4-authored.scene.xml": [
       "PYC4"
     ],
+    "pyc5-closed.scene.xml": [
+      "PYC5"
+    ],
+    "pyc6-outside.scene.xml": [
+      "PYC6"
+    ],
     "pyro-advection.scene.xml": [
+      "S06"
+    ],
+    "pyro-blast-gamma.scene.xml": [
       "S06"
     ],
     "pyro-solver.scene.xml": [
@@ -389,6 +519,12 @@
     ],
     "pyro1.scene.xml": [
       "PYRO1"
+    ],
+    "pyro10-orphan.scene.xml": [
+      "PYRO10"
+    ],
+    "pyro11-margin.scene.xml": [
+      "PYRO11"
     ],
     "pyro2.scene.xml": [
       "PYRO2"
@@ -410,6 +546,9 @@
     ],
     "pyro8.scene.xml": [
       "PYRO8"
+    ],
+    "pyro9-closed.scene.xml": [
+      "PYRO9"
     ],
     "r1.scene.xml": [
       "R1"
@@ -645,8 +784,8 @@
     "r44.scene.xml": [
       "R44"
     ],
-    "r45.scene.xml": [
-      "R45"
+    "r47.scene.xml": [
+      "R47"
     ],
     "r5.scene.xml": [
       "R5"
@@ -816,17 +955,102 @@
     "vol9.scene.xml": [
       "VOL9"
     ],
+    "vox1-version.scene.xml": [
+      "VOX1"
+    ],
+    "vox10-mass.scene.xml": [
+      "VOX10"
+    ],
+    "vox10-no-density.scene.xml": [
+      "VOX10"
+    ],
+    "vox11-slots.scene.xml": [
+      "VOX11"
+    ],
+    "vox12-anchor.scene.xml": [
+      "VOX12"
+    ],
+    "vox13-scale.scene.xml": [
+      "VOX13"
+    ],
+    "vox14-both.scene.xml": [
+      "VOX14"
+    ],
+    "vox15-fracture-box.scene.xml": [
+      "VOX15"
+    ],
+    "vox15-mesh-collider.scene.xml": [
+      "VOX15"
+    ],
+    "vox2-both-sources.scene.xml": [
+      "VOX2"
+    ],
+    "vox2-cellsize-with-src.scene.xml": [
+      "VOX2"
+    ],
+    "vox2-grid-of-vox.scene.xml": [
+      "VOX2"
+    ],
+    "vox2-model-of-mesh.scene.xml": [
+      "VOX2"
+    ],
+    "vox2-model-of-srvol.scene.xml": [
+      "VOX2"
+    ],
+    "vox2-no-source.scene.xml": [
+      "VOX2"
+    ],
+    "vox3-frommesh.scene.xml": [
+      "VOX3"
+    ],
+    "vox4-asset.scene.xml": [
+      "VOX4"
+    ],
+    "vox4-no-asset.scene.xml": [
+      "VOX4"
+    ],
+    "vox5-orphan.scene.xml": [
+      "VOX5"
+    ],
+    "vox6-palette.scene.xml": [
+      "VOX6"
+    ],
+    "vox7-exclusion.scene.xml": [
+      "VOX7"
+    ],
+    "vox8-shape.scene.xml": [
+      "VOX8"
+    ],
+    "vox9-density.scene.xml": [
+      "VOX9"
+    ],
     "whitewater-checkpoint-range.scene.xml": [
+      "S06"
+    ],
+    "whitewater-foam-albedo-range.scene.xml": [
+      "S06"
+    ],
+    "whitewater-foam-mode.scene.xml": [
       "S06"
     ]
   },
   "valid": {
     "advected-volume.scene.xml": [],
     "baked-volume.scene.xml": [],
+    "black-hole-disk-at-isco.scene.xml": [],
+    "black-hole-without-disk.scene.xml": [],
+    "black-hole.scene.xml": [],
     "crater-capture.scene.xml": [],
+    "crater-impact-influence-large.scene.xml": [],
+    "crater-impact-influence-small.scene.xml": [],
     "crater-impact.scene.xml": [],
+    "crater-mantle-bulking.scene.xml": [],
+    "crater-mantle.scene.xml": [],
+    "crater-repose.scene.xml": [],
     "crater.scene.xml": [],
     "ejecta-crater.scene.xml": [],
+    "fracture-contact-tuned.scene.xml": [],
+    "fracture-contact.scene.xml": [],
     "fracture.scene.xml": [],
     "globe-relief.scene.xml": [],
     "joint.scene.xml": [],
@@ -837,6 +1061,7 @@
     "morph.scene.xml": [],
     "ocean-buoyancy.scene.xml": [],
     "ocean-colliders.scene.xml": [],
+    "ocean-density.scene.xml": [],
     "ocean-depth-filtered-drag.scene.xml": [],
     "ocean-entry.scene.xml": [],
     "ocean-full.scene.xml": [],
@@ -849,9 +1074,13 @@
     "particles3d-gas.scene.xml": [],
     "particles3d.scene.xml": [],
     "physics-internal-edges.scene.xml": [],
+    "pyro-blast-gas.scene.xml": [],
+    "pyro-blast.scene.xml": [],
     "pyro-colliders.scene.xml": [],
+    "pyro-crater-push.scene.xml": [],
     "pyro-crater.scene.xml": [],
     "pyro-fields.scene.xml": [],
+    "pyro-follow.scene.xml": [],
     "pyro-maccormack.scene.xml": [],
     "pyro-mesh.scene.xml": [],
     "pyro-multigrid.scene.xml": [],
@@ -864,7 +1093,19 @@
     "volume-light-grid.scene.xml": [],
     "volume-sequence.scene.xml": [],
     "volume.scene.xml": [],
-    "whitewater-checkpoint.scene.xml": []
+    "voxel-body.scene.xml": [],
+    "voxel-crater-signed-scale.scene.xml": [],
+    "voxel-crater.scene.xml": [],
+    "voxel-ejecta.scene.xml": [],
+    "voxel-fracture-labels.scene.xml": [],
+    "voxel-fracture-planes.scene.xml": [],
+    "voxel-fracture.scene.xml": [],
+    "voxels-from-mesh.scene.xml": [],
+    "voxels-srvol-format.scene.xml": [],
+    "voxels-srvol.scene.xml": [],
+    "voxels.scene.xml": [],
+    "whitewater-checkpoint.scene.xml": [],
+    "whitewater-foam-albedo.scene.xml": []
   },
   "warnings": {
     "a03-remote.scene.xml": [
@@ -878,6 +1119,24 @@
     ],
     "w02-open-face.scene.xml": [
       "W02"
+    ],
+    "w03-no-lens.scene.xml": [
+      "W03"
+    ],
+    "w04-denoise.scene.xml": [
+      "W04"
+    ],
+    "w05-lights.scene.xml": [
+      "W05"
+    ],
+    "w06-foam-material.scene.xml": [
+      "W06"
+    ],
+    "w07-foam-raster.scene.xml": [
+      "W07"
+    ],
+    "w08-foam-unlit.scene.xml": [
+      "W08"
     ]
   }
 }

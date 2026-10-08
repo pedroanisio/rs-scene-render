@@ -508,6 +508,8 @@ pub struct Program {
     pub(crate) joint_sockets: std::sync::OnceLock<crate::joints::Sockets>,
     /// Stroke fonts read for `stroke-text` shapes.
     pub(crate) stroke_fonts: crate::stroke_font::Cache,
+    /// Voxel assets read, by asset key (see `voxel_asset`).
+    pub(crate) voxel_models: crate::voxel_asset::Cache,
     /// The templated main scene.
     pub scene: m::Scene,
     /// Included documents: namespace and templated scene.
@@ -575,7 +577,7 @@ pub struct Program {
 
 /// The element names the 3D pass draws. The renderer's 3D pass and the choice of GPU adapter both read this one list,
 /// so a kind added here is drawn and is also asked for an adapter that can run the pass.
-pub const THREE_D_DRAWN: &[&str] = &["object3D", "particles3D", "ocean"];
+pub const THREE_D_DRAWN: &[&str] = &["object3D", "particles3D", "ocean", "blackHole", "accretionDisk"];
 
 /// True when the 3D pass draws elements named `name` (see [`THREE_D_DRAWN`]).
 pub fn draws_in_3d(name: &str) -> bool {
@@ -1088,6 +1090,7 @@ fn template(
     walk_mut(&mut scene, &mut |e| {
         let loc = e.loc();
         ignored_attribute(e, &mut *warnings);
+        crate::pending::check(&*e, &mut *warnings);
         masks_that_miss(e, &mut *warnings);
         let mut unknown = |name: &str| {
             let root = name.split('.').next().unwrap_or(name);
@@ -1353,6 +1356,7 @@ impl Builder {
                 "layer" => attr_str(e, "asset"),
                 // Shared assets retain their namespace when objects occur in included documents.
                 "object3D" if attr_str(e, "primitive").as_deref() == Some("volume") => attr_str(e, "volume"),
+                "object3D" if attr_str(e, "primitive").as_deref() == Some("voxels") => attr_str(e, "voxels"),
                 "object3D" | "particles3D" => attr_str(e, "mesh"),
                 "ocean" => attr_str(e, "bathymetry"),
                 _ => None,
@@ -1382,6 +1386,20 @@ impl Builder {
                 }
             }
             if name == "object3D" {
+                // a voxel asset cut from a mesh reads that mesh asset, which is therefore an asset of the program too
+                if let Some(v) = attr_str(e, "voxels") {
+                    let from_mesh = self.doc(ctx.doc).scene.assets.as_ref().and_then(|a| {
+                        a.children.iter().find_map(|c| match c {
+                            m::AssetsChild::VoxelAsset(x) if x.id == v => x.from_mesh.clone(),
+                            _ => None,
+                        })
+                    });
+                    if let Some(r) = from_mesh {
+                        let ns = &self.doc(ctx.doc).ns;
+                        let key: Arc<str> = if ns.is_empty() { r.as_str().into() } else { format!("{ns}/{r}").into() };
+                        self.assets.insert(key, (ctx.doc, r));
+                    }
+                }
                 if let Some(r) = attr_str(e, "terrain") {
                     let ns = &self.doc(ctx.doc).ns;
                     let key: Arc<str> = if ns.is_empty() { r.as_str().into() } else { format!("{ns}/{r}").into() };
@@ -1522,7 +1540,8 @@ impl Builder {
             _ => None,
         };
         let shape_size = match n {
-            Node::Shape(s) => Some([s.width, s.height]),
+            // width and height are optional since SREP 17 (a region shape takes them from the page)
+            Node::Shape(s) => s.width.zip(s.height).map(|(w, h)| [w, h]),
             _ => None,
         };
         let (mut asset_size, mut asset_kind, mut fit) = (None, None, None);
@@ -3199,6 +3218,7 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
         joint_models: Default::default(),
         joint_sockets: Default::default(),
         stroke_fonts: Default::default(),
+        voxel_models: Default::default(),
         base_dirs,
         safe_area,
         safe_enforce,
@@ -3294,15 +3314,6 @@ fn ignored_attribute(e: &dyn Element, warnings: &mut Vec<Diagnostic>) {
             "<group> @collapse",
             "no effect in this build (non-isolated groups already share the frame's camera space)",
         ),
-        "effect" | "effectType"
-            if e.get_attr("type").map(|t| t.to_string()).as_deref() == Some("selective-color")
-                && e.get_attr("channel").map(|c| c.to_string()).is_some_and(|c| c != "rgb") =>
-        {
-            note(
-                "selective-color @channel",
-                "no effect: the effect reads hue, tolerance, saturation, brightness, color and amount",
-            )
-        }
         _ => {}
     }
 }

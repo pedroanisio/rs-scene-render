@@ -29,16 +29,19 @@ pub mod light;
 pub mod material;
 pub mod mtlx;
 mod mtlx_graph;
+pub mod occupancy;
+pub mod pieces;
 
 pub mod prim;
 pub mod sampling;
 pub mod sequence;
 pub mod terrain;
 pub mod usdc;
+pub mod voxel;
 
 use glam::{Mat4, Quat, Vec3};
 
-pub use material::{AlphaMode, MaterialParams};
+pub use material::{AlphaMode, FoamMix, MaterialParams};
 
 /// Y-up, metre-based assets (glTF, OBJ, PLY, FBX, USD after unit conversion)
 /// to scene space: a 180° turn about x, 100 scene units per metre.

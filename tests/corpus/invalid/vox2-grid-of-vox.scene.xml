@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- expect: VOX2 -->
+<scene version="1.3"><project width="32" height="32" fps="30" duration="1"/><assets><voxelAsset id="model" src="../media/voxels.vox" voxelGrid="voxels" maxCells="100000"/><mesh id="shape" src="../media/robot.glb"/></assets><materials><material id="stone" baseColor="#808080"/><material id="moss" baseColor="#406040"/></materials><composition><object3D id="build" primitive="voxels" voxels="model" cellSize="2" palette="stone moss" surface="blocks"/></composition></scene>

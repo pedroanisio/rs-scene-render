@@ -2,16 +2,18 @@
 """Checks that the tracked tree carries only releasable material.
 
 usage: tools/check_release_hygiene.py --all             every tracked file
-       tools/check_release_hygiene.py --staged          files staged for commit
+       tools/check_release_hygiene.py --staged          files staged for commit, as they are staged
        tools/check_release_hygiene.py --dir PATH        an unpacked release archive or crate package
        tools/check_release_hygiene.py --commit-msg FILE a commit message
 
 Rule A rejects files that are working material (agent instructions, plans, notes, logs).
 Rule B rejects text that refers to private locations, delivery phases, documents that are not
-shipped, or the development session. Rule D lists past-tense phrases for a human to judge.
+shipped, or the development session. Rule D lists past-tense phrases for a human to judge. Rule L
+rejects an acceptance ledger that is not whole (a repeated key, a milestone with a field missing, two with one name).
 Exit status 1 when a rule A or B match remains. Legitimate exceptions go in ALLOW with a reason.
 """
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -42,14 +44,25 @@ TEXT_RULES = [
      "development-session narration"),
 ]
 
-TRIPWIRE = r"\b(used to|no longer|now (passes|works|reads)|since the [a-z -]+ work)\b"
+# "used to" as narration of what a thing did before, not "is used to" or ", used to" (a use); "no longer" as narration, not
+# "records that no longer change" or "a solver that is no longer deterministic" (a property)
+TRIPWIRE = (
+    r"(?<!\bis )(?<!\bare )(?<!\bwas )(?<!\bwere )(?<!\bbe )(?<!\bbeen )(?<!\bbeing )(?<!\bget )(?<!\bgets )(?<!, )(?<!,)"
+    r"\bused to\b"
+    r"|(?<!\bthat )(?<!\bwhich )(?<!\bthat is )(?<!\bwhich is )(?<!\bthat are )(?<!\bcan )(?<!\bmay )(?<!\bmust )"
+    r"\bno longer\b"
+    r"|\bnow (passes|works|reads)\b|\bsince the [a-z -]+ work\b"
+)
 
-COMMIT_RULES = [("C1", r"\b(Phase|Batch|item) [0-9]+\b|\bWIP\b", "delivery-phase label or WIP in the subject")]
+COMMIT_RULES = [
+    ("C1", r"(?i)\b(phase|batch|item)[ -]?[0-9]+|\bphase-?[0-9]|\bWIP\b", "delivery-phase label or WIP in the subject")
+]
 
 # (path prefix, rule) -> reason. Keep entries narrow.
 ALLOW = {}
 
-SKIP = ("Cargo.lock", "tests/corpus/", "tools/check_release_hygiene.py")
+SKIP = ("Cargo.lock", "tests/corpus/", "tools/check_release_hygiene.py",
+        "tools/tests/test_release_hygiene.py", "vendor/")
 TEXT_EXT = {".md", ".rs", ".wgsl", ".glsl", ".fs", ".py", ".toml", ".yml", ".yaml", ".xml", ".xsd", ".sch",
             ".json", ".in", ".txt", ".sh"}
 
@@ -58,17 +71,45 @@ def allowed(path, rule):
     return any(path.startswith(p) and r == rule for (p, r) in ALLOW)
 
 
-def files_from_git(staged):
+def files_from_git(staged, root):
     cmd = ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMR"] if staged else ["git", "ls-files"]
-    out = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, check=True).stdout
+    out = subprocess.run(cmd, cwd=root, capture_output=True, text=True, check=True).stdout
     return [f for f in out.splitlines() if f]
+
+
+def read_staged(root, path):
+    """The text of `path` as it is staged, or None when it is not text."""
+    out = subprocess.run(["git", "show", f":{path}"], cwd=root, capture_output=True)
+    try:
+        return out.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def comment_of(line):
+    """The text after the first `//` that is neither inside a string nor part of a URL, or an empty string."""
+    quote = False
+    i = 0
+    while i < len(line):
+        c = line[i]
+        if quote:
+            if c == "\\":
+                i += 1
+            elif c == '"':
+                quote = False
+        elif c == '"':
+            quote = True
+        elif line.startswith("//", i) and not (i > 0 and line[i - 1] == ":"):
+            return line[i + 2:]
+        i += 1
+    return ""
 
 
 def files_from_dir(d):
     return [os.path.relpath(os.path.join(r, f), d) for r, _, fs in os.walk(d) for f in fs]
 
 
-def check(paths, base):
+def check(paths, base, staged=False):
     bad = []
     warn = []
     for p in paths:
@@ -77,16 +118,22 @@ def check(paths, base):
                 bad.append(f"{p}: {rid} {why}; move it out of the repository")
         if p.startswith(SKIP) or os.path.splitext(p)[1] not in TEXT_EXT:
             continue
-        full = os.path.join(base, p)
-        if not os.path.isfile(full):
+        if staged:
+            text = read_staged(base, p)
+        else:
+            full = os.path.join(base, p)
+            if not os.path.isfile(full):
+                continue
+            try:
+                text = open(full, encoding="utf-8").read()
+            except UnicodeDecodeError:
+                continue
+        if text is None:
             continue
-        try:
-            lines = open(full, encoding="utf-8").read().splitlines()
-        except UnicodeDecodeError:
-            continue
+        lines = text.splitlines()
         for n, line in enumerate(lines, 1):
             code = os.path.splitext(p)[1] in (".rs", ".wgsl", ".glsl")
-            comment = line.split("//", 1)[1] if "//" in line else ""
+            comment = comment_of(line)
             for rid, pat, why in TEXT_RULES:
                 # decision codes look like identifiers in code (D2, D65); judge them in comments only
                 m = re.search(pat, comment if code and rid == "B5" else line)
@@ -98,6 +145,49 @@ def check(paths, base):
     return bad, warn
 
 
+LEDGER = os.path.join("tools", "evidence", "cinematic-impact.json")
+LEDGER_FIELDS = ("name", "evidence", "validation", "limits")
+
+
+def _refuse_repeats(pairs):
+    seen = set()
+    for key, _ in pairs:
+        if key in seen:
+            raise ValueError(f"the key {key!r} is repeated in one object")
+        seen.add(key)
+    return dict(pairs)
+
+
+def check_ledger(base):
+    """Rule L: the acceptance ledger is whole. It is read by a parser that refuses a repeated key (a merge of two lists of milestones can leave a
+    file that loads and has lost an entry, because the second copy of a key wins); every milestone has a name, evidence, validation and limits, and
+    no two have the same name. A repository with no ledger is not asked for one."""
+    path = os.path.join(base, LEDGER)
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f, object_pairs_hook=_refuse_repeats)
+    except ValueError as e:
+        return [f"{LEDGER}: L1 the ledger does not parse whole: {e}"]
+    errors = []
+    names = {}
+    milestones = data.get("milestones", []) if isinstance(data, dict) else []
+    for n, m in enumerate(milestones, 1):
+        if not isinstance(m, dict):
+            errors.append(f"{LEDGER}: L2 milestone {n} is not an object")
+            continue
+        label = m.get("name", "(no name)")
+        for field in LEDGER_FIELDS:
+            if field not in m:
+                errors.append(f"{LEDGER}: L2 milestone {n} ({label[:60]}) has no {field}")
+        if "name" in m:
+            if m["name"] in names:
+                errors.append(f"{LEDGER}: L3 milestones {names[m['name']]} and {n} have the same name ({label[:60]})")
+            names.setdefault(m["name"], n)
+    return errors
+
+
 def main():
     ap = argparse.ArgumentParser()
     g = ap.add_mutually_exclusive_group(required=True)
@@ -105,6 +195,7 @@ def main():
     g.add_argument("--staged", action="store_true")
     g.add_argument("--dir")
     g.add_argument("--commit-msg")
+    ap.add_argument("--root", default=ROOT, help="the repository to check (default: this one)")
     a = ap.parse_args()
     if a.commit_msg:
         subject = open(a.commit_msg, encoding="utf-8").readline()
@@ -116,7 +207,8 @@ def main():
         if not any(re.match(r"LICENSE", os.path.basename(f)) for f in files_from_dir(a.dir)):
             bad.append(f"{a.dir}: E1 no LICENSE file in the package")
     else:
-        bad, warn = check(files_from_git(a.staged), ROOT)
+        bad, warn = check(files_from_git(a.staged, a.root), a.root, staged=a.staged)
+        bad += check_ledger(a.root)
     for w in warn:
         print("warning:", w)
     for b in bad:

@@ -10,6 +10,7 @@ use std::{collections::HashMap, sync::Arc};
 mod bathymetry;
 mod cavity;
 mod colliders;
+mod foam;
 mod surface;
 mod whitewater;
 
@@ -29,13 +30,18 @@ struct Runtime {
     waves: Vec<sim::waves::Wave>,
     whitewater: Option<sim::whitewater::Whitewater>,
     surface_bytes: usize,
+    /// The radius of the coverage that foam tracers give the surface, and the most distances it may take a frame (the whitewater's
+    /// `maxWork`), when whitewater foam is mixed into the water's albedo (`foamMode="albedo"`) instead of drawn as triangles.
+    foam_coverage: Option<(f64, u64)>,
+    /// The whitewater is in `foamMode="albedo"`: its foam is not drawn as triangles whether or not the coverage is made.
+    foam_albedo: bool,
     last: Option<Arc<SimOcean>>,
     /// Craters that move the bed; `None` keeps the bed fixed at its bathymetry.
     colliders: Option<colliders::Colliders>,
     /// Cavities of bodies that enter the water.
     entries: Vec<cavity::Entry>,
-    /// Whether particle emitters fall into this ocean (`splash`): its canonical steps read what they bring.
-    splash: bool,
+    /// How many particle emitters fall into this ocean (`splash`): its canonical steps read what they bring.
+    splash: usize,
 }
 /// Brings what the ocean named (first) needs of other solvers up to the ocean's canonical step (second): computes the
 /// particles that fall into it as far as that step needs, which they cannot do before the ocean has got to the step
@@ -47,9 +53,42 @@ pub(crate) type Pull<'a> =
 pub(crate) struct Sims {
     runtimes: HashMap<Arc<str>, Result<Runtime, String>>,
 }
+/// What an ocean says about its water, read once for the solver it builds and for the group it forms with bodies.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct WaterAttrs {
+    /// Metres per second squared.
+    pub(crate) gravity: f64,
+    /// The coefficient of form drag of the bodies in it.
+    pub(crate) body_drag: f64,
+    /// The rest level of its surface in its own axes.
+    pub(crate) level: f64,
+    /// Its density, kilograms per cubic metre: 1000 when the document gives none, as the schema's default.
+    pub(crate) density: f64,
+}
+
+impl WaterAttrs {
+    pub(crate) fn of(e: &dyn sr_model::element::Element) -> WaterAttrs {
+        WaterAttrs {
+            gravity: num(e, "gravity", 9.81),
+            body_drag: num(e, "bodyDrag", 1.0),
+            level: num(e, "waterLevel", 0.0),
+            density: num(e, "density", 1000.0),
+        }
+    }
+}
+
+/// Whether a camera of the composition path-traces: what draws the foam of `foamMode="albedo"`.
+fn any_path_traced_camera(node: &dyn sr_model::element::Element) -> bool {
+    children(node).into_iter().any(|c| {
+        (c.element_name() == "camera" && text(c, "renderer").as_deref() == Some("pathtrace"))
+            || any_path_traced_camera(c)
+    })
+}
+
 fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
     let sr_model::model::Node::Ocean(e) = &*n.elem else { unreachable!("ocean node") };
     let f = |k, d| num(e, k, d);
+    let water = WaterAttrs::of(e);
     let bytes = |k, d| (f(k, d) as usize).checked_mul(1 << 20).ok_or("ocean memory overflow".to_string());
     let width = f("width", 64.);
     let depth = f("depth", 64.);
@@ -60,7 +99,7 @@ fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
         origin: [-width / 2., -depth / 2.],
         cell_size: dx,
         dt: f("dt", 1. / 60.),
-        gravity: f("gravity", 9.81),
+        gravity: water.gravity,
         damping: f("damping", 0.),
         dry_tolerance: f("dryTolerance", 1e-10),
         boundary: match text(e, "boundary").as_deref() {
@@ -81,12 +120,11 @@ fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
     if count == 0 || count > 4_000_000 || count.saturating_mul(256).saturating_add(4096) > spec.max_bytes {
         return Err("ocean grid exceeds memory or cell budget".into());
     }
-    let bed =
-        bathymetry::load(p, n, &spec, f("waterLevel", 0.) + f("bottomDepth", 10.), bytes("meshMemoryMiB", 128.)?)?;
+    let bed = bathymetry::load(p, n, &spec, water.level + f("bottomDepth", 10.), bytes("meshMemoryMiB", 128.)?)?;
     let cells = bed
         .iter()
         .map(|b| {
-            let depth = (b - f("waterLevel", 0.)).max(0.);
+            let depth = (b - water.level).max(0.);
             Cell {
                 depth,
                 velocity: if depth > 0. { [f("initialVelocityX", 0.), f("initialVelocityZ", 0.)] } else { [0.; 2] },
@@ -132,10 +170,10 @@ fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
             p,
             &collider_ids,
             &spec,
-            f("waterLevel", 0.),
+            water.level,
             bytes("meshMemoryMiB", 128.)?,
             text(e, "bedResponse").as_deref() != Some("hydrostatic"),
-            f("bodyDrag", 1.),
+            water.body_drag,
         )?;
         spec.moving_bed = true;
         spec.bodies = built.has_bodies();
@@ -143,9 +181,9 @@ fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
         spec.body_push = built.pushes();
         Some(built)
     };
-    let entries = cavity::read(e, &collider_ids)?;
-    let splash = text(e, "splash").is_some();
-    if splash {
+    let entries = cavity::read(e, &collider_ids, water.density)?;
+    let splash = text(e, "splash").map_or(0, |l| l.split_whitespace().count());
+    if splash > 0 {
         // the driver gives what the particles bring at the sample that closes each canonical step
         spec.moving_bed = true;
     }
@@ -178,12 +216,33 @@ fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
             sim::whitewater::Whitewater::new(spec.clone(), bed.clone(), cfg).map_err(|e| e.to_string())
         })
         .transpose()?;
+    let albedo = e.children.iter().find_map(|c| match c {
+        sr_model::model::OceanChild::Whitewater(w) if text(w, "foamMode").as_deref() == Some("albedo") => {
+            Some((num(w, "foamRadius", spec.cell_size), num(w, "maxWork", 100_000_000.) as u64))
+        }
+        _ => None,
+    });
+    // the coverage is made only where it will be drawn: a water the renderer refuses for the foam (not opaque, unlit, shining) or a scene with
+    // no path-traced camera get the specific error of the renderer and not a failure of the budget of a coverage nobody reads
+    let material = text(e, "material").and_then(|id| p.scene.materials.as_ref()?.materials.iter().find(|m| m.id == id));
+    let takes_foam = material.is_none_or(|m| {
+        sr_model::foam::water_takes_foam(
+            text(m, "alphaMode").as_deref(),
+            text(m, "unlit").as_deref(),
+            text(m, "emissive").as_deref(),
+            text(m, "emissiveStrength").as_deref(),
+        )
+    });
+    let foam_coverage = albedo.filter(|_| takes_foam && any_path_traced_camera(&p.scene.composition));
+    let foam_albedo = albedo.is_some();
     Ok(Runtime {
         solver,
         spec,
         bed,
         waves,
         whitewater,
+        foam_coverage,
+        foam_albedo,
         surface_bytes: bytes("surfaceMemoryMiB", 128.)?,
         last: None,
         colliders,
@@ -257,6 +316,8 @@ impl Sims {
                     bed,
                     waves,
                     whitewater,
+                    foam_coverage,
+                    foam_albedo,
                     surface_bytes,
                     last,
                     colliders,
@@ -273,12 +334,6 @@ impl Sims {
                 let channel = group.as_ref().and_then(|group| group.channel(&id));
                 let mut bed_driver = |time: f64, forcing: &mut sim::Forcing| -> Result<(), sim::Error> {
                     // a step's outcome is written before anything reads the bodies it loads
-                    if let (Some(group), Some(channel), Some((step, momentum))) = (&group, channel, forcing.exchange) {
-                        group.record(channel, step, crate::group::Exchange { momentum }).map_err(|message| {
-                            *failure.borrow_mut() = Some(message);
-                            sim::Error::Invalid("ocean exchange diverged")
-                        })?;
-                    }
                     if let (Some(group), Some(channel), Some((step, _))) = (&group, channel, forcing.exchange) {
                         let around: Vec<crate::group::Around> = forcing.bodies.iter().map(Into::into).collect();
                         group.record_around(channel, step, &around).map_err(|message| {
@@ -291,13 +346,22 @@ impl Sims {
                         tests::OFFERS.with(|o| o.borrow_mut().push((step, momentum, forcing.bodies.clone())));
                     }
                     // what the particles that fell into the ocean bring, at the sample that closes the step
-                    if let (true, Some((step, _))) = (*takes, forcing.exchange) {
+                    if let (true, Some((step, _))) = (*takes > 0, forcing.exchange) {
                         let read = match splash.read(&id, step) {
-                            Ok(read) if splash.knows(&id) => Ok(read),
+                            Ok(read) if splash.knows(&id, *takes) => Ok(read),
                             // the particles are not there yet: they are made known and computed to it now, which
                             // asks the rigid world for what the water has already given
-                            _ => pull(&*g, graphs, physics.as_deref_mut(), &id, step)
-                                .and_then(|()| splash.read(&id, step)),
+                            _ => pull(&*g, graphs, physics.as_deref_mut(), &id, step).and_then(|()| {
+                                if splash.knows(&id, *takes) {
+                                    splash.read(&id, step)
+                                } else {
+                                    // an empty read here would be nobody saying anything, not nothing falling
+                                    Err(format!(
+                                        "ocean {id} takes the splash of {} emitters and not all are known to it",
+                                        takes
+                                    ))
+                                }
+                            }),
                         }
                         .map_err(|message| {
                             *failure.borrow_mut() = Some(message);
@@ -366,7 +430,7 @@ impl Sims {
                 let base = frame_at(solver, local_time, driver).map_err(reported)?;
                 let frame = sim::waves::apply(spec, base, waves).map_err(|e| e.to_string())?;
                 let bed_now: &[f64] = if frame.bed.is_empty() { bed } else { &frame.bed };
-                let mesh = surface::mesh(spec, bed_now, &frame, *surface_bytes)?;
+                let mut mesh = surface::mesh(spec, bed_now, &frame, *surface_bytes)?;
                 let mut key = frame_key(&frame, mesh.indices.len());
                 let whitewater_mesh = if let Some(foam) = &foam {
                     let available = surface_bytes.saturating_sub(surface::memory_cost(spec)?);
@@ -380,7 +444,18 @@ impl Sims {
                             p.kind as u64,
                         ]);
                     }
-                    whitewater::meshes(foam, available)?
+                    if let Some((radius, max_work)) = *foam_coverage {
+                        // the foam is the surface's own: its coverage rides in the alpha of the vertex colour. While it is made the
+                        // surface holds the arrays of the coverage too, which count in its budget
+                        let left = surface_bytes.saturating_sub(surface::memory_cost(spec)?);
+                        let coverage =
+                            foam::coverage_within(&mesh.vertices, &foam.particles, foam.time, radius, max_work, left)?;
+                        for (vertex, share) in mesh.vertices.iter_mut().zip(coverage) {
+                            vertex.color[3] = share;
+                        }
+                        key = crate::rng::hash(&[key, radius.to_bits(), foam.time.to_bits()]);
+                    }
+                    whitewater::meshes(foam, available, !*foam_albedo)?
                 } else {
                     Default::default()
                 };
@@ -688,5 +763,129 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The ball of the coupled-ocean tests in a closed basin, with a smoke that reads the rigid world in steps of 0.2 s.
+    fn with_smoke(order: &str) -> String {
+        format!(
+            r##"<scene version="1.3"><project width="64" height="64" fps="20" duration="4"/><composition>
+              <object3D id="ball" primitive="sphere" radius="2" segments="24" x="-10" y="0" z="1">
+                <rigidBody shape="sphere" mass="16755.16" velocityX="3" linearDamping="0" angularDamping="0"/>
+              </object3D>
+              <object3D id="cloud" primitive="volume"><pyro width="8" height="8" depth="8" voxelSize="2" dt="0.2" colliders="ball"><pyroSource radius="2" densityRate="1"/></pyro></object3D>
+              <ocean id="sea" bedResponse="hydrostatic" order="{order}" width="160" depth="160" cellSize="2" bottomDepth="10" dt="0.016666666666666666" boundary="closed" colliders="ball" bodyCoupling="full"/>
+            </composition>
+            <physics gravityY="-9.80665" pixelsPerMeter="1" fixedStep="0.008333333333333333" bounds="none"/></scene>"##
+        )
+    }
+
+    /// The canonical steps the ocean computed for each of the frames 0 to 30 at 20 a second, in the scene whose smoke
+    /// reads the rigid world a fifth of a second past each frame, and what the ocean of each frame looked like.
+    fn steps_per_frame(order: &str) -> (Vec<usize>, Vec<Vec<sim::Cell>>, f64) {
+        let doc = sr_model::load_str(&with_smoke(order), &sr_model::LoadOptions::without_assets()).unwrap();
+        let ev = crate::Evaluator::new(&doc, &Default::default()).unwrap();
+        OFFERS.with(|o| o.borrow_mut().clear());
+        let (mut seen, mut steps, mut seas) = (0, Vec::new(), Vec::new());
+        let started = std::time::Instant::now();
+        for k in 0..=30 {
+            let frame = ev.evaluate(k as f64 * 0.05);
+            assert!(
+                frame.problems.is_empty() && frame.failures.is_empty(),
+                "{:?} {:?}",
+                frame.problems,
+                frame.failures
+            );
+            let now = OFFERS.with(|o| o.borrow().len());
+            steps.push(now - seen);
+            seen = now;
+            seas.push(
+                frame.nodes.iter().find(|n| &*n.id == "sea").unwrap().sim_ocean.as_ref().unwrap().frame.cells.clone(),
+            );
+        }
+        (steps, seas, started.elapsed().as_secs_f64())
+    }
+
+    #[test]
+    fn an_ocean_that_is_stepped_ahead_for_a_reader_does_not_start_again_for_the_next_frame() {
+        for order in ["1", "2"] {
+            let (steps, seas, seconds) = steps_per_frame(order);
+            println!("STEPS order {order}: {steps:?}, {seconds:.3} s");
+            // a frame is three canonical steps on, and the smoke asks for twelve more past it: after the first
+            // frame no frame computes more than the three that are new, and the offer at which it starts again
+            assert!(steps.iter().skip(1).all(|&s| s <= 4), "order {order}: {steps:?}");
+            // and what it shows is what an evaluator that was never stepped ahead computes from the start
+            for k in [7usize, 19, 30] {
+                let doc = sr_model::load_str(&with_smoke(order), &sr_model::LoadOptions::without_assets()).unwrap();
+                let fresh = crate::Evaluator::new(&doc, &Default::default()).unwrap();
+                let frame = fresh.evaluate(k as f64 * 0.05);
+                let cells =
+                    &frame.nodes.iter().find(|n| &*n.id == "sea").unwrap().sim_ocean.as_ref().unwrap().frame.cells;
+                let bits = |c: &[sim::Cell]| {
+                    c.iter().flat_map(|c| [c.depth, c.velocity[0], c.velocity[1]]).map(f64::to_bits).collect::<Vec<_>>()
+                };
+                assert_eq!(bits(cells), bits(&seas[k]), "order {order}, frame {k}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_water_attributes_of_an_ocean_are_read_once_with_their_defaults() {
+        let xml = |attrs: &str| {
+            format!(
+                r#"<scene version="1.3"><project width="64" height="64" fps="24" duration="1"/><composition><object3D id="b" primitive="sphere" radius="1"/><ocean id="sea" {attrs}/></composition></scene>"#
+            )
+        };
+        let read = |attrs: &str| {
+            let doc = sr_model::load_str(&xml(attrs), &sr_model::LoadOptions::without_assets()).unwrap();
+            let p = crate::program::build(&doc, &Default::default()).unwrap();
+            let sea = p.nodes.iter().find(|n| &*n.id == "sea").unwrap();
+            let sr_model::model::Node::Ocean(e) = &*sea.elem else { unreachable!() };
+            super::WaterAttrs::of(e)
+        };
+        let plain = read("");
+        assert_eq!((plain.gravity, plain.body_drag, plain.level, plain.density), (9.81, 1.0, 0.0, 1000.0));
+        let set = read(r#"colliders="b" gravity="3.7" bodyDrag="0.4" waterLevel="-2" density="1030""#);
+        assert_eq!((set.gravity, set.body_drag, set.level, set.density), (3.7, 0.4, -2.0, 1030.0));
+    }
+
+    #[test]
+    fn a_node_on_the_composition_clock_says_so_and_one_in_a_group_that_scales_time_does_not() {
+        let xml = r#"<scene version="1.3"><project width="64" height="64" fps="24" duration="3"/><composition>
+            <ocean id="plain" start="0.5" width="8" depth="8" cellSize="1"/>
+            <group id="slow" start="0.25" timeScale="2"><ocean id="scaled" width="8" depth="8" cellSize="1"/></group>
+        </composition></scene>"#;
+        let doc = sr_model::load_str(xml, &sr_model::LoadOptions::without_assets()).unwrap();
+        let p = crate::program::build(&doc, &Default::default()).unwrap();
+        let on = |id: &str| {
+            let i = p.nodes.iter().position(|n| &*n.id == id).unwrap() as u32;
+            crate::sim::composition_clock(&p, i, p.nodes[i as usize].start)
+        };
+        assert!(on("plain"));
+        assert!(!on("scaled"));
+    }
+
+    #[test]
+    fn the_clock_of_a_node_in_groups_is_found_as_one_stretch_of_time() {
+        use crate::sim::{uniform_clock, Uniform};
+        let xml = r#"<scene version="1.3"><project width="64" height="64" fps="24" duration="3"/><composition>
+            <ocean id="plain" width="8" depth="8" cellSize="1"/>
+            <group id="slow" timeScale="0.5"><ocean id="half" width="8" depth="8" cellSize="1"/>
+              <group id="late" timeOffset="1" timeScale="4"><ocean id="nested" width="8" depth="8" cellSize="1"/></group>
+            </group>
+            <group id="shifted" timeOffset="2"><ocean id="behind" width="8" depth="8" cellSize="1"/></group>
+        </composition></scene>"#;
+        let doc = sr_model::load_str(xml, &sr_model::LoadOptions::without_assets()).unwrap();
+        let p = crate::program::build(&doc, &Default::default()).unwrap();
+        let clock = |id: &str| uniform_clock(&p, p.nodes.iter().position(|n| &*n.id == id).unwrap() as u32);
+        assert_eq!(clock("plain"), Some(Uniform::COMPOSITION));
+        assert_eq!(clock("half"), Some(Uniform { scale: 0.5, offset: 0.0 }));
+        // the inner group takes the half-speed time of the outer, one second behind it and four times faster
+        let nested = clock("nested").unwrap();
+        for t in [0.0, 1.0, 7.5] {
+            let outer = 0.5 * t;
+            assert_eq!(nested.group_time(t), (outer - 1.0) * 4.0, "t = {t}");
+        }
+        let behind = clock("behind").unwrap();
+        assert_eq!((behind.group_time(3.0), behind.composition_time(0.5)), (1.0, 2.5));
     }
 }

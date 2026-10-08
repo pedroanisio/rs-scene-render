@@ -9,6 +9,7 @@ runs:
     - uses: Swatinem/rust-cache@v2
       with:
         cache-on-failure: 'true'
+        cache-workspace-crates: 'true'
     - uses: ./.github/actions/runtime
       with:
         evidence: 'true'

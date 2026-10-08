@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<scene version="1.2">
+<project width="640" height="360" fps="24" duration="1" background="#000000FF"/>
+<output id="still" path="out/frame_%04d.png" codec="png-sequence"/>
+<composition>
+<repeat id="r" x="320" y="180">
+<points type="grid" columns="3" rows="2"/>
+<shape id="s" shape="rect" width="40" height="40" anchorX="20" anchorY="20" fill="#FF0000FF"/>
+</repeat>
+</composition>
+</scene>

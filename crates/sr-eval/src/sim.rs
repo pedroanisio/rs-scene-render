@@ -718,7 +718,7 @@ fn build_physics(
             }
         }
     }
-    let g3 = crate::eval::evaluate_for_physics(p, start);
+    let g3 = crate::eval::evaluate_for_physics(p, world_start(p));
     let ids3 = crate::sim3d::body_ids(&g3);
     let fracture_counts: Vec<_> = g3
         .nodes
@@ -810,7 +810,14 @@ fn build_physics(
     let mut traced = None;
     let mut stale = false;
     let mut plan = crate::sim3d::Plan3::Simulate { record: keep.contacts, digest: keep.identity };
-    if let Some(uri) = ph.and_then(|p| p.cache.as_deref()) {
+    let of_cells = crate::sim3d::has_bodies_of_cells(&g3);
+    if of_cells && ph.is_some_and(|p| p.cache.is_some()) {
+        failures.push(format!(
+            "physics@cache: {}: remove physics@cache from this document",
+            crate::sim3d::NO_CACHE_OF_CELLS
+        ));
+    }
+    if let Some(uri) = ph.and_then(|p| p.cache.as_deref()).filter(|_| !of_cells) {
         let base = p.base_dirs.first().cloned().unwrap_or_default();
         if let sr_model::assets::Resolved::Local(path) = sr_model::assets::resolve(uri, &base) {
             if path.is_file() {
@@ -1489,6 +1496,93 @@ fn build_emitter(p: &Program, n: &crate::eval::FrameNode, problems: &mut Vec<Str
     }
 }
 
+/// Whether node `n`, whose local time zero is `start` on the composition clock, runs on that clock: its time is the
+/// composition's less `start`, with no remapping.
+pub(crate) fn composition_clock(p: &Program, n: u32, start: f64) -> bool {
+    [0.0, 1.0, 7.5].iter().all(|&x| source_sample(p, n, x + start, x + start).0 == x + start)
+}
+
+/// A clock that stretches time the same way everywhere: the time of a node's own timeline, before its start is taken
+/// off, is `scale * t + offset` of the composition's. A group's `timeScale` and `timeOffset` make one, and so do
+/// groups inside groups.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Uniform {
+    pub(crate) scale: f64,
+    pub(crate) offset: f64,
+}
+
+impl Uniform {
+    /// The composition's own clock.
+    pub(crate) const COMPOSITION: Uniform = Uniform { scale: 1.0, offset: 0.0 };
+
+    pub(crate) fn is_composition(&self) -> bool {
+        *self == Self::COMPOSITION
+    }
+
+    /// The time on this clock when the composition's is `t`.
+    pub(crate) fn group_time(self, t: f64) -> f64 {
+        if self.is_composition() {
+            t
+        } else {
+            self.scale * t + self.offset
+        }
+    }
+
+    /// The composition's time when this clock reads `t`.
+    pub(crate) fn composition_time(self, t: f64) -> f64 {
+        if self.is_composition() {
+            t
+        } else {
+            (t - self.offset) / self.scale
+        }
+    }
+}
+
+/// The clock node `n` runs on if it is one that stretches time uniformly (no remap, loop, freeze or clip rate on
+/// the way up from the node to the composition, and no scale of zero), else `None`.
+pub(crate) fn uniform_clock(p: &Program, n: u32) -> Option<Uniform> {
+    use crate::program::Clock;
+    let mut ancestors = Vec::new();
+    let mut parent = p.nodes[n as usize].parent;
+    while let Some(k) = parent {
+        ancestors.push(k);
+        parent = p.nodes[k as usize].parent;
+    }
+    // from the composition down: each container takes the time of the one above it to its children's
+    let mut clock = Uniform::COMPOSITION;
+    for &k in ancestors.iter().rev() {
+        match &p.nodes[k as usize].clock {
+            Clock::Same => {}
+            Clock::Affine { origin, offset, scale } if *scale != 0.0 && scale.is_finite() => {
+                // child = origin + (t - origin - offset) * scale
+                let shift = origin - origin * scale - offset * scale;
+                clock = Uniform { scale: clock.scale * scale, offset: clock.offset * scale + shift };
+            }
+            _ => return None,
+        }
+    }
+    Some(clock)
+}
+
+/// Steps the oceans of a frame, and pulls the particle emitters that fall into them as far as their steps need.
+#[allow(clippy::too_many_arguments)]
+fn apply_oceans(
+    ocean: &mut crate::ocean::Sims,
+    particles: &mut crate::particles3d::Sims,
+    pyro: &mut crate::pyro::Sims,
+    splash: &crate::splash::Log,
+    physics: Option<&mut PhysicsRt>,
+    p: &Program,
+    g: &mut FrameGraph,
+    graphs: &mut Graphs<'_>,
+    fields: &FieldSrc,
+) {
+    let mut pull = |g: &FrameGraph, graphs: &mut Graphs<'_>, physics: Option<&mut PhysicsRt>, name: &str, step: u64| {
+        particles.advance(p, g, graphs, fields, physics, pyro, splash, name, step)
+    };
+    ocean.apply(p, g, graphs, fields, physics, splash, &mut pull);
+}
+
 pub(crate) fn linear_emitter_clock(p: &Program, n: u32) -> bool {
     use crate::program::Clock;
     let Some(parent) = p.nodes[n as usize].parent else { return true };
@@ -1720,6 +1814,13 @@ pub fn needed(p: &Program) -> bool {
         })
 }
 
+/// The composition's time at which the document's world starts: its start, on the clock of the group it is coupled
+/// in, if there is one.
+pub(crate) fn world_start(p: &Program) -> f64 {
+    let start = p.scene.physics.as_ref().map(|p| p.start).unwrap_or(0.0);
+    crate::group::world_clock(p).composition_time(start)
+}
+
 pub(crate) fn apply_physics(
     p: &Program,
     ph: &mut PhysicsRt,
@@ -1728,9 +1829,12 @@ pub(crate) fn apply_physics(
     fields: &FieldSrc,
     t: f64,
 ) {
-    if t >= ph.start {
+    // the 3D world of a coupled group runs on the group's clock, and the 2D world on the composition's
+    let t3 = ph.group.as_ref().map_or(t, |g| g.clock().group_time(t));
+    let (run2d, run3d) = (t >= ph.start, t3 >= ph.start);
+    if run2d || run3d {
         let (frame, frame3) = if let Some(c) = &ph.cached {
-            (c.frame(t), c.frame3(t))
+            (c.frame(t), c.frame3(t3))
         } else {
             let statics = if fields.animated { Vec::new() } else { fields.at(ph.start, None) };
             let group = ph.group.clone();
@@ -1745,13 +1849,17 @@ pub(crate) fn apply_physics(
                         group: group.as_ref(),
                     };
                     let Some(world) = three.world.as_mut() else { return };
-                    let frame = world.frame_at(t, &mut drv);
-                    g.problems.extend(frame.errors.clone());
-                    frame
+                    if run3d {
+                        let frame = world.frame_at(t3, &mut drv);
+                        g.problems.extend(frame.errors.clone());
+                        frame
+                    } else {
+                        sr_sim::physics3d::Frame3::default()
+                    }
                 }
                 None => sr_sim::physics3d::Frame3::default(),
             };
-            let frame = match ph.world.as_mut() {
+            let frame = match ph.world.as_mut().filter(|_| run2d) {
                 Some(w) => {
                     let mut drv = PDriver { graphs, bodies: &ph.bodies, fields, statics };
                     w.frame_at(t, &mut drv)
@@ -1787,7 +1895,7 @@ impl Runtime {
         if !self.built {
             self.built = true;
             let fields = build_fields(p);
-            let start = p.scene.physics.as_ref().map(|p| p.start).unwrap_or(0.0);
+            let start = world_start(p);
             let g0 = if (g.time - start).abs() < 1e-12 { Arc::new(g.clone()) } else { graphs.at(start) };
             self.physics =
                 build_physics(p, &g0, &fields, &mut graphs, Keep::default(), &mut self.problems, &mut self.failures);
@@ -1817,17 +1925,17 @@ impl Runtime {
         let mut ocean_seconds = None;
         if grouped {
             let clock = std::time::Instant::now();
-            {
-                let (particles, pyro, splash) = (&mut self.particles3d, &mut self.pyro, &self.splash);
-                let mut pull = |g: &FrameGraph,
-                                graphs: &mut Graphs<'_>,
-                                physics: Option<&mut PhysicsRt>,
-                                ocean: &str,
-                                step: u64| {
-                    particles.advance(p, g, graphs, fields, physics, pyro, splash, ocean, step)
-                };
-                self.ocean.apply(p, g, &mut graphs, fields, self.physics.as_mut(), splash, &mut pull);
-            }
+            apply_oceans(
+                &mut self.ocean,
+                &mut self.particles3d,
+                &mut self.pyro,
+                &self.splash,
+                self.physics.as_mut(),
+                p,
+                g,
+                &mut graphs,
+                fields,
+            );
             ocean_seconds = Some(clock.elapsed().as_secs_f64());
         }
         // ---- physics
@@ -1867,41 +1975,34 @@ impl Runtime {
             rt.emitter.at(time, &mut drv);
             g.nodes[i].particles = Some(Arc::new(render_frame(rt, rt.emitter.store())));
         }
-        // A smoke that drags particles is simulated first, so that the particles ask it for steps it is
-        // already at and the frame's own volume is not asked for one it has gone past; documents with no
-        // gas keep the order they had.
-        let gas = p.nodes.iter().any(|n| n.name == "particles3D" && text(&*n.elem, "gas").is_some());
+        // The particles run before the smoke: one that is dragged by a smoke asks it for the steps it needs, in
+        // order, and the smoke's own frame finds the step it is at among the states the readers have kept. A smoke
+        // simulated first would be at the frame's step when the particles asked it for the steps before, and
+        // each of those would take it back to a checkpoint and simulate again.
         let mut pyro_failures = Vec::new();
-        let smoke_clock = std::time::Instant::now();
-        if gas {
-            self.pyro.apply(p, g, &mut graphs, fields, self.physics.as_mut(), &mut pyro_failures);
-        }
-        let smoke_early = smoke_clock.elapsed().as_secs_f64();
         self.particles3d.apply(p, g, &mut graphs, fields, self.physics.as_mut(), &mut self.pyro, &self.splash);
-        g.sim_seconds.particles = clock.elapsed().as_secs_f64() - smoke_early;
+        g.sim_seconds.particles = clock.elapsed().as_secs_f64();
         let clock = std::time::Instant::now();
         if ocean_seconds.is_none() {
-            {
-                let (particles, pyro, splash) = (&mut self.particles3d, &mut self.pyro, &self.splash);
-                let mut pull = |g: &FrameGraph,
-                                graphs: &mut Graphs<'_>,
-                                physics: Option<&mut PhysicsRt>,
-                                ocean: &str,
-                                step: u64| {
-                    particles.advance(p, g, graphs, fields, physics, pyro, splash, ocean, step)
-                };
-                self.ocean.apply(p, g, &mut graphs, fields, self.physics.as_mut(), splash, &mut pull);
-            }
+            apply_oceans(
+                &mut self.ocean,
+                &mut self.particles3d,
+                &mut self.pyro,
+                &self.splash,
+                self.physics.as_mut(),
+                p,
+                g,
+                &mut graphs,
+                fields,
+            );
         }
         g.sim_seconds.ocean = ocean_seconds.unwrap_or_else(|| clock.elapsed().as_secs_f64());
         // ---- flocks and grid simulations
         self.agents.apply(p, g, &mut graphs, fields, &mut self.problems);
         // everything the smoke solver reports is a failure of the solver
         let clock = std::time::Instant::now();
-        if !gas {
-            self.pyro.apply(p, g, &mut graphs, fields, self.physics.as_mut(), &mut pyro_failures);
-        }
-        g.sim_seconds.smoke = smoke_early + clock.elapsed().as_secs_f64();
+        self.pyro.apply(p, g, &mut graphs, fields, self.physics.as_mut(), &mut pyro_failures);
+        g.sim_seconds.smoke = clock.elapsed().as_secs_f64();
         for failure in pyro_failures {
             g.fail(failure);
         }
@@ -2003,6 +2104,9 @@ pub fn write_cache(p: &Program, end: f64, base: &dyn Fn(f64) -> FrameGraph) -> R
     if ph.cached.is_some() {
         return Err("already cached".into());
     }
+    if ph.three.as_ref().is_some_and(|t| t.bodies.iter().any(|b| b.cells.is_some())) {
+        return Err(format!("this document cannot be baked into a physics cache: {}", crate::sim3d::NO_CACHE_OF_CELLS));
+    }
     let hulls: Vec<crate::group::BodyHull> = ph.three.iter().flat_map(|three| three.hulls.iter().cloned()).collect();
     if crate::group::Group::detect(p, &hulls, ph.step, None)?.is_some() {
         return Err("this document cannot be baked into a physics cache: an ocean loads the bodies in it, and the loads come from the water".into());
@@ -2076,8 +2180,7 @@ pub fn physics_trace(p: &Program, base: &dyn Fn(f64) -> FrameGraph) -> Result<Ph
 fn built(p: &Program, fields: &FieldSrc, graphs: &mut Graphs<'_>, keep: Keep) -> Result<PhysicsRt, String> {
     let mut problems = Vec::new();
     let mut failures = Vec::new();
-    let start = p.scene.physics.as_ref().map(|p| p.start).unwrap_or(0.0);
-    let g0 = graphs.at(start);
+    let g0 = graphs.at(world_start(p));
     let ph = build_physics(p, &g0, fields, graphs, keep, &mut problems, &mut failures)
         .ok_or("the document has no physics bodies")?;
     problems.extend(failures);

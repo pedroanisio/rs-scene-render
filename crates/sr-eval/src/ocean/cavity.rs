@@ -6,6 +6,8 @@ use sr_sim::cratering::{self, Impact, Material, Target};
 /// A water impulse that comes from a body: found once, at the body's first entry.
 pub(super) struct Entry {
     source: Arc<str>,
+    /// The water's density, the target of the law of the cavity (1000 kg/m3, the law's own for water, by default).
+    density: f64,
     /// `None` while the body has not entered; `Some(None)` when its entry made nothing.
     found: Option<Option<Cavity>>,
 }
@@ -50,14 +52,14 @@ fn grown(s: f64) -> f64 {
 const RING_CELLS: f64 = 4.;
 
 /// The entries the ocean's `waterImpulse` children with a `source` ask for.
-pub(super) fn read(e: &sr_model::model::Ocean, colliders: &[String]) -> Result<Vec<Entry>, String> {
+pub(super) fn read(e: &sr_model::model::Ocean, colliders: &[String], density: f64) -> Result<Vec<Entry>, String> {
     let mut entries = Vec::new();
     for c in children(e).into_iter().filter(|c| c.element_name() == "waterImpulse") {
         let Some(source) = text(c, "source") else { continue };
         if !colliders.contains(&source) {
             return Err(format!("water impulse source {source} is not in the ocean's colliders"));
         }
-        entries.push(Entry { source: source.as_str().into(), found: None });
+        entries.push(Entry { source: source.as_str().into(), density, found: None });
     }
     Ok(entries)
 }
@@ -80,7 +82,7 @@ impl Entry {
             let Some(crossing) = colliders.crossing(&self.source, spec, ocean, frame_at, time)? else {
                 return Ok(Vec::new());
             };
-            self.found = Some(cavity(&crossing, spec, pixels_per_meter)?);
+            self.found = Some(cavity(&crossing, spec, pixels_per_meter, self.density)?);
         }
         let from = time - spec.dt;
         // The part that forms in this step, as one impulse in the middle of the stretch of the step in
@@ -91,7 +93,7 @@ impl Entry {
 }
 
 /// The cavity of an entry, in ocean-local units; none when the body enters outside the ocean.
-fn cavity(c: &colliders::Crossing, spec: &Spec, pixels_per_meter: f64) -> Result<Option<Cavity>, String> {
+fn cavity(c: &colliders::Crossing, spec: &Spec, pixels_per_meter: f64, density: f64) -> Result<Option<Cavity>, String> {
     let inside =
         (0..2).all(|a| (spec.origin[a]..spec.origin[a] + spec.cells[a] as f64 * spec.cell_size).contains(&c.centre[a]));
     if !inside {
@@ -105,7 +107,7 @@ fn cavity(c: &colliders::Crossing, spec: &Spec, pixels_per_meter: f64) -> Result
     }
     let law = cratering::crater(
         &Impact { mass: c.mass, density: c.mass / volume, normal_speed: c.speed * metres },
-        &Target { material: Material::Water, density: None, strength: None, gravity: spec.gravity * metres },
+        &Target { material: Material::Water, density: Some(density), strength: None, gravity: spec.gravity * metres },
     )?;
     // The disc that is emptied is the kernel's central disc, half the impulse's radius. Its profile
     // (1 - (r/R)^2)^2 holds pi R^2 / 3 per unit of depth at the centre, so a volume V with the depth d that

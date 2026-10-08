@@ -1,5 +1,5 @@
 // Light grids (lighting="grid"): appended to the path tracer's shader in place of the exact
-// volume_incident (see volume_grid_source in pathtrace.rs). A world-space lattice of nodes covers
+// volume_incident (see grid_source in pathtrace.rs, which keeps the plain one as volume_incident_exact). A world-space lattice of nodes covers
 // the media that ask for it; per analytic light a scalar grid holds the volume's transmittance
 // times the surfaces' visibility from the node toward the light's centre (averaged over points
 // jittered within a cell), and the dome is held either as radiance pre-integrated over fixed directions (isotropic scattering) or as one scalar
@@ -114,35 +114,6 @@ fn cs_dome_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
     lgrid[first+n]=vec4(sum/f32(info.z),1.0);
 }
 
-// The exact lighting of a domain that does not ask for the grid.
-fn volume_incident_exact(p: vec3<f32>, outgoing: vec3<f32>, g: f32, shadows: bool) -> vec3<f32> {
-    var light=vec3(0.0);
-    for (var i=0u; i<u32(pp.ambient.w); i++) {
-        let lt=plights[i];
-        if (lt.pos.w<0.0 || light_lobes(lt).x==0.0) { continue; }
-        // Authored ambient is already an isotropic local radiance approximation.
-        if (lt.pos.w==0.0) { light+=lt.color.rgb; continue; }
-        let sample=light_sample(lt,p);
-        let distance=max(0.0,sample.w-1e-3);
-        var visible=1.0;
-        if (shadows) {
-            visible=volume_transmittance(p,sample.xyz,distance);
-            if (lt.size.y>0.5) { visible*=visibility(p,sample.xyz,distance); }
-        }
-        light+=light_radiance(lt,sample.xyz,sample.w)*visible*volume_phase(dot(-sample.xyz,outgoing),g);
-    }
-    if (pp.env.x>0.5) {
-        let z=2.0*rnd()-1.0; let a=2.0*PI*rnd(); let r=sqrt(max(0.0,1.0-z*z));
-        let d=vec3(r*cos(a),r*sin(a),z);
-        let q=normalize((pp.env_rot*vec4(d,0.0)).xyz);
-        let uv=vec2((atan2(q.x,q.z)+PI)/(2.0*PI),acos(clamp(-q.y,-1.0,1.0))/PI);
-        let env=textureSampleLevel(env_tex,smp,uv,0.0).rgb*pp.env.y;
-        var visible=1.0;
-        if (shadows) { visible=visibility(p,d,1e30)*volume_transmittance(p,d,1e30); }
-        light+=env*(4.0*PI*volume_phase(dot(-d,outgoing),g)*visible);
-    }
-    return light;
-}
 // Whether `p` lies on the lattice, where every grid can be read.
 fn volume_grid_contains(p: vec3<f32>) -> bool {
     let head=lgrid[0]; let dims=bitcast<vec3<u32>>(lgrid[1].xyz);
