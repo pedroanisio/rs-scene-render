@@ -1194,6 +1194,48 @@ fn two_bodies_of_a_family_that_break_in_the_same_step_share_the_pool_and_the_one
     assert_eq!(errors.0, step, "the error is in the step in which the halves break");
 }
 
+/// A driver that says that the body `which` does not take part from the time `from` on.
+struct Absent {
+    which: usize,
+    from: f64,
+}
+impl Driver3 for Absent {
+    fn kinematic(&mut self, _: f64, which: &[usize]) -> Vec<Pose3> {
+        vec![Pose3::default(); which.len()]
+    }
+    fn fields(&mut self, _: f64) -> Vec<Field> {
+        vec![]
+    }
+    fn enabled(&mut self, t: f64, which: usize) -> bool {
+        !(which == self.which && t >= self.from)
+    }
+}
+
+#[test]
+fn a_body_that_the_driver_skips_does_not_ask_for_slots_so_it_cannot_abort_the_cuts_of_the_others() {
+    // the two halves of halves_into_walls(3, false) break in the same step and the second does not fit (the error of the test above). With the second half out of the scene at that
+    // step it asks for nothing, and the first half, which fits, is cut: the error would have been the second's, for a cut that is skipped
+    let mut w = halves_into_walls(3, false);
+    let mut step_of_break = None;
+    for step in 1..=240u64 {
+        let frame = w.frame_at(step as f64 / 240.0, &mut Still);
+        if !frame.errors.is_empty() {
+            step_of_break = Some(step);
+            break;
+        }
+    }
+    let step = step_of_break.expect("the halves break in the same step, and the second does not fit");
+    let mut w = halves_into_walls(3, false);
+    let mut driver = Absent { which: 1, from: (step as f64 - 0.5) / 240.0 };
+    for s in 1..=step {
+        let frame = w.frame_at(s as f64 / 240.0, &mut driver);
+        assert!(frame.errors.is_empty(), "step {s}: {:?}", frame.errors);
+    }
+    // the first half is cut (its first piece stays and the others are loose), and the second is not
+    assert_eq!(w.stress_pieces(0).map(<[u32]>::len), Some(1), "the first half is cut");
+    assert!(w.stress_pieces(1).is_some_and(|h| h.len() > 1), "the skipped half is as it was: {:?}", w.stress_pieces(1));
+}
+
 #[test]
 fn the_friction_that_a_block_landing_and_sliding_puts_on_a_welded_beam_is_what_the_block_loses_where_it_is_read_and_never_over_the_bound(
 ) {

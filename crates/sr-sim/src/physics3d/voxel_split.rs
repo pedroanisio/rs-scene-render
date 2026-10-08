@@ -187,6 +187,15 @@ impl World3 {
         }
         for (s, parent, by_stress) in jobs {
             let slots = self.voxel_splits[s].slots.clone();
+            if !self.fracture_enabled(parent) || !driver.enabled(t, parent) {
+                continue;
+            }
+            // a body that is a slot is cut from the step after the one it was taken into use in, however often that step is asked for: what a
+            // second request of the step would find is not what the first did
+            if self.state.slot_since[parent].is_some_and(|since| since >= step) {
+                continue;
+            }
+            // a body that is skipped asks for nothing: what a break by stress would ask of the pool (and an overflow would make an error of) is worked out only for the bodies that are cut
             let stress = if by_stress {
                 let Some(install) = self.stress_install_for(parent, step, claimed[s])? else { continue };
                 if install.cut.is_none() {
@@ -197,14 +206,6 @@ impl World3 {
             } else {
                 None
             };
-            if !self.fracture_enabled(parent) || !driver.enabled(t, parent) {
-                continue;
-            }
-            // a body that is a slot is cut from the step after the one it was taken into use in, however often that step is asked for: what a
-            // second request of the step would find is not what the first did
-            if self.state.slot_since[parent].is_some_and(|since| since >= step) {
-                continue;
-            }
             let cut = match &stress {
                 Some(install) => install.cut.clone().expect("a stress job has a cut"),
                 None => {
