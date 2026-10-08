@@ -1,4 +1,4 @@
-//! SREP 23: a `rect` with a nonzero `radius` or `cornerRadii` is drawn with the outline D27 gives `rounded-rect`;
+//! SREP 23: a `rect` with a nonzero `radius` or `cornerRadii` is drawn with the outline of a `rounded-rect`;
 //! a `rect` whose radii are all 0 is drawn exactly.
 //!
 //! The SREP's conformance cases: a 640 × 360 frame on black, a red (`#FF0000FF`) `rect` of 200 × 100 at (220, 130).
