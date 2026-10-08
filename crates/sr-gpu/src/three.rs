@@ -471,6 +471,7 @@ pub struct ThreeEngine {
     bgl_ssr: wgpu::BindGroupLayout,
     /// Path-tracing pipelines, built on first use.
     pt: Option<crate::pathtrace::PtGpu>,
+    pt_geometry: crate::pathtrace::BuildCache,
     geodesic: Option<crate::geodesic::GeodesicGpu>,
     /// Depth and normal prepass pipelines (by culling).
     pre_pipes: [wgpu::RenderPipeline; 2],
@@ -492,6 +493,10 @@ pub struct ThreeEngine {
     tile_dilate_pipe: wgpu::RenderPipeline,
     depth_pipe: wgpu::RenderPipeline,
     sort_pipes: [wgpu::ComputePipeline; 4],
+    software_scatter: Option<wgpu::ComputePipeline>,
+    /// Enables linear-work splat scattering on software adapters. Renderer sets
+    /// this from the selected adapter; direct engine users can select it too.
+    pub software_adapter: bool,
     repeat_smp: wgpu::Sampler,
     clamp_smp: wgpu::Sampler,
     cmp_smp: wgpu::Sampler,
@@ -1033,6 +1038,7 @@ impl ThreeEngine {
             bgl_splat,
             bgl_ssr,
             pt: None,
+            pt_geometry: Default::default(),
             geodesic: None,
             pre_pipes,
             ssao_pipe,
@@ -1053,6 +1059,8 @@ impl ThreeEngine {
             tile_dilate_pipe,
             depth_pipe,
             sort_pipes,
+            software_scatter: None,
+            software_adapter: false,
             repeat_smp,
             clamp_smp,
             cmp_smp,
@@ -1490,7 +1498,7 @@ impl ThreeEngine {
         }
         // a scene too large for the tracer's buffers is rasterised (the caller reports `limit_note`)
         if let Some(opts) = path.filter(|_| note.is_none()) {
-            let data = crate::pathtrace::build(scene);
+            let data = self.pt_geometry.build(scene);
             if self.pt.is_none() {
                 self.pt = Some(crate::pathtrace::PtGpu::new(&self.device, FORMAT));
             }
@@ -1795,6 +1803,7 @@ impl ThreeEngine {
             vbuf: Option<wgpu::Buffer>,
             depth: f32,
             pipe: PipeKey,
+            visible: bool,
         }
         let mut preps: Vec<Prep> = Vec::new();
         for (dr, &(lo, hi)) in scene.draws.iter().zip(&draw_bounds) {
@@ -1836,10 +1845,13 @@ impl ThreeEngine {
                 MeshSrc::Cached(_) => None,
             };
             stats.triangles += m.count as u64 / 3;
-            preps.push(Prep { kind, obj, mat, key: [0; 6], vbuf, depth: scene.cam.depth_of(center), pipe });
+            // Shadow lists remain independent: an offscreen object can still cast
+            // a visible shadow. Deformation/displacement retain the conservative path.
+            let visible = !matches!(&dr.mesh, MeshSrc::Cached(mesh)
+                if dr.maps[5].is_none() && bounds_outside_clip(mesh.lo, mesh.hi, dr.model, vp));
+            preps.push(Prep { kind, obj, mat, key: [0; 6], vbuf, depth: scene.cam.depth_of(center), pipe, visible });
         }
         stats.draws = preps.len();
-        stats.transmissive = preps.iter().filter(|p| p.kind == Kind::Transmissive).count();
         // shadow-pass object uniforms: one per (caster, view)
         let mut shadow_objs: Vec<(usize, u32, u32)> = Vec::new();
         for (v, &shadow_mat) in shadow_mats.iter().enumerate() {
@@ -1890,11 +1902,12 @@ impl ThreeEngine {
             let none: Maps = Default::default();
             self.mat_bind(&none, &mat_buf);
         }
-        let mut order: Vec<usize> = (0..preps.len()).collect();
+        let mut order: Vec<usize> = (0..preps.len()).filter(|&i| preps[i].visible).collect();
         order.sort_by(|a, b| preps[*a].depth.total_cmp(&preps[*b].depth));
         let opaque: Vec<usize> = order.iter().copied().filter(|i| preps[*i].kind == Kind::Opaque).collect();
         let mut trans: Vec<usize> = order.iter().copied().filter(|i| preps[*i].kind == Kind::Transmissive).collect();
         let mut blended: Vec<usize> = order.iter().copied().filter(|i| preps[*i].kind == Kind::Blend).collect();
+        stats.transmissive = trans.len();
         trans.reverse();
         blended.reverse();
         // Identity slots serve shadow/prepass draws. Sorted slots keep every
@@ -2215,6 +2228,26 @@ impl ThreeEngine {
             fb_trans = Some(frame_bind(&sc.create_view(&Default::default()), env_view));
         }
         // ------------------------------------------------ splat sort
+        if self.software_adapter && !scene.splats.is_empty() && self.software_scatter.is_none() {
+            let module = d.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("three-sort-cpu"),
+                source: wgpu::ShaderSource::Wgsl(sort_src().into()),
+            });
+            let layout = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: None,
+                bind_group_layouts: &[Some(&self.bgl_sort)],
+                immediate_size: 0,
+            });
+            let _creation = crate::gpu::creation_lock();
+            self.software_scatter = Some(d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("cs_scatter_cpu"),
+                layout: Some(&layout),
+                module: &module,
+                entry_point: Some("cs_scatter_cpu"),
+                compilation_options: Default::default(),
+                cache: None,
+            }));
+        }
         let mut splat_binds = Vec::new();
         for sp in &scene.splats {
             let n = sp.gpu.n.max(1);
@@ -2284,7 +2317,11 @@ impl ThreeEngine {
                     cp.dispatch_workgroups(groups[0], groups[1], 1);
                     cp.set_pipeline(&self.sort_pipes[2]);
                     cp.dispatch_workgroups(1, 1, 1);
-                    cp.set_pipeline(&self.sort_pipes[3]);
+                    cp.set_pipeline(if self.software_adapter {
+                        self.software_scatter.as_ref().expect("software scatter compiled")
+                    } else {
+                        &self.sort_pipes[3]
+                    });
                     cp.dispatch_workgroups(groups[0], groups[1], 1);
                 }
             }
@@ -2648,3 +2685,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod splat_sort;

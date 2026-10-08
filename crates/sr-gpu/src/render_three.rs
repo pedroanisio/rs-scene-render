@@ -241,7 +241,9 @@ impl Renderer {
     pub(super) fn three_engine(&mut self) -> &mut ThreeEngine {
         let g = &self.gpu;
         self.three.get_or_insert_with(|| {
-            Box::new(ThreeEngine::new_with(g.device.clone(), g.queue.clone(), g.gbuffer_depth, g.scalar_target))
+            let mut engine = ThreeEngine::new_with(g.device.clone(), g.queue.clone(), g.gbuffer_depth, g.scalar_target);
+            engine.software_adapter = g.is_software();
+            Box::new(engine)
         })
     }
 
