@@ -143,7 +143,8 @@ impl Map {
             }
             b.map(|b| [(b[0][0] + b[1][0]) / 2.0, (b[0][1] + b[1][1]) / 2.0]).unwrap_or([0.0, 0.0])
         });
-        let mut map = Map { kind, parallels, size, base_scale: 150.0, min_scale: 0.0, margin: 0.0, precision: 0.5_f64.sqrt() };
+        let mut map =
+            Map { kind, parallels, size, base_scale: 150.0, min_scale: 0.0, margin: 0.0, precision: 0.5_f64.sqrt() };
         if kind == Kind::WebMercator {
             map.base_scale = WEB_MERCATOR_BASE;
             return (map, center);
