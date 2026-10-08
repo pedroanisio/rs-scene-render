@@ -31,10 +31,7 @@ pub fn crater_cut_of(
     let cubic = grown.units.powi(3);
     // the contact point lies inside the ground by as far as the body went on before the contact was found (up to a rigid step of its motion), and the
     // crater is made at the surface: the plane of the kernel is where the axis through the point meets the cells' surface
-    let cell = settings.rock.size[0] / settings.rock.pixels_per_meter * grown.units;
-    let mut spec = grown.spec;
-    spec.outward = crater_axis(grown, before, settings);
-    spec.center = surface_along(before, spec.center, spec.outward, cell);
+    let spec = crater_spec(grown, before, settings);
     let kernel = sr_3d::crater::Crater::conserving(
         spec,
         sr_3d::crater::Budget { volume: law.volume * cubic, ejecta: law.ejecta_volume * cubic, bulking: Some(1.0) },
@@ -69,17 +66,113 @@ pub fn crater_cut_of(
     crater_cut(before, &kernel, 1.0 / grown.units, &ejection, 1, &rock, &anchored)
 }
 
+/// The crater of `grown` as it is made in the cells of `before`: the law's lengths about the axis of the surface of the cells ([`crater_axis`]), with the plane
+/// of the kernel put where that axis through the contact point meets the surface of the cells.
+pub fn crater_spec(
+    grown: &crate::crater::ImpactCrater,
+    before: &Occupancy,
+    settings: &Settings,
+) -> sr_3d::crater::Spec {
+    let cell = settings.rock.size[0] / settings.rock.pixels_per_meter * grown.units;
+    let mut spec = grown.spec;
+    let (axis, flat) = aimed_axis(grown, before, settings);
+    spec.outward = axis;
+    let point = spec.center;
+    // where the axis meets the staircase of the cells is a point on a step, which is above or below the plane that the steps make by up to half a step: the
+    // volume of a crater is that much of its area (a tenth of the law's and more on a slope).
+    let on_steps = surface_along(before, point, axis, cell);
+    let along = |p: [f64; 3]| (0..3).map(|i| (p[i] - point[i]) * axis[i]).sum::<f64>();
+    let mut depth = along(on_steps);
+    // a surface that is a face of the lattice is flat at the cell boundary: the point on it is exact, and the estimate (good to a sixth of a cell) is not
+    // better. A tilted one is a staircase, whose mean plane is what the volume depends on.
+    if !flat {
+        if let Some(t) = mean_plane_offset(before, point, axis, spec.radius, cell) {
+            depth = t;
+        }
+    }
+    spec.center = std::array::from_fn(|i| point[i] + axis[i] * depth);
+    spec
+}
+
+/// The fewest cells within the crest radius for their filled share to say where a plane is (a ball of radius 4 cells has about 270).
+const MIN_CELLS_FOR_A_PLANE: u64 = 200;
+
+/// How far along `outward` from `point` the mean plane of the surface of the cells is, in object units: of the cells whose centres are within `radius` of the
+/// point and no lower than half a radius under it, the filled share is the share that a plane leaves under it (the volume of the ball between half a radius
+/// down and the plane over the volume of the ball from half a radius down, `F(u) = 1/2 + (3u - u^3)/4` for u in radii), solved by halving. The lower half
+/// of the ball is left out because ground that is thinner than the ball (a block, an edge) is no half-space there. None if the ground has no thickness of half a
+/// radius under the plane, the ball has too few cells, or the share is out of what a plane within a tenth of a radius of the edges gives.
+pub(crate) fn mean_plane_offset(
+    before: &Occupancy,
+    point: [f64; 3],
+    outward: [f64; 3],
+    radius: f64,
+    cell: f64,
+) -> Option<f64> {
+    let reach = (radius / cell).ceil() as i32 + 1;
+    let centre = sr_3d::voxel::object_to_cell(point, cell)?;
+    let (mut filled, mut all) = (0u64, 0u64);
+    let mut lowest = f64::MAX;
+    for dk in -reach..=reach {
+        for dj in -reach..=reach {
+            for di in -reach..=reach {
+                let key = [centre[0] + di, centre[1] + dj, centre[2] + dk];
+                let at = sr_3d::voxel::cell_to_object(key, cell);
+                let offset: [f64; 3] = std::array::from_fn(|i| at[i] - point[i]);
+                let height: f64 = (0..3).map(|i| offset[i] * outward[i]).sum();
+                if offset.iter().map(|c| c * c).sum::<f64>() <= radius * radius && height >= -0.5 * radius {
+                    all += 1;
+                    if before.get(key) != 0 {
+                        filled += 1;
+                        lowest = lowest.min(height);
+                    }
+                }
+            }
+        }
+    }
+    // a ball of a few cells is no sample of a plane: the share jumps by a cell's worth with every cell (the crater of a small ball in coarse cells)
+    if all < MIN_CELLS_FOR_A_PLANE {
+        return None;
+    }
+    // ground that does not reach the bottom of the slab has less than a plane's share: a block, a ledge, an edge
+    if lowest > -0.5 * radius + 2.0 * cell {
+        return None;
+    }
+    let share = filled as f64 / all as f64;
+    let f = |u: f64| 0.5 + (3.0 * u - u * u * u) / 4.0;
+    let (floor, top) = (f(-0.5), f(1.0));
+    let under = |u: f64| (f(u) - floor) / (top - floor);
+    if !(under(-0.4)..=under(0.9)).contains(&share) {
+        return None;
+    }
+    let (mut lo, mut hi) = (-0.4f64, 0.9f64);
+    for _ in 0..50 {
+        let mid = 0.5 * (lo + hi);
+        if under(mid) < share {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    Some(0.5 * (lo + hi) * radius)
+}
+
 /// The axis of the crater of `grown` in the cells of `before`: the outward normal of the surface of the cells around the impact, from where the mass of the cells
 /// within the crater's crest radius lies (the direction from the centroid of the filled cells of that ball to its centre, which is the normal of a plane
 /// and the mean of the normals of a staircase of cells). The contact normal of the world is the normal of the cell face or edge that the body touched
 /// first, which on a slope of cells is off by ten degrees and more; it is what the axis is when the ground round the impact is a ball with no
 /// filled cell or all filled cells (or the estimate points the other way).
 pub fn crater_axis(grown: &crate::crater::ImpactCrater, before: &Occupancy, settings: &Settings) -> [f64; 3] {
+    aimed_axis(grown, before, settings).0
+}
+
+/// The axis and whether it is the lattice's own (the surface is a face of cells, flat to the estimate's two degrees).
+fn aimed_axis(grown: &crate::crater::ImpactCrater, before: &Occupancy, settings: &Settings) -> ([f64; 3], bool) {
     let contact = grown.spec.outward;
     let cell = settings.rock.size[0] / settings.rock.pixels_per_meter * grown.units;
     match surface_normal(before, grown.spec.center, grown.spec.radius, cell) {
         Some(normal) if (0..3).map(|i| normal[i] * contact[i]).sum::<f64>() > 0.0 => snap_to_lattice(normal),
-        _ => contact,
+        _ => (contact, false),
     }
 }
 
@@ -87,14 +180,14 @@ pub fn crater_axis(grown: &crate::crater::ImpactCrater, before: &Occupancy, sett
 /// the cells' rounding (a few tenths of a degree on flat ground, 0.1 in the tests), and a face of cells has the normal of the face. The consequence is a
 /// discontinuity: ground that slopes by less than two degrees is cut along the axis of the lattice as if it were flat, and one that slopes by two or more
 /// is cut along its own normal; the volume cut differs between them by the few cells that a tilt of two degrees moves (the ledger gives the figures).
-fn snap_to_lattice(normal: [f64; 3]) -> [f64; 3] {
+fn snap_to_lattice(normal: [f64; 3]) -> ([f64; 3], bool) {
     let (axis, along) = (0..3).map(|i| (i, normal[i].abs())).max_by(|a, b| a.1.total_cmp(&b.1)).expect("three axes");
     if along >= 2.0f64.to_radians().cos() {
         let mut snapped = [0.0; 3];
         snapped[axis] = normal[axis].signum();
-        snapped
+        (snapped, true)
     } else {
-        normal
+        (normal, false)
     }
 }
 
