@@ -578,6 +578,33 @@ def write(path, text, expect):
     path.write_text(decl + header + body)
     return (decl + header + body).encode()
 
+def small_cells(text):
+    """Whether a voxels object of the document has cells smaller than 0.5 in the scene (rules.rs W09): its cellSize, else its asset's, times the smallest scale."""
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.fromstring(re.sub(r"<!--.*?-->", "", text, flags=re.S))
+    except ET.ParseError:
+        return False
+    assets = {a.get("id"): a for a in root.iter() if a.tag.endswith("voxelAsset")}
+    for o in root.iter():
+        if not o.tag.endswith("object3D") or o.get("primitive") != "voxels":
+            continue
+        size = o.get("cellSize") or (assets[o.get("voxels")].get("cellSize") if o.get("voxels") in assets else None)
+        try:
+            cell = float(size.strip())
+            scale = min(abs(float(o.get(k, "1").strip())) for k in ("scaleX", "scaleY", "scaleZ"))
+        except (AttributeError, ValueError):
+            continue
+        if cell * scale < 0.5:
+            return True
+    return False
+
+
+def with_small_cells(text, expect):
+    """The expected codes of a document, with W09 when it has cells smaller than 0.5 in the scene."""
+    return list(expect) + ["W09"] if small_cells(text) and "W09" not in expect else list(expect)
+
+
 def oracle_codes(expected, blind=False):
     """Translate Rust diagnostics into the independent schema oracle's scope."""
     codes = {code for code in expected if not code.startswith(("S", "A", "W"))}
@@ -593,14 +620,16 @@ def main():
             f.unlink()
     ok = True
     for name, text in VALID.items():
-        data = write(CORPUS / "valid" / f"{name}.scene.xml", text, [])
+        expect = with_small_cells(text, [])
+        data = write(CORPUS / "valid" / f"{name}.scene.xml", text, expect)
         xsd, sch = verdict(data)
         if xsd or sch:
             ok = False
             print(f"valid/{name}: oracle disagrees: {xsd} {sch}")
-        manifest["valid"][f"{name}.scene.xml"] = []
+        manifest["warnings" if expect else "valid"][f"{name}.scene.xml"] = expect
     for name, expect, fn in CASES:
         text = fn(base)
+        expect = with_small_cells(text, expect)
         data = write(CORPUS / "invalid" / f"{name}.scene.xml", text, expect)
         xsd, sch = verdict(data)
         got = sorted(set(i for i, _ in sch) | ({"XSD"} if xsd else set()))
@@ -613,6 +642,7 @@ def main():
     for name, expect, fn in ASSET_CASES + WARN_CASES:
         is_warn = (name, expect, fn) in WARN_CASES
         text = fn(base)
+        expect = with_small_cells(text, expect)
         data = write(CORPUS / ("valid" if is_warn else "invalid") / f"{name}.scene.xml", text, expect)
         xsd, sch = verdict(data)
         if xsd or sch:
