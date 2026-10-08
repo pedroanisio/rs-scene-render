@@ -72,6 +72,6 @@ impl Classes {
             return false;
         }
         let (sa, sb) = (self.see_through(a), self.see_through(b));
-        b == 0 || (!sa && sb) || (sa && sb && a != b && a < b)
+        b == 0 || (sb && (!sa || a < b))
     }
 }

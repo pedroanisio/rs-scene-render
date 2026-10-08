@@ -43,7 +43,11 @@ fn naive(grid: &Occupancy, classes: &Classes) -> BTreeSet<Face> {
                 other[axis] += if positive { 1 } else { -1 };
                 let b = classes.class(grid.get(other));
                 let (sa, sb) = (classes.see_through(a), classes.see_through(b));
-                let exposed = b == 0 || (!sa && sb) || (sa && sb && a != b && a < b);
+                let exposed = match (b, sa, sb) {
+                    (0, _, _) | (_, false, true) => true,
+                    (_, true, true) => a < b,
+                    _ => false,
+                };
                 if exposed {
                     let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
                     let plane = cell[axis] + i32::from(positive);
