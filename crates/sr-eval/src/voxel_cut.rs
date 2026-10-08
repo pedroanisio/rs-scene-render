@@ -28,14 +28,10 @@ pub fn crater_cut_of(
 ) -> Result<CraterCut, String> {
     let cause = &grown.cause;
     let law = &cause.law;
-    let cubic = grown.units.powi(3);
     // the contact point lies inside the ground by as far as the body went on before the contact was found (up to a rigid step of its motion), and the
     // crater is made at the surface: the plane of the kernel is where the axis through the point meets the cells' surface
     let spec = crater_spec(grown, before, settings);
-    let kernel = sr_3d::crater::Crater::conserving(
-        spec,
-        sr_3d::crater::Budget { volume: law.volume * cubic, ejecta: law.ejecta_volume * cubic, bulking: Some(1.0) },
-    )?;
+    let kernel = crater_kernel(grown, spec)?;
     let (angle, spread) = (EJECTA_ANGLE, EJECTA_SPREAD);
     let list = sr_sim::cratering::ejecta::ejecta(&sr_sim::cratering::ejecta::Spec {
         material: cause.material,
@@ -64,6 +60,19 @@ pub fn crater_cut_of(
     let base = before.bounds().map_or(i32::MAX, |(_, max)| max[1]);
     let anchored = move |c: &[i32; 3]| c[1] == base;
     crater_cut(before, &kernel, 1.0 / grown.units, &ejection, 1, &rock, &anchored)
+}
+
+/// The kernel of the crater `grown` makes about `spec` (see [`crater_spec`]): conserving, with a bulking of 1, the bowl holding the law's volume.
+pub fn crater_kernel(
+    grown: &crate::crater::ImpactCrater,
+    spec: sr_3d::crater::Spec,
+) -> Result<sr_3d::crater::Crater, String> {
+    let law = &grown.cause.law;
+    let cubic = grown.units.powi(3);
+    sr_3d::crater::Crater::conserving(
+        spec,
+        sr_3d::crater::Budget { volume: law.volume * cubic, ejecta: law.ejecta_volume * cubic, bulking: Some(1.0) },
+    )
 }
 
 /// The crater of `grown` as it is made in the cells of `before`: the law's lengths about the axis of the surface of the cells ([`crater_axis`]), with the plane
@@ -102,6 +111,14 @@ pub fn crater_spec(
 
 /// The share of the cells of the bottom of a sample (the lowest two cells' depth) that must be ground for the sample to be of a half-space.
 const MIN_FULL_BOTTOM: f64 = 0.95;
+
+/// The share of the crest radius that the estimate of the surface's normal looks over. Measured against the analytic normal of a hill of 40, 20, 10 and 5 m of
+/// radius of curvature at its top and off it: over the whole crest radius the error is under 0.3 degrees where the hill is wider than the crater and 12 and 19
+/// degrees where the crater is wider than the hill (the mean of the hill and the plain round it); over half of it, 1.4 degrees at most in every case.
+const AXIS_REACH: f64 = 0.5;
+
+/// The fewest cells of radius that a ball needs for its centroid to say where the surface is (the crater of a small ball in coarse cells is a few cells wide).
+const MIN_CELLS_ACROSS: f64 = 4.0;
 
 /// The fewest cells within the crest radius for their filled share to say where a plane is (a ball of radius 4 cells has about 270).
 const MIN_CELLS_FOR_A_PLANE: u64 = 200;
@@ -241,7 +258,10 @@ pub fn crater_axis(grown: &crate::crater::ImpactCrater, before: &Occupancy, sett
 fn aimed_axis(grown: &crate::crater::ImpactCrater, before: &Occupancy, settings: &Settings) -> ([f64; 3], bool) {
     let contact = grown.spec.outward;
     let cell = settings.rock.size[0] / settings.rock.pixels_per_meter * grown.units;
-    match surface_normal(before, grown.spec.center, grown.spec.radius, cell) {
+    // half the crest radius where that is a ball of cells (four a side and more), the whole of it where the crater is a few cells wide
+    let half = AXIS_REACH * grown.spec.radius;
+    let reach = if half >= MIN_CELLS_ACROSS * cell { half } else { grown.spec.radius };
+    match surface_normal(before, grown.spec.center, reach, cell) {
         Some(normal) if (0..3).map(|i| normal[i] * contact[i]).sum::<f64>() > 0.0 => snap_to_lattice(normal),
         _ => (contact, false),
     }
