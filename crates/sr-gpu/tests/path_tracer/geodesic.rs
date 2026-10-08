@@ -580,14 +580,24 @@ fn the_shader_matches_the_single_precision_reference_integrator_far_from_the_cri
     let r_obs = (eye - hole).length();
     let critical = 27.0f32.sqrt();
     let (mut worst, mut worst_far, mut worst_phi, mut within_1e6, mut total) = (0.0f64, 0.0f64, 0.0f64, 0usize, 0usize);
+    let mut worst_phi0 = 0.0f64;
     for y in 0..40u32 {
         for x in 0..64u32 {
             let f = ray_frame(&scene, axis, x, y);
             if (f.b as f32 / critical - 1.0).abs() < 0.05 {
                 continue;
             }
-            let reference = sr_sim::gr::f32::trace(mass, r_obs, f.b as f32, f.ingoing, f.phi0 as f32, 4);
             let (sa, sb) = (a[(y * 64 + x) as usize], b[(y * 64 + x) as usize]);
+            // The angle of the first crossing comes from the shader's atan2, which Vulkan allows 4096 ULP
+            // (Vulkan spec, "Precision and Operation of SPIR-V Instructions": atan(), atan2()), at most
+            // 2^-10 rad on (0, pi]; far from the hole the radius of a crossing moves quickly with that angle.
+            // It is checked against the f64 frame here, and the integrator is compared from the angle the
+            // shader used, so that only the integrator's arithmetic is in the comparison below.
+            let shader_phi0 = sb[3];
+            let dphi0 = (shader_phi0 as f64 - f.phi0).abs();
+            worst_phi0 = worst_phi0.max(dphi0);
+            assert!(dphi0 <= 2f64.powi(-10) + 1e-5, "phi0 at ({x},{y}): shader {shader_phi0}, frame {}", f.phi0);
+            let reference = sr_sim::gr::f32::trace(mass, r_obs, f.b as f32, f.ingoing, shader_phi0, 4);
             assert_eq!((sa[0] == 1.0), reference.outcome == sr_sim::gr::Outcome::Escaped, "outcome at ({x},{y})");
             if sa[0] == 1.0 {
                 worst_phi =
@@ -608,7 +618,7 @@ fn the_shader_matches_the_single_precision_reference_integrator_far_from_the_cri
         }
     }
     println!(
-        "{total} crossing radii against gr::f32::trace: {within_1e6} within 1e-6; worst {worst:.2e} up to 56 M, {worst_far:.2e} beyond; worst escape angle {worst_phi:.2e}"
+        "{total} crossing radii against gr::f32::trace: {within_1e6} within 1e-6; worst {worst:.2e} up to 56 M, {worst_far:.2e} beyond; worst escape angle {worst_phi:.2e}; worst first-crossing angle {worst_phi0:.2e} rad"
     );
     assert!(total > 500);
     assert!(worst <= 3e-5 && worst_phi <= 5e-6, "worst crossing radius {worst}, escape angle {worst_phi}");
