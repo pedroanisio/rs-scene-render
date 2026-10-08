@@ -34,6 +34,14 @@ pub(crate) struct Body3Node {
     crater_surface: Option<Triangles>,
     /// How a crater that grows from an impact on this body is made.
     crater: Option<Arc<crate::crater::CraterSource>>,
+    /// An object of cells that a crater cuts: the cells, how it is cut and the bodies that take its pieces.
+    voxels: Option<Arc<crate::voxel_cut::VoxelOwner>>,
+    /// An object of cells whose collider is its cells: what its rigidBody says of them.
+    pub(crate) cells: Option<Arc<crate::voxel_cut::CellsInfo>>,
+    /// An object of cells that a fracture breaks into the bodies that take its pieces.
+    cell_fracture: Option<Arc<crate::voxel_cut::CellFracture>>,
+    /// A body that only takes a piece of an object of cells.
+    slot: bool,
 }
 
 /// A crater element with a source: which watch of the world finds its impact, on which body.
@@ -200,6 +208,12 @@ pub(crate) fn mesh_asset_triangles(p: &Program, key: &str, max_bytes: usize) -> 
         sr_3d::Asset::Model(m) => m,
         sr_3d::Asset::Splats(_) => return Err("splats have no surface to collide with".into()),
     };
+    model_triangles(&model, max_bytes)
+}
+
+/// The triangles of a model as the renderer places them (its basis times the transform of each node, scene units, scene axes), with the
+/// winding turned where that transform mirrors, bounded before they are copied.
+pub(crate) fn model_triangles(model: &sr_3d::Model, max_bytes: usize) -> Result<Triangles, String> {
     let locals: Vec<_> = model.nodes.iter().map(|nd| nd.local).collect();
     let worlds = model.world_matrices(&locals);
     let (mut pts, mut tris) = (Vec::new(), Vec::new());
@@ -237,6 +251,28 @@ fn prim_triangles(prim: &sr_3d::Primitive) -> Triangles {
     let pts = prim.vertices.iter().map(|v| v.pos.map(|c| c as f64)).collect();
     let tris = prim.indices.as_chunks::<3>().0.iter().map(|t| [t[0], t[1], t[2]]).collect();
     (pts, tris)
+}
+
+/// The shape and the mass of an object of cells (primitive voxels) whose `rigidBody` `b` has the cells as its collider: the asset's cells, each
+/// `cellSize` of the object (or of the asset, or 1) times the node's scale on a side, and the mass that its density gives them. The origin of
+/// the body is the minimum corner of the box of cells, as the origin of the object is.
+fn cells_body(
+    p: &Program,
+    n: &FrameNode,
+    b: &dyn Element,
+    s: [f64; 3],
+    pixels_per_meter: f64,
+) -> Result<(Shape3, f64, Arc<crate::voxel_asset::VoxelModel>, [f64; 3]), String> {
+    let key = n.asset.as_deref().ok_or("the object names no voxel asset")?;
+    let model = crate::voxel_asset::load(p, key)?;
+    if s.iter().any(|c| !(c.is_finite() && *c > 0.0)) {
+        return Err("a body of cells cannot be mirrored or have a scale that is not positive".into());
+    }
+    let cell = crate::voxel_asset::cell_size(opt(&*n.elem, "cellSize"), &model);
+    let size = s.map(|c| c * cell);
+    let density = num(b, "density", 0.0);
+    let body = crate::voxels::body(&model.occupancy, size, density, pixels_per_meter)?;
+    Ok((body.shape, body.mass, model, size))
 }
 
 /// The collision shape of object `n` for `rigidBody` `b`, in the object's axes scaled by `s`.
@@ -466,6 +502,24 @@ fn flag(e: &dyn Element, n: &str) -> bool {
     }
 }
 
+/// Whether the document has a body of cells: an object of primitive voxels whose rigidBody has the cells as its collider.
+pub(crate) fn has_bodies_of_cells(g0: &FrameGraph) -> bool {
+    g0.nodes.iter().any(|n| {
+        n.kind == "object3D"
+            && children(&*n.elem).iter().any(|c| c.element_name() == "rigidBody" && is_body_of_cells(n, *c))
+    })
+}
+
+/// Whether object `n` with the rigidBody `rigid` is a body of cells: an object of primitive voxels whose collider is its cells (the one predicate of the
+/// build of the world and of the refusal of a physics cache).
+fn is_body_of_cells(n: &FrameNode, rigid: &dyn Element) -> bool {
+    text(&*n.elem, "primitive").as_deref() == Some("voxels")
+        && matches!(text(rigid, "shape").as_deref(), None | Some("auto" | "voxels"))
+}
+
+/// Why a physics cache cannot hold a world with bodies of cells.
+pub(crate) const NO_CACHE_OF_CELLS: &str = "a physics cache holds poses, velocities and contacts and has no place for the revisions and the cuts of bodies of cells (an object of primitive voxels whose rigidBody collider is its cells)";
+
 /// Ids of the 3D bodies in `g0`.
 pub(crate) fn body_ids(g0: &FrameGraph) -> Vec<Arc<str>> {
     g0.nodes
@@ -515,8 +569,25 @@ pub(crate) fn build(
                 })
             })
             .map(|f| (num(f, "maxMemoryMiB", 256.) as usize).saturating_mul(1 << 20));
+        // an object of cells whose collider is the cells: the shape and the mass are the cells'
+        let of_cells = is_body_of_cells(n, c);
+        let mut cells_mass = None;
+        let mut cells_of_body = None;
         let shape = if matches!(plan, Plan3::Placeholder) || sequence_budget.is_some() {
             Shape3::Sphere(1.0)
+        } else if of_cells {
+            let ppm = ph.map_or(100.0, |p| p.pixels_per_meter.get());
+            match cells_body(p, n, c, scale, ppm) {
+                Ok((shape, mass, model, size)) => {
+                    cells_mass = Some(mass);
+                    cells_of_body = Some((model, size));
+                    shape
+                }
+                Err(error) => {
+                    failures.push(format!("{}: rigidBody: {error}", n.id));
+                    Shape3::Sphere(1.0)
+                }
+            }
         } else {
             shape_for(p, n, c, scale, problems, failures)
         };
@@ -533,7 +604,7 @@ pub(crate) fn build(
         specs.push(Body3Spec {
             kind,
             shape,
-            mass: num(c, "mass", 1.0),
+            mass: cells_mass.unwrap_or_else(|| num(c, "mass", 1.0)),
             friction: num(c, "friction", 0.5),
             restitution: num(c, "restitution", 0.0),
             linear_damping: num(c, "linearDamping", 0.01),
@@ -565,6 +636,32 @@ pub(crate) fn build(
             index = node.parent.map(|i| i as usize);
         }
         windows.reverse();
+        // an object of cells with a crater is cut: how, and the slots that take its pieces (made below, after the bodies of the document)
+        let has_crater = children(&*n.elem).into_iter().any(|c| c.element_name() == "crater");
+        let cells = cells_of_body.map(|(model, size)| {
+            let overflow = match text(c, "fragmentOverflow").as_deref() {
+                Some("dust") => crate::voxels::Overflow::Dust,
+                _ => crate::voxels::Overflow::Error,
+            };
+            let anchor = match text(c, "anchor").as_deref() {
+                Some("largest") => crate::voxel_cut::Anchor::Largest,
+                Some("base") => crate::voxel_cut::Anchor::Base,
+                _ if kind == BodyKind::Dynamic => crate::voxel_cut::Anchor::Largest,
+                _ => crate::voxel_cut::Anchor::Base,
+            };
+            Arc::new(crate::voxel_cut::CellsInfo {
+                model,
+                size,
+                density: num(c, "density", 0.0),
+                pixels_per_meter: ph.map_or(100.0, |p| p.pixels_per_meter.get()),
+                min_cells: num(c, "fragmentMinCells", 1.0) as usize,
+                max_fragments: num(c, "maxFragments", 64.0) as usize,
+                overflow,
+                anchor,
+            })
+        });
+        let voxels =
+            cells.as_ref().filter(|_| has_crater).map(|info| Arc::new(crate::voxel_cut::VoxelOwner::new(info)));
         bodies.push(Body3Node {
             id: n.id.clone(),
             scale,
@@ -573,6 +670,10 @@ pub(crate) fn build(
             fragment: false,
             sequence_budget,
             crater: None,
+            voxels,
+            cells,
+            cell_fracture: None,
+            slot: false,
         });
     }
     if bodies.is_empty() {
@@ -580,6 +681,8 @@ pub(crate) fn build(
     }
     let mut fractures = Vec::new();
     let mut events = Vec::new();
+    // the fractures that fire on an impact: the event, the body that hits and the threshold of the impulse (if given)
+    let mut by_contact: Vec<(usize, usize, Option<f64>)> = Vec::new();
     let real_count = bodies.len();
     for source in 0..real_count {
         let n = &g0.nodes[index_of(g0, &bodies[source].id).expect("source")];
@@ -588,10 +691,120 @@ pub(crate) fn build(
         else {
             continue;
         };
+        // the body that breaks it, if it breaks on an impact: another dynamic body of the world
+        let projectile = match text(config, "source") {
+            None => None,
+            Some(id) => {
+                let found = bodies.iter().take(real_count).position(|b| *b.id == *id && !b.fragment);
+                match found.filter(|&k| k != source && specs[k].kind == BodyKind::Dynamic) {
+                    Some(k) => Some(k),
+                    None => {
+                        failures.push(format!("{}: fracture source {id} must be another dynamic 3D rigidBody", n.id));
+                        continue;
+                    }
+                }
+            }
+        };
+        // an object of cells breaks into the pieces of its partition, which are bodies of cells, and what is too small is dust
+        if let Some(info) = bodies[source].cells.clone() {
+            let cell = info.size[0] / bodies[source].scale[0];
+            let made = (|| -> Result<_, String> {
+                let planes;
+                let label = |c: [i32; 3]| u32::from(info.model.occupancy.get(c));
+                let rule = match text(config, "partition").as_deref() {
+                    Some("planes") => {
+                        planes = crate::voxel_cut::planes_of(&text(config, "planes").unwrap_or_default(), cell)?;
+                        sr_3d::pieces::Partition::Planes(&planes)
+                    }
+                    Some("labels") => sr_3d::pieces::Partition::Labels(&label),
+                    _ => {
+                        sr_3d::pieces::Partition::Voronoi { seeds: num(config, "pieces", 8.) as u32, seed: config.seed }
+                    }
+                };
+                crate::voxels::fracture(
+                    &info.model.occupancy,
+                    rule,
+                    &crate::voxels::FracturePolicy {
+                        min_cells: info.min_cells,
+                        max_fragments: info.max_fragments,
+                        overflow: info.overflow,
+                    },
+                    info.size,
+                    info.density,
+                    info.pixels_per_meter,
+                )
+            })();
+            let broken = match made {
+                Ok(broken) => broken,
+                Err(error) => {
+                    failures.push(format!("{}: {error}", n.id));
+                    continue;
+                }
+            };
+            let event = events.len();
+            let impulse = [num(config, "impulseX", 0.), num(config, "impulseY", 0.), num(config, "impulseZ", 0.)];
+            let mut fragments = Vec::new();
+            let mut grids = Vec::new();
+            for piece in &broken.pieces {
+                let index = specs.len();
+                let mut spec = specs[source].clone();
+                spec.kind = BodyKind::Dynamic;
+                spec.shape = piece.shape.clone();
+                spec.mass = piece.mass;
+                spec.velocity = [0.; 3];
+                spec.angular_velocity = [0.; 3];
+                spec.activate_at = ph.map_or(0., |p| p.start);
+                specs.push(spec);
+                let mut body = bodies[source].clone();
+                body.sequence_budget = None;
+                body.fragment = true;
+                body.crater_surface = None;
+                body.crater = None;
+                body.voxels = None;
+                body.cells = None;
+                body.cell_fracture = None;
+                body.scale = bodies[source].scale;
+                bodies.push(body);
+                fragments.push(sr_sim::physics3d::Fragment3 {
+                    body: index,
+                    offset: [0.; 3],
+                    impulse: impulse.map(|v| v * piece.mass / specs[source].mass),
+                });
+                let Shape3::Voxels { cells, .. } = &piece.shape else { unreachable!("a piece is of cells") };
+                let grid =
+                    sr_3d::occupancy::Occupancy::from_cells(cells.iter().map(|c| (*c, info.model.occupancy.get(*c))));
+                match grid {
+                    Ok(grid) => grids.push((index, Arc::new(grid))),
+                    Err(error) => failures.push(format!("{}: {error}", n.id)),
+                }
+            }
+            if let Some(projectile) = projectile {
+                by_contact.push((event, projectile, config.min_impulse.map(|v| v.get())));
+            }
+            events.push(sr_sim::physics3d::Fracture3 {
+                source,
+                at: num(config, "at", 0.).max(ph.map_or(0., |p| p.start)),
+                radial_impulse: num(config, "radialImpulse", 0.),
+                fragments,
+                contact: projectile.map(|_| sr_sim::physics3d::FractureContact {
+                    watch: usize::MAX,
+                    energy_fraction: num(config, "energyFraction", 0.3),
+                }),
+                dust: broken.dust_body.clone(),
+            });
+            bodies[source].cell_fracture = Some(Arc::new(crate::voxel_cut::CellFracture {
+                event,
+                source: Arc::new(info.model.occupancy.clone()),
+                pieces: grids,
+            }));
+            continue;
+        }
         let prepare = || -> Result<_, String> {
             let start = ph.map_or(0., |p| p.start);
             let step = ph.map_or(1. / 120., |p| p.fixed_step.get());
-            let at = num(config, "at", 0.).max(start);
+            // a fracture on an impact is released by the impact, and the partition is the one of the document: taken
+            // where the source first takes part
+            let at = if projectile.is_some() { start } else { num(config, "at", 0.).max(start) };
             let mut boundary = ((at - start) / step).ceil();
             let mut release = start + boundary * step;
             let mut found = false;
@@ -635,6 +848,9 @@ pub(crate) fn build(
             body.fragment = true;
             body.crater_surface = None;
             body.crater = None;
+            body.voxels = None;
+            body.cells = None;
+            body.cell_fracture = None;
             body.scale = [1.; 3];
             bodies.push(body);
             fragments.push(sr_sim::physics3d::Fragment3 {
@@ -644,13 +860,67 @@ pub(crate) fn build(
             });
             indices.push(index);
         }
+        if let Some(projectile) = projectile {
+            by_contact.push((events.len(), projectile, config.min_impulse.map(|v| v.get())));
+        }
         events.push(sr_sim::physics3d::Fracture3 {
             source,
             at: num(config, "at", 0.).max(ph.map_or(0., |p| p.start)),
             radial_impulse: num(config, "radialImpulse", 0.),
             fragments,
+            // the watch is the one that is made for it below, once the world's others are known
+            contact: projectile.map(|_| sr_sim::physics3d::FractureContact {
+                watch: usize::MAX,
+                energy_fraction: num(config, "energyFraction", 0.3),
+            }),
+            dust: None,
         });
-        fractures.push(FractureNode { source, indices, geometry });
+        fractures.push(FractureNode { event: events.len() - 1, source, indices, geometry });
+    }
+    // the slots that take the pieces of an object of cells that a crater cuts: bodies of one cell, dynamic and out of the world until a cut gives them a
+    // piece, as many as the object says (`maxFragments`), after every other body of the world
+    let mut splits = Vec::new();
+    for owner in 0..real_count {
+        let Some(voxels) = bodies[owner].voxels.clone() else { continue };
+        let rock = voxels.settings().rock;
+        let one = crate::voxels::body(&one_cell(), rock.size, rock.density, rock.pixels_per_meter);
+        let Ok(one) = one else {
+            failures
+                .push(format!("{}: a body of cells needs a positive cell size, density and scale", bodies[owner].id));
+            continue;
+        };
+        let mut slots = Vec::new();
+        for _ in 0..rock.policy.max_fragments {
+            let index = specs.len();
+            let mut spec = specs[owner].clone();
+            spec.kind = BodyKind::Dynamic;
+            spec.shape = one.shape.clone();
+            spec.mass = one.mass;
+            spec.velocity = [0.; 3];
+            spec.angular_velocity = [0.; 3];
+            spec.activate_at = ph.map_or(0., |p| p.start);
+            specs.push(spec);
+            let mut body = bodies[owner].clone();
+            body.sequence_budget = None;
+            body.fragment = true;
+            body.slot = true;
+            body.crater_surface = None;
+            body.crater = None;
+            body.voxels = None;
+            body.cells = None;
+            body.cell_fracture = None;
+            bodies.push(body);
+            slots.push(index);
+        }
+        // the owner knows its slots, for the frames
+        if let Some(own) = Arc::get_mut(bodies[owner].voxels.as_mut().expect("an owner")) {
+            own.slots = slots.clone();
+        } else {
+            let mut fresh = crate::voxel_cut::VoxelOwner::new(bodies[owner].cells.as_ref().expect("cells"));
+            fresh.slots = slots.clone();
+            bodies[owner].voxels = Some(Arc::new(fresh));
+        }
+        splits.push(sr_sim::physics3d::VoxelSplit3 { parent: owner, slots });
     }
     let mut joints = Vec::new();
     for c in ph.map(|p| &p.children[..]).unwrap_or(&[]) {
@@ -716,7 +986,14 @@ pub(crate) fn build(
     let hulls: Vec<crate::group::BodyHull> = bodies
         .iter()
         .zip(&specs)
-        .map(|(node, spec)| crate::group::BodyHull::new(node.id.clone(), spec.mass, &spec.shape))
+        .map(|(node, spec)| {
+            let hull = crate::group::BodyHull::new(node.id.clone(), spec.mass, &spec.shape);
+            if spec.kind == BodyKind::Dynamic {
+                hull
+            } else {
+                hull.fixed()
+            }
+        })
         .collect();
     let start = ph.map(|p| p.start).unwrap_or(0.0);
     let step = ph.map(|p| p.fixed_step.get()).unwrap_or(1.0 / 120.0);
@@ -727,7 +1004,7 @@ pub(crate) fn build(
     ];
     let pixels_per_meter = ph.map(|p| p.pixels_per_meter.get()).unwrap_or(100.0);
     let linked = link_craters(g0, &mut bodies, &specs, gravity, pixels_per_meter, step);
-    let (watches, links) = match linked {
+    let (mut watches, links) = match linked {
         Ok(found) => found,
         // an old cache cannot serve a crater from an impact, and says so itself
         Err(_) if matches!(plan, Plan3::Placeholder) => (Vec::new(), Vec::new()),
@@ -736,6 +1013,17 @@ pub(crate) fn build(
             (Vec::new(), Vec::new())
         }
     };
+    // a fracture on an impact watches its projectile against its own body, after the craters' watches
+    for (event, projectile, threshold) in by_contact {
+        let owner = events[event].source;
+        let min_impulse = threshold.unwrap_or_else(|| {
+            crate::physcache::rest_threshold(specs[projectile].mass, gravity, pixels_per_meter, step)
+        });
+        if let Some(contact) = &mut events[event].contact {
+            contact.watch = watches.len();
+        }
+        watches.push(sr_sim::physics3d::ImpactWatch { source: projectile, owner, min_impulse });
+    }
     if matches!(plan, Plan3::Placeholder) {
         return Some(Phys3 { world: None, bodies, fractures, spec_digest: None, hulls, watches, links, follow });
     }
@@ -758,7 +1046,7 @@ pub(crate) fn build(
     };
     let spec_digest = match plan {
         Plan3::Verify | Plan3::Simulate { digest: true, .. } => {
-            Some(crate::physcache::digest_world3(&spec, &events, &watches, &links))
+            Some(crate::physcache::digest_world3(&spec, &events, &watches, &links, &splits))
         }
         _ => None,
     };
@@ -769,6 +1057,7 @@ pub(crate) fn build(
     let world = World3::new(spec)
         .with_fractures(events)
         .map_err(|e| e.to_string())
+        .and_then(|world| world.with_voxel_splits(splits).map_err(|e| e.to_string()))
         .and_then(|world| world.with_impact_watches(watches.clone()));
     let world = match world {
         Ok(world) => Some(match log {
@@ -786,6 +1075,11 @@ pub(crate) fn build(
 /// The craters that grow from impacts: for each `crater` element with a `source`, the watch
 /// that finds the impact of that body on the crater's owner and how the crater is made.
 /// Sets the owner's `crater`.
+/// One cell, for the body of a slot.
+fn one_cell() -> sr_3d::occupancy::Occupancy {
+    sr_3d::occupancy::Occupancy::from_cells([([0, 0, 0], 1u8)]).expect("one cell")
+}
+
 fn link_craters(
     g0: &FrameGraph,
     bodies: &mut [Body3Node],
@@ -797,6 +1091,9 @@ fn link_craters(
     let mut watches = Vec::new();
     let mut links = Vec::new();
     for owner in 0..bodies.len() {
+        if bodies[owner].slot {
+            continue;
+        }
         let Some(node) = g0.nodes.iter().find(|n| n.id == bodies[owner].id) else { continue };
         let Some(element) =
             children(&*node.elem).into_iter().find(|c| c.element_name() == "crater" && text(*c, "source").is_some())
@@ -850,6 +1147,13 @@ pub(crate) struct Driver<'a, 'b> {
     pub(crate) group: Option<&'a crate::group::Group>,
 }
 
+impl Driver<'_, '_> {
+    /// The composition's time when the world's is `t`: the world runs on the time of its group.
+    fn composition(&self, t: f64) -> f64 {
+        self.group.map_or(t, |g| g.clock().composition_time(t))
+    }
+}
+
 impl Driver3 for Driver<'_, '_> {
     fn collider(
         &mut self,
@@ -858,9 +1162,10 @@ impl Driver3 for Driver<'_, '_> {
         revision: Option<u64>,
     ) -> Result<Option<sr_sim::physics3d::ColliderUpdate3>, String> {
         let body = &self.bodies[which];
+        let composition = self.composition(t);
         if let Some(budget) = body.sequence_budget {
             use std::hash::{Hash, Hasher};
-            let graph = self.graphs.at(t);
+            let graph = self.graphs.at(composition);
             let Some(i) = index_of(&graph, &body.id) else { return Ok(None) };
             let (sources, _) = crate::fracture::source::load(self.p, &graph.nodes[i], body.scale, budget)?;
             let mut vertices = Vec::new();
@@ -889,7 +1194,7 @@ impl Driver3 for Driver<'_, '_> {
             }));
         }
         let Some(i) = ({
-            let graph = self.graphs.at(t);
+            let graph = self.graphs.at(composition);
             index_of(&graph, &body.id).map(|i| (graph, i))
         }) else {
             return Ok(None);
@@ -906,11 +1211,12 @@ impl Driver3 for Driver<'_, '_> {
         impact: Option<&sr_sim::physics3d::Impact3>,
     ) -> Result<Option<sr_sim::physics3d::ColliderUpdate3>, String> {
         let body = &self.bodies[which];
+        let composition = self.composition(t);
         let Some(source) = &body.crater else { return self.collider(t, which, revision) };
         // a crater from an impact has nothing to do until the impact has happened
         let Some(impact) = impact else { return Ok(None) };
         let grown = crate::crater::impact_crater(source, impact, t - impact.time)?;
-        let graph = self.graphs.at(t);
+        let graph = self.graphs.at(composition);
         let Some(i) = index_of(&graph, &body.id) else { return Ok(None) };
         let element = children(&*graph.nodes[i].elem)
             .into_iter()
@@ -918,6 +1224,21 @@ impl Driver3 for Driver<'_, '_> {
             .ok_or("missing crater")?;
         let crater = crate::crater::from_impact(element, &grown)?;
         deformed_surface(body, &crater, revision)
+    }
+
+    fn voxel_cut(
+        &mut self,
+        _t: f64,
+        parent: usize,
+        revision: Option<u64>,
+        impact: Option<&sr_sim::physics3d::Impact3>,
+    ) -> Result<Option<sr_sim::physics3d::VoxelCut3>, String> {
+        let body = &self.bodies[parent];
+        let (Some(owner), Some(source)) = (&body.voxels, &body.crater) else { return Ok(None) };
+        // one crater is one watch is one impact is one cut: the revision is 1 whenever there is an impact, so a world that asks again finds it installed
+        let (None, Some(impact)) = (revision, impact) else { return Ok(None) };
+        let cut = owner.cut_for(source, impact, &body.id).map_err(|e| format!("{}: {e}", body.id))?;
+        Ok(Some(cut.cut.cut.clone()))
     }
 
     fn load(
@@ -931,9 +1252,10 @@ impl Driver3 for Driver<'_, '_> {
         if !state.enabled {
             return Ok(None);
         }
+        let composition = group.clock().composition_time(t);
         let graphs = &mut *self.graphs;
         group.load(t, which, state, &mut |ocean: &crate::group::GroupOcean, plane: Option<&crate::group::Plane>| {
-            water_frame(&graphs.at(t), ocean, plane)
+            water_frame(&graphs.at(composition), ocean, plane)
         })
     }
 
@@ -969,11 +1291,12 @@ impl Driver3 for Driver<'_, '_> {
     }
 
     fn enabled(&mut self, t: f64, which: usize) -> bool {
-        enabled(&self.bodies[which], t)
+        enabled(&self.bodies[which], self.composition(t))
     }
 
     fn kinematic(&mut self, t: f64, which: &[usize]) -> Vec<Pose3> {
-        let g = self.graphs.at(t);
+        let composition = self.composition(t);
+        let g = self.graphs.at(composition);
         which
             .iter()
             .map(|&k| index_of(&g, &self.bodies[k].id).map(|i| decompose(&world3(&g, i, 0)).0).unwrap_or_default())
@@ -1091,6 +1414,8 @@ impl Phys3 {
 }
 
 pub(crate) struct FractureNode {
+    /// The place of the fracture among the world's events (a fracture of cells has one too, and no node here).
+    event: usize,
     source: usize,
     indices: Vec<usize>,
     geometry: Arc<crate::fracture::Geometry>,
@@ -1107,6 +1432,68 @@ fn enabled(body: &Body3Node, mut t: f64) -> bool {
 }
 
 /// Sets source poses and the active fracture snapshot, preserving piece visibility.
+/// The cells of object `k` and of its pieces at a frame, as the world says (`voxel_revision`) and the asset and the cut make them.
+fn voxel_state(
+    world: &World3,
+    three: &Phys3,
+    frame: &sr_sim::physics3d::Frame3,
+    k: usize,
+    owner: &crate::voxel_cut::VoxelOwner,
+    _time: f64,
+) -> Result<crate::voxel_cut::SimVoxels, String> {
+    let revision =
+        frame.voxel_revision.get(k).copied().flatten().ok_or("a body of cells has no revision at this frame")?;
+    // the cut of the impact, when there has been one: its rim has the palette indices of the cells it heaped
+    let link = three.links.iter().find(|l| l.owner == k);
+    let cut = match link.and_then(|l| frame.impacts.get(l.watch).copied().flatten().map(|i| (l, i))) {
+        Some((link, impact)) if revision > 0 => Some(owner.cut_for(&link.source, &impact, &three.bodies[k].id)?),
+        _ => None,
+    };
+    let cells_of = |body: usize, rev: u64| {
+        world.voxel_cells_at(body, rev).ok_or_else(|| format!("the world no longer has the cells of revision {rev}"))
+    };
+    let grid = owner.grid_of(k, revision, &cells_of(k, revision)?, cut.as_deref())?;
+    let changed_bricks =
+        if revision == 0 { Vec::new() } else { world.voxel_bricks_changed(k, 0, revision).unwrap_or_default() };
+    let mut pieces = Vec::new();
+    for &slot in &owner.slots {
+        let Some(rev) = frame.voxel_revision.get(slot).copied().flatten() else { continue };
+        let grid = owner.grid_of(slot, rev, &cells_of(slot, rev)?, cut.as_deref())?;
+        pieces.push(crate::voxel_cut::SimVoxelPiece {
+            body: slot,
+            enabled: frame.enabled.get(slot).copied().unwrap_or(false),
+            revision: rev,
+            grid,
+            pose3: compose(&frame.bodies[slot], three.bodies[k].scale).to_cols_array(),
+        });
+    }
+    let steps = (1..=revision)
+        .map_while(|r| world.voxel_bricks_changed(k, r - 1, r).map(|bricks| (r, bricks)))
+        .collect::<Vec<_>>();
+    let steps = if steps.len() as u64 == revision { steps } else { Vec::new() };
+    let enabled = frame.enabled.get(k).copied().unwrap_or(true);
+    let rock = owner.settings().rock;
+    let thrown = cut.as_ref().map(|c| {
+        // the loose parts too small to be bodies leave the ground as well, at rest in its frame (a moving owner's motion is not given them)
+        let metres = rock.size.map(|s| s / rock.pixels_per_meter);
+        let rim: std::collections::BTreeMap<[i32; 3], u8> = c.excavation.rim.iter().copied().collect();
+        let dust = c.cut.dust.iter().map(|cell| crate::voxel_crater::Thrown {
+            cell: *cell,
+            palette: match owner.model.occupancy.get(*cell) {
+                0 => rim.get(cell).copied().unwrap_or(1),
+                index => index,
+            },
+            position: std::array::from_fn(|a| (f64::from(cell[a]) + 0.5) * metres[a]),
+            velocity: [0.0; 3],
+        });
+        Arc::new(crate::voxel_cut::ThrownCells {
+            cells: c.excavation.thrown.iter().cloned().chain(dust).collect(),
+            mass: rock.density * (rock.size[0] * rock.size[1] * rock.size[2]) / rock.pixels_per_meter.powi(3),
+        })
+    });
+    Ok(crate::voxel_cut::SimVoxels { enabled, revision, grid, changed_bricks, steps, thrown, pieces })
+}
+
 pub(crate) fn apply(g: &mut FrameGraph, three: &Phys3, frame: &sr_sim::physics3d::Frame3) {
     use std::hash::{Hash, Hasher};
     for (b, pose) in three.bodies.iter().zip(&frame.bodies) {
@@ -1119,13 +1506,67 @@ pub(crate) fn apply(g: &mut FrameGraph, three: &Phys3, frame: &sr_sim::physics3d
     for link in &three.links {
         let Some(Some(impact)) = frame.impacts.get(link.watch) else { continue };
         let Some(i) = index_of(g, &three.bodies[link.owner].id) else { continue };
-        match crate::crater::impact_crater(&link.source, impact, g.time - impact.time) {
+        // the crater of an object of cells is made along the axis of the surface of its cells, and from the speed along it
+        let aligned = match &three.bodies[link.owner].voxels {
+            Some(owner) => owner.aligned(&link.source, impact),
+            None => Ok(*impact),
+        };
+        let aligned = match aligned {
+            Ok(impact) => impact,
+            Err(error) => {
+                g.fail(format!("{}: {error}", three.bodies[link.owner].id));
+                continue;
+            }
+        };
+        match crate::crater::impact_crater(&link.source, &aligned, g.time - aligned.time) {
             Ok(grown) => g.nodes[i].crater_impact = Some(Arc::new(grown)),
             Err(error) => g.fail(format!("{}: {error}", three.bodies[link.owner].id)),
         }
     }
-    for (k, fracture) in three.fractures.iter().enumerate() {
-        if !frame.fractured.get(k).copied().unwrap_or(false) {
+    // an object of cells that breaks into pieces: whole until its time, and then its pieces
+    for (k, b) in three.bodies.iter().enumerate() {
+        let Some(broken) = &b.cell_fracture else { continue };
+        let Some(i) = index_of(g, &b.id) else { continue };
+        let fired = frame.fractured.get(broken.event).copied().unwrap_or(false);
+        let pieces = if fired {
+            broken
+                .pieces
+                .iter()
+                .map(|(body, grid)| crate::voxel_cut::SimVoxelPiece {
+                    body: *body,
+                    enabled: frame.enabled.get(*body).copied().unwrap_or(false),
+                    revision: 0,
+                    grid: grid.clone(),
+                    pose3: compose(&frame.bodies[*body], b.scale).to_cols_array(),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        g.nodes[i].voxels = Some(Arc::new(crate::voxel_cut::SimVoxels {
+            enabled: frame.enabled.get(k).copied().unwrap_or(true),
+            revision: 0,
+            grid: broken.source.clone(),
+            changed_bricks: Vec::new(),
+            steps: Vec::new(),
+            thrown: None,
+            pieces,
+        }));
+    }
+    // the objects of cells that can be cut: how many cuts each has had, its cells, and the pieces that have come away
+    // a frame that failed has no revisions and says why itself: it is not told again, for each object, that it has none
+    if let Some(world) = three.world.as_ref().filter(|_| frame.errors.is_empty()) {
+        for (k, b) in three.bodies.iter().enumerate() {
+            let Some(owner) = &b.voxels else { continue };
+            let Some(i) = index_of(g, &b.id) else { continue };
+            match voxel_state(world, three, frame, k, owner, g.time) {
+                Ok(state) => g.nodes[i].voxels = Some(Arc::new(state)),
+                Err(error) => g.fail(format!("{}: {error}", b.id)),
+            }
+        }
+    }
+    for fracture in &three.fractures {
+        if !frame.fractured.get(fracture.event).copied().unwrap_or(false) {
             continue;
         }
         let Some(i) = index_of(g, &three.bodies[fracture.source].id) else { continue };

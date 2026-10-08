@@ -216,6 +216,7 @@ struct Sets<'a> {
     mesh_sequences: HashSet<&'a str>,
     sequence_colliders: HashSet<&'a str>,
     volume_assets: HashSet<&'a str>,
+    voxel_assets: HashSet<&'a str>,
     pyro_colliders: HashSet<&'a str>,
     /// Objects that hold a native pyro volume.
     pyro_volumes: HashSet<&'a str>,
@@ -373,6 +374,8 @@ fn build_sets<'a>(scene: Option<Node<'a, '_>>) -> Sets<'a> {
                 s.mesh_sequences.insert(i);
             } else if is(a, "volume") {
                 s.volume_assets.insert(i);
+            } else if is(a, "voxelAsset") {
+                s.voxel_assets.insert(i);
             } else if is(a, "geo") {
                 s.geo_assets.push(i);
             } else if is(a, "tiles") {
@@ -508,6 +511,7 @@ impl<'a> Eval<'a> {
         let number = |e: Node, k: &str, default: f64| e.attribute(k).map_or(default, xpath_number);
         // a source from a crater has no place in the document, and an animated one moves
         if pyro.attribute("boundary") != Some("open")
+            || matches!(pyro.attribute("follow"), Some("true" | "1"))
             || n.attribute("crater").is_some()
             || n.children().any(|c| c.is_element())
         {
@@ -565,6 +569,105 @@ impl<'a> Eval<'a> {
         }
     }
 
+    /// BH1 to BH8 and W03 to W05: a Schwarzschild black hole, its disk and the camera that traces geodesics.
+    fn black_hole(&mut self, n: Node, local: &str) {
+        let root = n.document().root_element();
+        let all = |name: &'static str| root.descendants().filter(move |d| d.is_element() && is(*d, name));
+        let number = |e: Node, k: &str, default: f64| {
+            e.attribute(k).map_or(default, |s| xpath_number(s.trim().strip_prefix('+').unwrap_or(s.trim())))
+        };
+        let geodesics = local == "camera" && n.attribute("geodesics") == Some("true");
+        match local {
+            "blackHole" | "accretionDisk" => {}
+            "camera" if n.has_attribute("geodesics") => {}
+            _ => return,
+        }
+        self.check(root.attribute("version") == Some("1.3"), n, "BH1", || {
+            "black holes require version=\"1.3\".".into()
+        });
+        match local {
+            "blackHole" => {
+                self.check(all("blackHole").count() == 1, n, "BH2", || {
+                    "version 1.3 has one blackHole per scene.".into()
+                });
+            }
+            "accretionDisk" => {
+                let hole =
+                    n.attribute("blackHole").and_then(|id| all("blackHole").find(|h| h.attribute("id") == Some(id)));
+                self.check(hole.is_some(), n, "BH3", || "an accretionDisk must name a blackHole.".into());
+                if let Some(hole) = hole {
+                    let (mass, outer) = (number(hole, "mass", f64::NAN), number(n, "outerRadius", f64::NAN));
+                    let inner = n.has_attribute("innerRadius").then(|| number(n, "innerRadius", f64::NAN));
+                    let ok = inner.is_none_or(|i| i >= 6.0 * mass) && outer > inner.unwrap_or(6.0 * mass);
+                    self.check(ok, n, "BH4", || {
+                        "the inner radius of an accretionDisk is at least 6 times the mass of its blackHole (the \
+                         innermost stable circular orbit), and the outer radius is beyond the inner one."
+                            .into()
+                    });
+                }
+            }
+            _ if geodesics => {
+                let hole = all("blackHole").next();
+                self.check(hole.is_some(), n, "BH5", || "a camera with geodesics=\"true\" needs a blackHole.".into());
+                const OTHER: [&str; 10] = [
+                    "object3D",
+                    "particles3D",
+                    "particleEmitter",
+                    "ocean",
+                    "fluid",
+                    "flock",
+                    "slime",
+                    "erosion",
+                    "pyro",
+                    "medium",
+                ];
+                self.check(!OTHER.iter().any(|name| all(name).next().is_some()), n, "BH6", || {
+                    "a camera with geodesics=\"true\" renders only the black hole, its disk and the 2D layers: no \
+                     object3D, particles3D, particleEmitter, ocean, fluid, flock, slime, erosion, pyro or medium may \
+                     be in the scene."
+                        .into()
+                });
+                if let Some(hole) = hole {
+                    let mass = number(hole, "mass", f64::NAN);
+                    let d2: f64 =
+                        ["x", "y", "z"].iter().map(|k| (number(n, k, 0.0) - number(hole, k, 0.0)).powi(2)).sum();
+                    self.check(d2 > 9.0 * mass * mass, n, "BH7", || {
+                        "a camera with geodesics=\"true\" must be farther than 3 times the mass of the blackHole from \
+                         it, the photon sphere."
+                            .into()
+                    });
+                }
+                self.check(
+                    all("camera").filter(|c| c.attribute("geodesics") == Some("true")).count() <= 1,
+                    n,
+                    "BH8",
+                    || "a scene has at most one camera with geodesics=\"true\".".into(),
+                );
+                if n.attribute("denoise") == Some("true") {
+                    self.warn(
+                        n,
+                        "W04",
+                        "a camera with geodesics=\"true\" does not denoise: pathSamples are antialiasing samples."
+                            .into(),
+                    );
+                }
+                if all("light").next().is_some() {
+                    self.warn(n, "W05", "lights are not used by a camera with geodesics=\"true\".".into());
+                }
+            }
+            _ => {}
+        }
+        if matches!(local, "blackHole" | "accretionDisk")
+            && !all("camera").any(|c| c.attribute("geodesics") == Some("true"))
+        {
+            self.warn(
+                n,
+                "W03",
+                "no camera has geodesics=\"true\", so the black hole and its disk are not rendered.".into(),
+            );
+        }
+    }
+
     /// p1: what version="1.0" documents cannot use.
     fn version_1_0(&mut self, n: Node) {
         self.check(!V1_SECTIONS.iter().any(|s| has_kid(n, s)), n, "V1", || {
@@ -609,6 +712,14 @@ impl<'a> Eval<'a> {
                         && (d.attribute("primitive") == Some("volume") || d.attribute("volume").is_some()))
             });
             self.check(!uses_volume, n, "V8", || "volumetric assets and media require version=\"1.3\".".into());
+            let uses_voxels = n.descendants().any(|d| {
+                is(d, "voxelAsset")
+                    || (is(d, "object3D")
+                        && (d.attribute("primitive") == Some("voxels") || d.attribute("voxels").is_some()))
+            });
+            self.check(!uses_voxels, n, "VOX1", || {
+                "voxel assets and the voxels primitive require version=\"1.3\".".into()
+            });
         }
 
         if matches!(local, "object3D" | "pyro" | "particles3D") {
@@ -638,14 +749,80 @@ impl<'a> Eval<'a> {
                     "FRX2",
                     || "fracture requires one closed surface object3D owner and exactly one rigidBody.".into(),
                 );
-                self.check(contains(&self.sets.materials, a("interiorMaterial")), n, "FRX3", || {
+                let cells_owner = n.parent_element().is_some_and(|o| o.attribute("primitive") == Some("voxels"));
+                self.check(cells_owner || contains(&self.sets.materials, a("interiorMaterial")), n, "FRX3", || {
                     "fracture interiorMaterial must reference a declared material.".into()
                 });
-                let finite = n.attributes().filter(|a| a.name() != "interiorMaterial").all(|a| {
-                    let s = a.value().trim();
-                    xpath_number(s.strip_prefix('+').unwrap_or(s)).is_finite()
-                });
+                let finite = n
+                    .attributes()
+                    .filter(|a| !matches!(a.name(), "interiorMaterial" | "source" | "partition" | "planes" | "labels"))
+                    .all(|a| {
+                        let s = a.value().trim();
+                        xpath_number(s.strip_prefix('+').unwrap_or(s)).is_finite()
+                    });
                 self.check(finite, n, "FRX4", || "fracture numeric values must be finite.".into());
+                let body = a("source").and_then(|id| {
+                    n.document().descendants().find(|o| {
+                        is(*o, "object3D")
+                            && o.attribute("id") == Some(id)
+                            && n.parent_element().is_none_or(|owner| owner.attribute("id") != Some(id))
+                    })
+                });
+                self.check(
+                    a("source").is_none()
+                        || body.is_some_and(|o| {
+                            kids(o, "rigidBody").any(|r| r.attribute("type").is_none_or(|t| t == "dynamic"))
+                        }),
+                    n,
+                    "FRX5",
+                    || "fracture source must name another object3D whose rigidBody is dynamic.".into(),
+                );
+                self.check(
+                    !has("source")
+                        || !["at", "radialImpulse", "impulseX", "impulseY", "impulseZ"].iter().any(|k| has(k)),
+                    n,
+                    "FRX6",
+                    || {
+                        "a fracture that comes from a source derives its time and its push, so at, radialImpulse and \
+                         impulseX, impulseY and impulseZ may not be given."
+                            .into()
+                    },
+                );
+                self.check(has("source") || !(has("minImpulse") || has("energyFraction")), n, "FRX7", || {
+                    "minImpulse and energyFraction belong to a fracture with a source.".into()
+                });
+                self.check(!cells_owner || !(has("interiorMaterial") || has("interiorUvScale")), n, "FRX8", || {
+                    "a fracture of an object of cells has no interior material: its pieces have the material of their cells.".into()
+                });
+                self.check(cells_owner || !(has("partition") || has("planes") || has("labels")), n, "FRX9", || {
+                    "partition, planes and labels belong to the fracture of an object of primitive voxels.".into()
+                });
+                self.check(
+                    !has("partition") || a("partition") == Some("voronoi") || !(has("pieces") || has("seed")),
+                    n,
+                    "FRX10",
+                    || "pieces and seed belong to a voronoi partition.".into(),
+                );
+                let numbers: Vec<f64> =
+                    a("planes").map_or(Vec::new(), |v| v.split_whitespace().map(xpath_number).collect());
+                let planes_ok = !numbers.is_empty()
+                    && numbers.len() <= 252
+                    && numbers.len() & 3 == 0
+                    && numbers.iter().all(|x| x.is_finite())
+                    && numbers.chunks(4).all(|plane| plane[..3].iter().any(|c| *c != 0.0));
+                self.check(
+                    (a("partition") == Some("planes") || !has("planes")) && (a("partition") != Some("planes") || (has("planes") && planes_ok)),
+                    n,
+                    "FRX11",
+                    || "partition planes takes planes, from one to 63 planes of four finite numbers (nx ny nz offset, the normal not all zeros), and planes belongs to that partition.".into(),
+                );
+                self.check(
+                    (a("partition") == Some("labels") || !has("labels"))
+                        && (a("partition") != Some("labels") || a("labels") == Some("material")),
+                    n,
+                    "FRX12",
+                    || "partition labels takes labels=\"material\", and labels belongs to that partition.".into(),
+                );
             }
             "crater" => {
                 let number = |k, default| {
@@ -670,12 +847,15 @@ impl<'a> Eval<'a> {
                 });
                 let finite = n
                     .attributes()
-                    .filter(|a| !matches!(a.name(), "curve" | "id" | "source" | "capture" | "targetMaterial"))
+                    .filter(|a| {
+                        !matches!(a.name(), "curve" | "id" | "source" | "capture" | "mantle" | "targetMaterial")
+                    })
                     .all(|a| number(a.name(), 0.).is_finite());
                 let direction = [number("normalX", 0.), number("normalY", 0.), number("normalZ", -1.)];
                 let envelope = !has("influenceDepth")
+                    || has("source")
                     || (number("influenceDepth", 0.) * 0.5 >= number("depth", 10.).max(number("rimHeight", 2.)));
-                self.check(finite && direction.iter().any(|&x|x!=0.) && number("rimWidth",10.)<=number("radius",50.) && envelope,n,"CRT4",||"crater values must be finite, its normal nonzero, rimWidth <= radius and influenceDepth >= twice max(depth,rimHeight).".into());
+                self.check(finite && direction.iter().any(|&x|x!=0.) && number("rimWidth",10.)<=number("radius",50.) && envelope,n,"CRT4",||"crater values must be finite, its normal nonzero, rimWidth <= radius and, for a crater without a source, influenceDepth >= twice max(depth,rimHeight); a crater with a source has its size from the impact, and its envelope is checked when it is made.".into());
                 let derived = ["radius", "depth", "rimHeight", "rimWidth", "start", "end"]
                     .iter()
                     .chain(["centerX", "centerY", "centerZ", "normalX", "normalY", "normalZ"].iter());
@@ -713,20 +893,40 @@ impl<'a> Eval<'a> {
                 self.check(!has("capture") || has("source"), n, "CRT9", || {
                     "crater capture belongs to a crater that grows from a source.".into()
                 });
+                self.check((!has("mantle") && !has("bulking") && !has("repose")) || has("source"), n, "CRT10", || {
+                    "crater mantle, bulking and repose belong to a crater that grows from a source.".into()
+                });
+                self.check(!has("bulking") || n.attribute("mantle") == Some("true"), n, "CRT11", || {
+                    "crater bulking belongs to a crater with a mantle (mantle=\"true\").".into()
+                });
+                self.check(!has("repose") || n.attribute("mantle") != Some("true"), n, "CRT12", || {
+                    "a crater that gives its settled ejecta a repose angle has no mantle: the ejecta are the ground once, as one or the other.".into()
+                });
                 self.check(
                     owner.is_none_or(|o| {
                         kids(o, "rigidBody").all(|b| {
                             matches!(b.attribute("type"), Some("static" | "kinematic"))
-                                && matches!(b.attribute("shape"), None | Some("auto" | "trimesh"))
+                                && matches!(b.attribute("shape"), None | Some("auto" | "trimesh" | "voxels"))
                         })
                     }),
                     n,
                     "CRT5",
                     || {
-                        "crater rigid bodies require static/kinematic type with auto or trimesh collision geometry."
+                        "crater rigid bodies require static/kinematic type with auto, trimesh or voxels collision geometry."
                             .into()
                     },
                 );
+                let in_cells = owner.is_some_and(|o| o.attribute("primitive") == Some("voxels"));
+                self.check(!in_cells || !(has("mantle") || has("bulking") || has("repose")), n, "CRT13", || {
+                    "a crater in an object of cells has no mantle, bulking or repose: the rim is cells (bulking 1, a fifth heaped) and not an analytic surface.".into()
+                });
+                self.check(!in_cells || !has("curve"), n, "CRT14", || {
+                    "the cut of a crater in an object of cells is instantaneous at the impact, so curve has no meaning there (start and end are refused by CRT6 for a crater with a source, which CRT15 requires)."
+                        .into()
+                });
+                self.check(!in_cells || has("source"), n, "CRT15", || {
+                    "a crater in an object of cells grows from a source: it is cut by an impact.".into()
+                });
             }
             // p1 — version gate
             "scene" if n.parent_element().is_none() && matches!(a("version"), Some("1.0" | "1.1")) => {
@@ -780,6 +980,10 @@ impl<'a> Eval<'a> {
                 let marked = ["markerStart", "markerEnd"].iter().any(|k| a(k).is_some_and(|v| v != "none"));
                 self.check(!marked || matches!(a("shape"), Some("path" | "line")), n, "C65", || {
                     "markers need an open outline: shape=\"path\" or \"line\".".into()
+                });
+                // p73: shape[@region] matches the earlier rule in this pattern.
+                self.check(has("region") || (has("width") && has("height")), n, "C69", || {
+                    "shape needs @width and @height unless it takes its box from @region.".into()
                 });
             }
             // p4
@@ -898,6 +1102,59 @@ impl<'a> Eval<'a> {
                     "OCN5",
                     || "ocean accepts one whitewater source with end >= start and valid foam/spray materials.".into(),
                 );
+                let cell = a("cellSize").map_or(1.0, xpath_number);
+                self.check(
+                    sources.iter().all(|s| s.attribute("foamRadius").is_none_or(|r| xpath_number(r) <= 64.0 * cell)),
+                    n,
+                    "OCN14",
+                    || "ocean whitewater foamRadius is at most 64 cells of the ocean: a wider coverage takes too many distances to the vertices of the surface.".into(),
+                );
+                // the foam mixed into the water is the path tracer's: warn where the document is valid and a renderer can run it
+                let albedo: Vec<_> = sources.iter().filter(|s| s.attribute("foamMode") == Some("albedo")).collect();
+                if albedo.iter().any(|s| s.attribute("foamMaterial").is_some()) {
+                    self.warn(
+                        n,
+                        "W06",
+                        "foamMaterial is not used by whitewater with foamMode=\"albedo\": the foam is the water's own."
+                            .into(),
+                    );
+                }
+                let path_traced = n
+                    .document()
+                    .root_element()
+                    .descendants()
+                    .any(|c| c.is_element() && is(c, "camera") && c.attribute("renderer") == Some("pathtrace"));
+                // a water that is not opaque, is unlit or shines is refused by a renderer (an unlit one draws its own colour, and the foam would
+                // be in the guide of the denoiser only): a warning where the document says so, by the criterion the renderer applies
+                let ocean_material = a("material").and_then(|id| {
+                    n.document()
+                        .root_element()
+                        .descendants()
+                        .find(|m| m.is_element() && is(*m, "material") && m.attribute("id") == Some(id))
+                });
+                if !albedo.is_empty()
+                    && ocean_material.is_some_and(|m| {
+                        !crate::foam::water_takes_foam(
+                            m.attribute("alphaMode"),
+                            m.attribute("unlit"),
+                            m.attribute("emissive"),
+                            m.attribute("emissiveStrength"),
+                        )
+                    })
+                {
+                    self.warn(
+                        n,
+                        "W08",
+                        "whitewater with foamMode=\"albedo\" needs an opaque, lit water material without emission: a renderer reports an error for another (read from the document's attributes at the start: one that animates is read by the renderer at each frame).".into(),
+                    );
+                }
+                if !albedo.is_empty() && !path_traced {
+                    self.warn(
+                        n,
+                        "W07",
+                        "whitewater with foamMode=\"albedo\" is drawn only by the path tracer, and no camera has renderer=\"pathtrace\": a renderer reports an error.".into(),
+                    );
+                }
             }
             "particles3D" => {
                 self.check(n.document().root_element().attribute("version") == Some("1.3"), n, "P3D1", || {
@@ -989,6 +1246,24 @@ impl<'a> Eval<'a> {
                 self.check(grid, n, "PYRO1", || {
                     "pyro dimensions must be integer multiples of voxelSize, with 2..1024 cells per axis.".into()
                 });
+                let blasts = n.children().any(|c| is(c, "pyroBlast"));
+                self.check(!blasts || a("boundary") == Some("open"), n, "PYC5", || {
+                    "a pyro with a blast needs boundary=\"open\": a blast is a source of divergence, which a closed domain cannot let out.".into()
+                });
+                let follows = matches!(a("follow"), Some("true" | "1"));
+                self.check(!follows || a("boundary") == Some("open"), n, "PYRO9", || {
+                    "a pyro whose window follows its plume needs boundary=\"open\".".into()
+                });
+                self.check(follows || !(has("followMargin") || has("followLoss")), n, "PYRO10", || {
+                    "followMargin and followLoss belong to a pyro that follows its plume.".into()
+                });
+                let margin = a("followMargin").map_or(f64::NAN, xpath_number);
+                let room = ["width", "height", "depth"]
+                    .iter()
+                    .all(|name| 2.0 * margin * h < a(name).map_or(f64::NAN, xpath_number));
+                self.check(!has("followMargin") || room, n, "PYRO11", || {
+                    "followMargin must leave a cell between the faces of the window on every axis.".into()
+                });
             }
             "burst" if n.parent_element().is_some_and(|p| is(p, "particles3D")) => {
                 let from_crater = has("crater");
@@ -1008,13 +1283,27 @@ impl<'a> Eval<'a> {
                     "P3D8",
                     || "a burst from a crater must name a crater that grows from an impact.".into(),
                 );
+                let of_cells = a("crater").is_some_and(|id| {
+                    n.document().descendants().any(|o| {
+                        is(o, "object3D")
+                            && o.attribute("primitive") == Some("voxels")
+                            && kids(o, "crater").any(|c| c.attribute("id") == Some(id))
+                    })
+                });
+                self.check(if of_cells { !has("count") } else { has("count") }, n, "CRT16", || {
+                    "a burst needs count, except one from the crater of an object of cells, whose particles are the cells that the cut throws and have no count.".into()
+                });
+                self.check(!of_cells || !(has("angle") || has("angleSpread")), n, "CRT17", || {
+                    "a burst from the crater of an object of cells launches the cells that the cut throws with the cut's own velocities, so angle and angleSpread have no meaning there."
+                        .into()
+                });
                 self.check(from_crater || !(has("angle") || has("angleSpread")), n, "P3D9", || {
                     "angle and angleSpread belong to a burst from a crater.".into()
                 });
                 let degrees = |k: &str, default: f64| a(k).map(xpath_number).unwrap_or(default);
                 let (angle, spread) = (degrees("angle", 45.), degrees("angleSpread", 15.));
                 self.check(!from_crater || (angle - spread >= 0. && angle + spread <= 90.), n, "P3D10", || {
-                    "the launch angle of a burst from a crater and its spread must stay between 0 and 90 degrees."
+                    "the launch angle of a burst from a crater (default 45) and its spread (default 15) must stay between 0 and 90 degrees."
                         .into()
                 });
             }
@@ -1054,6 +1343,19 @@ impl<'a> Eval<'a> {
                     "OCN12",
                     || "a body makes one cavity: at most one water impulse names it.".into(),
                 );
+            }
+            "pyroBlast" => {
+                let parent = n.parent_element();
+                let inside = [("x", "width"), ("y", "height"), ("z", "depth")].iter().all(|(axis, size)| {
+                    a(axis).is_none_or(|v| {
+                        let half = parent.and_then(|p| p.attribute(*size)).map_or(f64::NAN, xpath_number) / 2.0;
+                        let v = xpath_number(v);
+                        v >= -half && v <= half
+                    })
+                });
+                self.check(inside, n, "PYC6", || {
+                    "a blast is released inside the domain of its pyro (x between plus and minus half the width, and likewise y with the height and z with the depth).".into()
+                });
             }
             "pyroSource" | "pyroImpulse" => {
                 self.pyro_source_near_open_face(n);
@@ -1188,6 +1490,37 @@ impl<'a> Eval<'a> {
                 );
                 let target = !has("volume") || contains(&self.sets.volume_assets, a("volume"));
                 self.check(target, n, "VOL2", || "object3D/@volume must name a volume asset.".into());
+                let voxels = a("primitive") == Some("voxels");
+                self.check(!voxels || contains(&self.sets.voxel_assets, a("voxels")), n, "VOX4", || {
+                    "an object3D of primitive voxels names a voxelAsset in voxels.".into()
+                });
+                self.check(
+                    voxels || !["voxels", "cellSize", "palette", "surface"].iter().any(|k| has(k)),
+                    n,
+                    "VOX5",
+                    || "voxels, cellSize, palette and surface belong to primitive=\"voxels\".".into(),
+                );
+                let palette_ok = a("palette").is_none_or(|p| {
+                    let tokens: Vec<&str> = p.split_whitespace().collect();
+                    p.trim() == "file"
+                        || (tokens.len() <= 255 && tokens.iter().all(|t| self.sets.materials.contains(t)))
+                });
+                self.check(palette_ok, n, "VOX6", || "palette is the word file or at most 255 material ids.".into());
+                let excluded = ["mesh", "volume", "terrain", "map", "text", "path"].iter().any(|k| has(k))
+                    || kids(n, "medium").next().is_some()
+                    || kids(n, "pyro").next().is_some();
+                self.check(!voxels || !excluded, n, "VOX7", || {
+                    "a voxels object has no mesh, volume, terrain, map, text or path, and no medium or pyro child."
+                        .into()
+                });
+                let breaks = kids(n, "crater").next().is_some() || kids(n, "fracture").next().is_some();
+                let of_cells = |b: roxmltree::Node| matches!(b.attribute("shape"), None | Some("auto" | "voxels"));
+                self.check(
+                    !(voxels && breaks) || (kids(n, "rigidBody").next().is_some() && kids(n, "rigidBody").all(of_cells)),
+                    n,
+                    "VOX15",
+                    || "an object of cells that a crater or a fracture breaks has a rigidBody whose collider is the cells (shape voxels or auto, or no shape).".into(),
+                );
                 let thermal = kids(n, "medium").any(|m| matches!(m.attribute("blackbody"), Some("true" | "1")));
                 let temperature = n
                     .document()
@@ -1283,6 +1616,22 @@ impl<'a> Eval<'a> {
                     "mesh sequence sha256 cannot identify multiple numbered files.".into()
                 });
             }
+            "voxelAsset" if parent_is("assets") => {
+                let extension = |e: &str| a("src").is_some_and(|s| s.ends_with(e));
+                let vox = a("format") == Some("vox") || (!has("format") && extension(".vox"));
+                let srvol = a("format") == Some("srvol") || (!has("format") && extension(".srvol"));
+                let sources = usize::from(has("src")) + usize::from(has("fromMesh"));
+                let belongs = (!(has("format") || has("model")) || has("src"))
+                    && (!has("model") || vox)
+                    && (!has("voxelGrid") || srvol)
+                    && (has("fromMesh") == has("cellSize"));
+                self.check(sources == 1 && belongs, n, "VOX2", || {
+                    "a voxelAsset has exactly one of src and fromMesh; format, model and voxelGrid belong to src (model to a vox file, voxelGrid to an srvol file), and cellSize is required with fromMesh and not given with src.".into()
+                });
+                self.check(!has("fromMesh") || contains(&self.sets.mesh_assets, a("fromMesh")), n, "VOX3", || {
+                    "voxelAsset/@fromMesh must name a mesh asset.".into()
+                });
+            }
             // p42
             "volume" if parent_is("assets") => {
                 let baked = a("format") == Some("srvseq");
@@ -1342,6 +1691,43 @@ impl<'a> Eval<'a> {
             "rigidBody" if parent_is("object3D") => {
                 let ok = a("shape") != Some("trimesh") || matches!(a("type"), Some("static" | "kinematic"));
                 self.check(ok, n, "C48", || "a trimesh rigidBody must be static or kinematic.".into());
+                // the rigid bodies of cells (VOX8 to VOX14)
+                let owner = n.parent_element();
+                let voxels = owner.is_some_and(|o| o.attribute("primitive") == Some("voxels"));
+                let cells = voxels && matches!(a("shape"), None | Some("auto" | "voxels"));
+                let crater = owner.is_some_and(|o| kids(o, "crater").next().is_some());
+                let fracture = owner.is_some_and(|o| kids(o, "fracture").next().is_some());
+                // xs:double has the plus sign and XPath 1.0 does not: the Schematron takes it off, as here
+                let scale = |axis: &str| {
+                    owner.and_then(|o| o.attribute(axis)).map_or(1.0, |v| {
+                        let v = v.trim_matches([' ', '\t', '\n', '\r']);
+                        xpath_number(v.strip_prefix('+').unwrap_or(v))
+                    })
+                };
+                self.check(a("shape") != Some("voxels") || voxels, n, "VOX8", || {
+                    "a rigidBody with shape voxels belongs to an object3D of primitive voxels.".into()
+                });
+                let cell_only = ["density", "maxFragments", "fragmentMinCells", "fragmentOverflow", "anchor"];
+                self.check(cells || !cell_only.iter().any(|k| has(k)), n, "VOX9", || {
+                    "density, maxFragments, fragmentMinCells, fragmentOverflow and anchor belong to a rigidBody whose collider is the cells of an object of primitive voxels.".into()
+                });
+                self.check(!cells || (has("density") && !has("mass")), n, "VOX10", || {
+                    "a body of cells has a density and no mass (its mass is its cells').".into()
+                });
+                let slots = ["maxFragments", "fragmentMinCells", "fragmentOverflow"];
+                self.check(!slots.iter().any(|k| has(k)) || crater || fracture, n, "VOX11", || {
+                    "maxFragments, fragmentMinCells and fragmentOverflow belong to a body of cells that a crater or a fracture can break.".into()
+                });
+                self.check(!has("anchor") || crater, n, "VOX12", || {
+                    "anchor belongs to a body of cells that has a crater.".into()
+                });
+                let uniform = scale("scaleX") == scale("scaleY") && scale("scaleY") == scale("scaleZ");
+                self.check(!(cells && (crater || fracture)) || uniform, n, "VOX13", || {
+                    "a body of cells that a crater or a fracture breaks is scaled the same on every axis.".into()
+                });
+                self.check(!(voxels && crater && fracture), n, "VOX14", || {
+                    "a body of cells has a crater or a fracture, not both.".into()
+                });
             }
             "tiles" => {
                 let ok = has("src") || (has("url") && has("cache") && has("cacheSha256"));
@@ -1571,6 +1957,8 @@ impl<'a> Eval<'a> {
             }
             _ => {}
         }
+
+        self.black_hole(n, local);
 
         // p9, p25 — layer
         if local == "layer" {

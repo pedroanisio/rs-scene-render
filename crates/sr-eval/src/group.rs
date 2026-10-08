@@ -4,7 +4,7 @@
 //! and the ocean needs the body's pose at each of its steps. Neither can be replayed alone by
 //! asking the other again, since that would restore the other's checkpoints in turn. A group
 //! therefore passes what each needs through an immutable log: the ocean writes, once, the
-//! outcome of each canonical step, and the rigid world reads from it the load for each of its
+//! outcome of each canonical step (what the water offered about each body), and the rigid world reads from it the load for each of its
 //! own steps. Replaying either member reads the same records.
 //!
 //! The group is implicit: an ocean whose `colliders` list a rigid body forms one with the rigid
@@ -22,8 +22,13 @@
 //! to the outcomes those readers can ask for. The group therefore simulates a little beyond the
 //! instant asked for.
 //!
-//! Every member of a group must run on the composition clock: the ocean's local time is the
-//! composition time less its start, with no remapping, because the exchange is indexed by it.
+//! Every member of a group must run on one clock, and it may be any clock that stretches time the same way
+//! everywhere (a group's `timeScale` and `timeOffset`, nested or not), the composition's own included: the
+//! ocean's local time is the group's time less its start, because the exchange is indexed by it. The rigid world
+//! is one world, so every body of it, the ocean and whatever reads the bodies take part in that one clock, and
+//! the world runs on the group's time: a scene in a group of `timeScale` 0.5 at composition time `T` is the
+//! same scene, bit for bit, as the one without the group at `T / 2`. A member on another clock is an error that
+//! names it and the ocean whose clock it differs from.
 
 use std::sync::{Arc, Mutex};
 
@@ -33,19 +38,13 @@ use sr_sim::hydrostatics::{buoyant_load, halfway, place, submerged_mesh, submerg
 use sr_sim::physics3d::{BodyState, Load3};
 
 use crate::program::Program;
-use crate::sim::{num, text};
+use crate::sim::{num, text, uniform_clock, Uniform};
 
 /// What an ocean gave the bodies in it during one canonical step.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Exchange {
     /// Horizontal momentum per unit water density that the bodies gave the water.
     pub(crate) momentum: [f64; 2],
-}
-
-impl Record for Exchange {
-    fn same(&self, other: &Self) -> bool {
-        self.momentum.iter().zip(&other.momentum).all(|(a, b)| a.to_bits() == b.to_bits())
-    }
 }
 
 /// What the water offered about one body in a canonical step: where the body stands in it, the
@@ -136,11 +135,19 @@ pub(crate) struct BodyHull {
     /// Kilograms.
     pub(crate) mass: f64,
     shape: sr_sim::physics3d::Shape3,
+    /// Whether forces move it: the water loads only a body that they do.
+    dynamic: bool,
 }
 
 impl BodyHull {
     pub(crate) fn new(id: Arc<str>, mass: f64, shape: &sr_sim::physics3d::Shape3) -> BodyHull {
-        BodyHull { id, mass, shape: shape.clone() }
+        BodyHull { id, mass, shape: shape.clone(), dynamic: true }
+    }
+
+    /// A body that the water does not load: static, or moved by the scene and not by forces.
+    pub(crate) fn fixed(mut self) -> BodyHull {
+        self.dynamic = false;
+        self
     }
 }
 
@@ -150,8 +157,8 @@ pub(crate) type ReactionFn = Arc<dyn Fn(&Reaction) -> Option<Load3> + Send + Syn
 /// How the water loads a body.
 #[derive(Clone)]
 pub(crate) enum Coupling {
-    /// By the outcome an ocean wrote for a canonical step (the momentum bodies gave it). Nothing in a
-    /// document builds one yet: the ocean offers the momentum in total, not per body.
+    /// By the momentum the bodies gave the water in a canonical step, the sum of what the ocean offered about
+    /// each body in it. Nothing in a document builds one: a document couples by buoyancy.
     #[allow(dead_code)]
     Reaction(ReactionFn),
     /// By the weight of the water the body displaces below the ocean's rest surface.
@@ -191,6 +198,10 @@ impl Buoyant {
         let mut hulls = Vec::new();
         for &k in listed {
             let body = &bodies[k];
+            // the water loads what forces move: a static seabed has no hull to float, whatever its shape
+            if !body.dynamic {
+                continue;
+            }
             let hull = match &body.shape {
                 sr_sim::physics3d::Shape3::Sphere(r) => Hull::Sphere(*r),
                 other => {
@@ -260,22 +271,41 @@ pub(crate) struct GroupOcean {
     coupling: Coupling,
 }
 
+/// The clock the rigid world runs on: that of the first ocean that carries bodies, or the composition's. Whether
+/// the document's members all run on it is for [`Group::detect`] to say.
+pub(crate) fn world_clock(p: &Program) -> Uniform {
+    p.nodes
+        .iter()
+        .enumerate()
+        .find(|(_, n)| {
+            matches!(&*n.elem, sr_model::model::Node::Ocean(_))
+                && text(&*n.elem, "colliders").is_some_and(|c| !c.trim().is_empty())
+        })
+        .and_then(|(index, _)| uniform_clock(p, index as u32))
+        .unwrap_or(Uniform::COMPOSITION)
+}
+
 /// The rigid world and the oceans it exchanges with.
 #[derive(Clone)]
 pub(crate) struct Group {
-    log: Arc<Mutex<ExchangeLog<Exchange>>>,
-    /// What the water offered about each body, per ocean and canonical step.
+    /// What the water offered about each body, per ocean and canonical step: the one record of a step.
     around: Arc<Mutex<ExchangeLog<Around>>>,
     oceans: Arc<[GroupOcean]>,
     /// Seconds past a frame's time that something reads the rigid world.
     reach: f64,
     /// The rigid world's step, seconds.
     step: f64,
+    /// The clock of the ocean, the bodies and what reads them: the world's time is the time on it.
+    clock: Uniform,
 }
 
 impl std::fmt::Debug for Group {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Group").field("oceans", &self.oceans).field("reach", &self.reach).finish()
+        f.debug_struct("Group")
+            .field("oceans", &self.oceans)
+            .field("reach", &self.reach)
+            .field("clock", &self.clock)
+            .finish()
     }
 }
 
@@ -289,6 +319,7 @@ impl Group {
         injected: Option<Coupling>,
     ) -> Result<Option<Group>, String> {
         let mut oceans = Vec::new();
+        let mut clocks: Vec<(Arc<str>, Uniform)> = Vec::new();
         for (index, n) in p.nodes.iter().enumerate() {
             let sr_model::model::Node::Ocean(e) = &*n.elem else { continue };
             let slots: Vec<(usize, u32)> = text(e, "colliders")
@@ -301,10 +332,11 @@ impl Group {
             if listed.is_empty() {
                 continue;
             }
+            let attrs = crate::ocean::WaterAttrs::of(e);
             let water = Water {
-                density: 1000.0,
-                gravity: num(e, "gravity", 9.81),
-                drag: num(e, "bodyDrag", 1.0),
+                density: attrs.density,
+                gravity: attrs.gravity,
+                drag: attrs.body_drag,
                 pixels_per_meter: p.scene.physics.as_ref().map_or(100.0, |ph| ph.pixels_per_meter.get()),
             };
             let coupling = match (&injected, text(e, "bodyCoupling").as_deref()) {
@@ -314,11 +346,15 @@ impl Group {
                 )),
                 _ => continue,
             };
-            // the exchange is indexed by the ocean's own time: it must be the composition's
-            let composition = |x: f64| crate::sim::source_sample(p, index as u32, x, x).0;
-            if [0.0, 1.0, 7.5].iter().any(|&x| composition(x + n.start) != x + n.start) {
-                return Err(format!("{}: an ocean that exchanges with rigid bodies needs the composition clock", n.id));
-            }
+            // the exchange is indexed by the ocean's own time: the group's, on a clock that stretches time uniformly
+            let Some(clock) = uniform_clock(p, index as u32) else {
+                return Err(format!(
+                    "{}: an ocean that exchanges with rigid bodies needs a clock that stretches time uniformly \
+                     (a group's timeScale and timeOffset), not a remap, a loop, a freeze or a clip's rate",
+                    n.id
+                ));
+            };
+            clocks.push((n.id.clone(), clock));
             let dt = num(e, "dt", 1.0 / 60.0);
             if !(dt.is_finite() && dt > 0.0) {
                 return Err(format!("{}: an ocean that exchanges with rigid bodies needs a positive dt", n.id));
@@ -329,7 +365,7 @@ impl Group {
                 start: n.start,
                 bodies: listed,
                 slots,
-                water_level: num(e, "waterLevel", 0.0),
+                water_level: attrs.level,
                 coupling,
             });
         }
@@ -339,25 +375,69 @@ impl Group {
         let listed = |colliders: Option<String>| {
             colliders.unwrap_or_default().split_whitespace().any(|id| bodies.iter().any(|b| &*b.id == id))
         };
+        // the oceans, the bodies of the world and everything that reads them run on one clock
+        let (first, clock) = clocks[0].clone();
+        let describe = |c: Uniform| format!("scale {} and offset {}", c.scale, c.offset);
+        let mismatch = |name: &str, other: Option<Uniform>, what: &str| {
+            format!(
+                "{name} and {first} must run on the same clock, since {what} (the clock of {first} has {}, that of {name} {})",
+                describe(clock),
+                other.map_or("no uniform clock".to_string(), describe)
+            )
+        };
+        for (id, other) in &clocks[1..] {
+            if *other != clock {
+                return Err(mismatch(id, Some(*other), "the water of both exchanges with one rigid world"));
+            }
+        }
+        for body in bodies {
+            let Some(index) = p.nodes.iter().position(|n| n.id == body.id) else { continue };
+            let other = uniform_clock(p, index as u32);
+            if other != Some(clock) {
+                return Err(mismatch(&body.id, other, "the rigid world is one and runs on the time of the group"));
+            }
+        }
+        // the world begins at its start on that clock, and the scene cannot be asked about before the composition
+        let begins = clock.composition_time(p.scene.physics.as_ref().map_or(0.0, |ph| ph.start));
+        if begins < 0.0 {
+            return Err(format!(
+                "{first}: the rigid world it exchanges with starts at composition time {begins} on the clock of \
+                 its group, before the composition begins"
+            ));
+        }
         // everything else that reads the rigid bodies reads them at most one of its own steps ahead
         let mut reach = 0.0f64;
-        for n in &p.nodes {
+        for (index, n) in p.nodes.iter().enumerate() {
+            let mut reads = false;
             if matches!(&*n.elem, sr_model::model::Node::Particles3D(_)) && listed(text(&*n.elem, "colliders")) {
                 reach = reach.max(num(&*n.elem, "dt", 1.0 / 60.0));
+                reads = true;
             }
             for c in children(&*n.elem).into_iter().filter(|c| c.element_name() == "pyro") {
                 if listed(text(c, "colliders")) {
                     reach = reach.max(num(c, "dt", 1.0 / 60.0));
+                    reads = true;
+                }
+            }
+            if reads {
+                let other = uniform_clock(p, index as u32);
+                if other != Some(clock) {
+                    return Err(mismatch(&n.id, other, "what reads the rigid bodies reads the world on its own time"));
                 }
             }
         }
         Ok(Some(Group {
-            log: Arc::new(Mutex::new(ExchangeLog::new(LOG_BYTES))),
             around: Arc::new(Mutex::new(ExchangeLog::new(LOG_BYTES))),
             oceans: oceans.into(),
             reach,
             step: rigid_step,
+            clock,
         }))
+    }
+
+    /// The clock the world, the ocean and what reads the bodies run on.
+    pub(crate) fn clock(&self) -> Uniform {
+        self.clock
     }
 
     /// Seconds past a frame that other solvers may read the rigid bodies.
@@ -368,13 +448,6 @@ impl Group {
     /// The channel of the ocean named `id`.
     pub(crate) fn channel(&self, id: &str) -> Option<usize> {
         self.oceans.iter().position(|o| &*o.id == id)
-    }
-
-    /// Record the outcome of canonical step `step` of ocean `ocean`. A replay of the step must
-    /// reproduce it exactly.
-    pub(crate) fn record(&self, ocean: usize, step: u64, exchange: Exchange) -> Result<Put, String> {
-        let mut log = self.log.lock().unwrap_or_else(|e| e.into_inner());
-        log.put(ocean as u32, step, &[exchange])
     }
 
     /// What the water offered about each body in canonical step `step` of ocean `ocean`, once it has been computed:
@@ -388,6 +461,12 @@ impl Group {
     pub(crate) fn record_around(&self, ocean: usize, step: u64, around: &[Around]) -> Result<Put, String> {
         let mut log = self.around.lock().unwrap_or_else(|e| e.into_inner());
         log.put(ocean as u32, step, around)
+    }
+
+    /// Canonical steps the group holds a record of, over all its oceans.
+    #[cfg(test)]
+    pub(crate) fn recorded_steps(&self) -> usize {
+        self.around.lock().unwrap().len()
     }
 
     /// The canonical step of `ocean` whose outcome a rigid step that starts at composition time `t`
@@ -406,15 +485,8 @@ impl Group {
         let completed = if whole(per, 1e-9) && (nth - nth.round()).abs() < 1e-6 {
             nth.round() as u64 / per.round() as u64
         } else {
-            // canonical steps completed at `local`, the same rounding the ocean uses
-            let mut completed = (local / ocean.dt).floor() as u64;
-            while completed > 0 && completed as f64 * ocean.dt > local {
-                completed -= 1;
-            }
-            while (completed + 1) as f64 * ocean.dt <= local {
-                completed += 1;
-            }
-            completed
+            // canonical steps completed at `local`, counted as the ocean counts them
+            sr_sim::ocean::canonical_step(local, ocean.dt)
         };
         completed.checked_sub(1)
     }
@@ -486,13 +558,14 @@ impl Group {
                 }
                 Coupling::Reaction(reaction) => {
                     let Some(step) = step else { continue };
-                    let log = self.log.lock().unwrap_or_else(|e| e.into_inner());
-                    let Some([exchange]) = log.get(channel as u32, step) else {
+                    let log = self.around.lock().unwrap_or_else(|e| e.into_inner());
+                    let Some(offered) = log.get(channel as u32, step) else {
                         return Err(Self::not_computed(body, t, step, ocean, log.last_step(channel as u32)));
                     };
-                    let exchange = *exchange;
+                    // the momentum the bodies gave the water in the step is the sum of what each gave
+                    let momentum = offered.iter().fold([0.0; 2], |m, a| [m[0] + a.impulse[0], m[1] + a.impulse[1]]);
                     drop(log);
-                    (reaction)(&Reaction { ocean: channel, step, body, exchange, dt: ocean.dt })
+                    (reaction)(&Reaction { ocean: channel, step, body, exchange: Exchange { momentum }, dt: ocean.dt })
                 }
             };
             if let Some(load) = load {
@@ -639,6 +712,51 @@ mod tests {
         crate::sim::apply_physics(&ev.program, rt.physics.as_mut().unwrap(), &mut g, &mut graphs, &fields, t);
         rt.fields = Some(fields);
         g.problems[before..].to_vec()
+    }
+
+    #[test]
+    fn only_a_body_that_moves_gets_a_hull_so_a_static_collider_cannot_fail_the_ocean() {
+        // a static seabed of a shape that has no hull to float (a convex hull) lists beside a ball
+        let seabed = BodyHull::new(
+            "seabed".into(),
+            0.0,
+            &sr_sim::physics3d::Shape3::Convex(vec![
+                [-1.0, 0.0, -1.0],
+                [1.0, 0.0, -1.0],
+                [0.0, 0.0, 1.0],
+                [0.0, 1.0, 0.0],
+            ]),
+        )
+        .fixed();
+        let ball = BodyHull::new("ball".into(), 500.0, &sr_sim::physics3d::Shape3::Sphere(1.0));
+        let water = Water { density: 1000.0, gravity: 9.81, drag: 1.0, pixels_per_meter: 1.0 };
+        let buoyant = Buoyant::new(&[seabed, ball], &[0, 1], water, 0.01).expect("the seabed is not floated");
+        assert_eq!(buoyant.hulls.len(), 1, "a hull for the ball only");
+    }
+
+    #[test]
+    fn the_group_keeps_one_record_of_each_canonical_step_and_a_reaction_reads_the_bodies_in_it() {
+        let seen = Arc::new(Mutex::new(Vec::<(u64, [f64; 2])>::new()));
+        let log = seen.clone();
+        let coupling = Coupling::Reaction(Arc::new(move |r: &Reaction| {
+            log.lock().unwrap().push((r.step, r.exchange.momentum));
+            None
+        }));
+        let ev = evaluator(&scene(""), Some(coupling), None);
+        let _ = observe(&ev, 1.0);
+        let guard = ev.sim.as_ref().unwrap().lock().unwrap();
+        let group = guard.physics.as_ref().unwrap().group.as_ref().unwrap();
+        let steps = (0..200u64).filter(|&s| group.around_at(0, s).is_some()).count();
+        assert!(steps >= 20, "{steps} steps computed");
+        assert_eq!(group.recorded_steps(), steps, "one record of each canonical step");
+        // what a reaction is told is the sum of what the bodies gave the water in the step, as it was recorded
+        let seen = seen.lock().unwrap();
+        assert!(seen.iter().any(|(_, m)| m[0] != 0.0), "the barge gives the water momentum");
+        for (step, momentum) in seen.iter() {
+            let around = group.around_at(0, *step).expect("the step was recorded");
+            let total = around.iter().fold([0.0; 2], |m, a| [m[0] + a.impulse[0], m[1] + a.impulse[1]]);
+            assert_eq!(momentum.map(f64::to_bits), total.map(f64::to_bits), "step {step}");
+        }
     }
 
     #[test]

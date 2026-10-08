@@ -17,8 +17,7 @@
 //! by the same expression, so results do not depend on the thread count.
 //!
 //! Density and temperature share their traces; each velocity component has its
-//! own. Measured against the default scheme (impact scene, 1 thread) the
-//! advection stage costs 2.5x at 64^3 and 2.4x at 128^3.
+//! own. Each trace is made once, by the first pass, and kept for the second.
 
 use super::*;
 
@@ -53,20 +52,24 @@ impl Channel<'_> {
 }
 
 /// Where the backward trace of an element starts and where its forward trace
-/// lands, or that a collider cut one of them short.
+/// lands, or that a collider cut one of them short. Kept for the second pass, so
+/// that each trace is made once: 56 bytes an element while a channel is advected.
+#[derive(Clone, Copy)]
 enum Traces {
     Cut,
     Free { source: [f64; 3], landing: [f64; 3] },
 }
 
-fn traces(field: &Field<'_>, p: [f64; 3], dt: f64) -> Result<Traces, Error> {
+/// The semi-Lagrangian origin of the element at `p` (where the backward trace ends, which is
+/// where a collider cut it short, if one did) and the traces the correction needs.
+fn traced(field: &Field<'_>, p: [f64; 3], dt: f64) -> Result<([f64; 3], Traces), Error> {
     let v = field.velocity_grid(p);
     let (source, cut) = field.trace_from(p, v, dt)?;
     if cut {
-        return Ok(Traces::Cut);
+        return Ok((source, Traces::Cut));
     }
     let (landing, cut) = field.trace_from(p, v, -dt)?;
-    Ok(if cut { Traces::Cut } else { Traces::Free { source, landing } })
+    Ok((source, if cut { Traces::Cut } else { Traces::Free { source, landing } }))
 }
 
 /// The corrected, limited value of element `k`, from its semi-Lagrangian `hat`.
@@ -118,15 +121,18 @@ fn advect_scalars(
     ];
     let count = density.len();
     let (mut hat_density, mut hat_temperature) = (vec![0.0; count], vec![ambient; count]);
+    let mut shared = vec![Traces::Cut; count];
     let results = hat_density
         .par_chunks_mut(HEAVY)
         .zip(hat_temperature.par_chunks_mut(HEAVY))
+        .zip(shared.par_chunks_mut(HEAVY))
         .enumerate()
-        .map(|(chunk, (hd, ht))| -> Result<(), Error> {
-            for (i, (d, t)) in hd.iter_mut().zip(ht.iter_mut()).enumerate() {
+        .map(|(chunk, ((hd, ht), traces))| -> Result<(), Error> {
+            for (i, ((d, t), trace)) in hd.iter_mut().zip(ht.iter_mut()).zip(traces.iter_mut()).enumerate() {
                 let k = chunk * HEAVY + i;
                 if !solid[k] {
-                    let q = field.trace(channels[0].position(k), dt)?;
+                    let (q, kept) = traced(field, channels[0].position(k), dt)?;
+                    *trace = kept;
                     *d = sample(channels[0].old, channels[0].dims, channels[0].at(q), boundary, 0.0);
                     *t = sample(channels[1].old, channels[1].dims, channels[1].at(q), boundary, ambient);
                 }
@@ -136,7 +142,7 @@ fn advect_scalars(
         .collect();
     first_error(results)?;
 
-    let (hat_density, hat_temperature) = (&hat_density, &hat_temperature);
+    let (hat_density, hat_temperature, shared) = (&hat_density, &hat_temperature, &shared);
     let results = density
         .par_chunks_mut(HEAVY)
         .zip(temperature.par_chunks_mut(HEAVY))
@@ -145,9 +151,8 @@ fn advect_scalars(
             for (i, (d, t)) in od.iter_mut().zip(ot.iter_mut()).enumerate() {
                 let k = chunk * HEAVY + i;
                 if !solid[k] {
-                    let shared = traces(field, channels[0].position(k), dt)?;
-                    *d = corrected(&channels[0], boundary, hat_density, k, &shared) * decay;
-                    let value = corrected(&channels[1], boundary, hat_temperature, k, &shared);
+                    *d = corrected(&channels[0], boundary, hat_density, k, &shared[k]) * decay;
+                    let value = corrected(&channels[1], boundary, hat_temperature, k, &shared[k]);
                     *t = ambient + (value - ambient) * cool;
                 }
             }
@@ -160,12 +165,15 @@ fn advect_scalars(
 fn advect_velocity(field: &Field<'_>, ch: &Channel<'_>, dt: f64, out: &mut [f64]) -> Result<(), Error> {
     let boundary = field.boundary;
     let mut hat = vec![0.0; out.len()];
+    let mut kept = vec![Traces::Cut; out.len()];
     let results = hat
         .par_chunks_mut(HEAVY)
+        .zip(kept.par_chunks_mut(HEAVY))
         .enumerate()
-        .map(|(chunk, values)| -> Result<(), Error> {
-            for (i, value) in values.iter_mut().enumerate() {
-                let q = field.trace(ch.position(chunk * HEAVY + i), dt)?;
+        .map(|(chunk, (values, traces))| -> Result<(), Error> {
+            for (i, (value, trace)) in values.iter_mut().zip(traces.iter_mut()).enumerate() {
+                let (q, both) = traced(field, ch.position(chunk * HEAVY + i), dt)?;
+                *trace = both;
                 *value = sample(ch.old, ch.dims, ch.at(q), boundary, ch.background);
             }
             Ok(())
@@ -173,14 +181,14 @@ fn advect_velocity(field: &Field<'_>, ch: &Channel<'_>, dt: f64, out: &mut [f64]
         .collect();
     first_error(results)?;
 
-    let hat = &hat;
+    let (hat, kept) = (&hat, &kept);
     let results = out
         .par_chunks_mut(HEAVY)
         .enumerate()
         .map(|(chunk, values)| -> Result<(), Error> {
             for (i, value) in values.iter_mut().enumerate() {
                 let k = chunk * HEAVY + i;
-                *value = corrected(ch, boundary, hat, k, &traces(field, ch.position(k), dt)?);
+                *value = corrected(ch, boundary, hat, k, &kept[k]);
             }
             Ok(())
         })

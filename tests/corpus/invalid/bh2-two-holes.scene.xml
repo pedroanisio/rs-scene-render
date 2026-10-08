@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- expect: BH2 -->
+<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/><composition><shape id="sky" shape="rect" x="0" y="0" width="64" height="64" fill="#000000"/><camera id="eye" x="0" y="0" z="-60" geodesics="true"/><blackHole id="hole" mass="1" x="0" y="0" z="0"/><blackHole id="second" mass="2"/><accretionDisk id="disk" blackHole="hole" outerRadius="20" temperatureScale="6000"/></composition></scene>
