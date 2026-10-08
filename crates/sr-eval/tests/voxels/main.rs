@@ -7,6 +7,7 @@ mod crater_cut;
 mod fracture;
 mod loader;
 mod mass_properties;
+mod plane;
 mod scene_body;
 mod scene_cache;
 mod scene_cut;

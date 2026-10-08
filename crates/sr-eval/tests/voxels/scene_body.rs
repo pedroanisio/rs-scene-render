@@ -17,7 +17,10 @@ impl Dir {
     pub(crate) fn new(name: &str) -> Dir {
         {
             let mut names = NAMES.lock().unwrap_or_else(|e| e.into_inner());
-            assert!(!names.iter().any(|n| n == name), "the directory name {name:?} is taken twice in this process: the tests that run at once would share it");
+            assert!(
+                !names.iter().any(|n| n == name),
+                "the directory name {name:?} is taken twice in this process: the tests that run at once would share it"
+            );
             names.push(name.to_string());
         }
         let path = std::env::temp_dir().join(format!("voxel-scene-{name}-{}", std::process::id()));

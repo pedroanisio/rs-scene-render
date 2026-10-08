@@ -84,15 +84,24 @@ pub fn crater_spec(
     let along = |p: [f64; 3]| (0..3).map(|i| (p[i] - point[i]) * axis[i]).sum::<f64>();
     let mut depth = along(on_steps);
     // a surface that is a face of the lattice is flat at the cell boundary: the point on it is exact, and the estimate (good to a sixth of a cell) is not
-    // better. A tilted one is a staircase, whose mean plane is what the volume depends on.
+    // better. A tilted one is a staircase, whose mean plane is what the volume depends on. A surface within two degrees of a face that is not one is a staircase
+    // of terraces a step high and metres long, which the ball of the crest radius may see as one terrace and the crater (rim and all) as several: the mean
+    // height over the disc of the whole reach decides, and the exact point stays where that lands within a sixth of a cell of it.
     if !flat {
         if let Some(t) = mean_plane_offset(before, point, axis, spec.radius, cell) {
+            depth = t;
+        }
+    } else if let Some(t) = mean_height_over(before, point, axis, spec.radius + spec.rim_width, spec.radius, cell) {
+        if (t - depth).abs() > cell / 6.0 {
             depth = t;
         }
     }
     spec.center = std::array::from_fn(|i| point[i] + axis[i] * depth);
     spec
 }
+
+/// The share of the cells of the bottom of a sample (the lowest two cells' depth) that must be ground for the sample to be of a half-space.
+const MIN_FULL_BOTTOM: f64 = 0.95;
 
 /// The fewest cells within the crest radius for their filled share to say where a plane is (a ball of radius 4 cells has about 270).
 const MIN_CELLS_FOR_A_PLANE: u64 = 200;
@@ -102,7 +111,7 @@ const MIN_CELLS_FOR_A_PLANE: u64 = 200;
 /// down and the plane over the volume of the ball from half a radius down, `F(u) = 1/2 + (3u - u^3)/4` for u in radii), solved by halving. The lower half
 /// of the ball is left out because ground that is thinner than the ball (a block, an edge) is no half-space there. None if the ground has no thickness of half a
 /// radius under the plane, the ball has too few cells, or the share is out of what a plane within a tenth of a radius of the edges gives.
-pub(crate) fn mean_plane_offset(
+pub fn mean_plane_offset(
     before: &Occupancy,
     point: [f64; 3],
     outward: [f64; 3],
@@ -112,7 +121,7 @@ pub(crate) fn mean_plane_offset(
     let reach = (radius / cell).ceil() as i32 + 1;
     let centre = sr_3d::voxel::object_to_cell(point, cell)?;
     let (mut filled, mut all) = (0u64, 0u64);
-    let mut lowest = f64::MAX;
+    let (mut bottom_filled, mut bottom_all) = (0u64, 0u64);
     for dk in -reach..=reach {
         for dj in -reach..=reach {
             for di in -reach..=reach {
@@ -122,9 +131,11 @@ pub(crate) fn mean_plane_offset(
                 let height: f64 = (0..3).map(|i| offset[i] * outward[i]).sum();
                 if offset.iter().map(|c| c * c).sum::<f64>() <= radius * radius && height >= -0.5 * radius {
                     all += 1;
-                    if before.get(key) != 0 {
-                        filled += 1;
-                        lowest = lowest.min(height);
+                    let here = before.get(key) != 0;
+                    filled += u64::from(here);
+                    if height < -0.5 * radius + 2.0 * cell {
+                        bottom_all += 1;
+                        bottom_filled += u64::from(here);
                     }
                 }
             }
@@ -134,8 +145,8 @@ pub(crate) fn mean_plane_offset(
     if all < MIN_CELLS_FOR_A_PLANE {
         return None;
     }
-    // ground that does not reach the bottom of the slab has less than a plane's share: a block, a ledge, an edge
-    if lowest > -0.5 * radius + 2.0 * cell {
+    // ground that does not fill the bottom of the sample has less than a plane's share: a block, a ledge, an edge or a cliff inside the reach
+    if bottom_all == 0 || (bottom_filled as f64) < MIN_FULL_BOTTOM * bottom_all as f64 {
         return None;
     }
     let share = filled as f64 / all as f64;
@@ -155,6 +166,66 @@ pub(crate) fn mean_plane_offset(
         }
     }
     Some(0.5 * (lo + hi) * radius)
+}
+
+/// How far along `outward` from `point` the mean height of the surface of the cells is over the disc of radius `reach` about the axis (object units): of the cells
+/// of the cylinder from half a `depth` under the point to half a `depth` over it, the filled share is the share of the height that the ground fills, so the
+/// mean height is `-depth/2 + share * depth`. None where the cylinder's bottom is not all ground (an edge, a thin slab) or its top is not all air (something
+/// stands in the reach that is taller than half a `depth`), or it has too few cells.
+pub fn mean_height_over(
+    before: &Occupancy,
+    point: [f64; 3],
+    outward: [f64; 3],
+    reach: f64,
+    depth: f64,
+    cell: f64,
+) -> Option<f64> {
+    let (lo, hi) = (-0.5 * depth, 0.5 * depth);
+    let span = ((reach * reach + hi * hi).sqrt() / cell).ceil() as i32 + 1;
+    let centre = sr_3d::voxel::object_to_cell(point, cell)?;
+    // half the extent of a cell along the axis: a cell is counted for the share of its extent that lies between the bounds, so the bounds need not fall
+    // on the boundaries of the layers of cells (a count of centres is wrong by up to half a layer of height)
+    let half = 0.5 * cell * outward.iter().map(|c| c.abs()).sum::<f64>();
+    let (mut filled, mut all, mut cells) = (0.0f64, 0.0f64, 0u64);
+    let (mut bottom_filled, mut bottom_all, mut top_filled) = (0.0f64, 0.0f64, 0u64);
+    for dk in -span..=span {
+        for dj in -span..=span {
+            for di in -span..=span {
+                let key = [centre[0] + di, centre[1] + dj, centre[2] + dk];
+                let at = sr_3d::voxel::cell_to_object(key, cell);
+                let offset: [f64; 3] = std::array::from_fn(|i| at[i] - point[i]);
+                let height: f64 = (0..3).map(|i| offset[i] * outward[i]).sum();
+                let across = (offset.iter().map(|c| c * c).sum::<f64>() - height * height).max(0.0).sqrt();
+                if across > reach || height + half <= lo || height - half >= hi {
+                    continue;
+                }
+                let inside = ((height + half).min(hi) - (height - half).max(lo)) / (2.0 * half);
+                let here = before.get(key) != 0;
+                cells += 1;
+                all += inside;
+                if here {
+                    filled += inside;
+                }
+                if height < lo + 2.0 * cell {
+                    bottom_all += inside;
+                    if here {
+                        bottom_filled += inside;
+                    }
+                }
+                if height >= hi - 2.0 * cell && here {
+                    top_filled += 1;
+                }
+            }
+        }
+    }
+    if cells < MIN_CELLS_FOR_A_PLANE
+        || bottom_all <= 0.0
+        || bottom_filled < MIN_FULL_BOTTOM * bottom_all
+        || top_filled > 0
+    {
+        return None;
+    }
+    Some(lo + filled / all * (hi - lo))
 }
 
 /// The axis of the crater of `grown` in the cells of `before`: the outward normal of the surface of the cells around the impact, from where the mass of the cells

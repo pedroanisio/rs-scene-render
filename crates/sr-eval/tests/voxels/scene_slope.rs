@@ -148,18 +148,19 @@ fn the_ball_that_comes_along_the_normal_of_a_slope_cuts_the_law_s_crater_in_the_
         assert!((law - flat).abs() < 0.005 * flat, "{degrees} degrees: the law's volume is {law} m3 and the flat ground's {flat}: it reads the speed along the normal");
         // what is left over is the staircase, whose mean plane the kernel is put on: -1.0, -1.0 and -1.3 percent at 10, 20 and 30 degrees
         assert!((volume - law).abs() < 0.025 * law, "{degrees} degrees: {volume} m3 against the law's {law}");
-        let spec = grown.spec;
+        let spec = crater_spec(grown, &ground, &settings());
+        let axis = spec.outward;
         for c in &cut.cut.cut.destroyed {
             let p: [f64; 3] = std::array::from_fn(|i| (f64::from(c[i]) + 0.5) * 0.25 - spec.center[i]);
             let along: f64 = (0..3).map(|i| p[i] * axis[i]).sum();
             let r = (0..3).map(|i| (p[i] - along * axis[i]).powi(2)).sum::<f64>().sqrt();
             assert!(
-                r < spec.radius + spec.rim_width + 0.5,
+                r < spec.radius + spec.rim_width,
                 "{degrees} degrees: {c:?} is {r} m from the axis, the reach is {}",
                 spec.radius + spec.rim_width
             );
             assert!(
-                along <= spec.radius + 0.5,
+                along <= spec.radius,
                 "{degrees} degrees: {c:?} is {along} m over the plane, the ceiling is {}",
                 spec.radius
             );
@@ -170,6 +171,30 @@ fn the_ball_that_comes_along_the_normal_of_a_slope_cuts_the_law_s_crater_in_the_
         let mut stays = cut.cut.stays.clone();
         stays.sort_unstable();
         assert_eq!(have, stays, "{degrees} degrees");
+    }
+}
+
+#[test]
+fn a_slope_of_under_two_degrees_is_a_staircase_too_and_its_crater_is_cut_at_the_mean_plane_of_its_terraces() {
+    // the axis of a surface within two degrees of a face of the lattice is the face's, but the surface is not the face: at 1 and 1.5 degrees the terraces are 0.25 m
+    // high and 14 m and 9.5 m long, and the plane through the contact point on a terrace is up to 0.13 m off the mean plane of the stair (16 percent of the volume)
+    let flat =
+        hit_oblique("under-two-flat", 0.0, 0.0, false).0.crater_impact.as_ref().expect("the impact").law().volume;
+    for degrees in [1.0f64, 1.5] {
+        let (node, ground) = hit(degrees);
+        let grown = node.crater_impact.as_ref().expect("the impact");
+        let law = grown.law().volume;
+        assert!(
+            (law - flat).abs() < 0.005 * flat,
+            "{degrees} degrees: the law's volume is {law} m3 and the flat ground's {flat}"
+        );
+        let cut = crater_cut_of(grown, &ground, &settings(), seed_of("ground")).unwrap();
+        let volume = cut.cut.cut.destroyed.len() as f64 * 0.015625;
+        println!(
+            "SLOPE {degrees}: destroyed {} cells {volume:.2} m3 for the law's {law:.2}",
+            cut.cut.cut.destroyed.len()
+        );
+        assert!((volume - law).abs() < 0.025 * law, "{degrees} degrees: {volume} m3 against the law's {law}");
     }
 }
 
@@ -190,14 +215,17 @@ fn touch(degrees: f64) -> [f64; 3] {
 fn a_ball_that_comes_at_an_angle_to_the_normal_of_a_slope_makes_the_crater_of_its_normal_speed_at_the_place_it_touched()
 {
     // the law reads the speed along the normal, so the crater is the same whatever the tangent that the ball adds to it; the axis is the surface's, not the
-    // velocity's; the centre is where the ball touched, to two cells (the contact point is inside the ground by the step the ball went on, along its
-    // velocity); the cut is as the normal one is
+    // velocity's; the centre is where the ball touched, to the bound of four and a half cells below (measured, pinned per case); the cut is as the normal
+    // one is
     let flat = hit_oblique("oblique-flat", 0.0, 0.0, false).0.crater_impact.as_ref().expect("the impact").law().volume;
     let normal = {
         let theta = 20.0f64.to_radians();
         [theta.sin(), -theta.cos(), 0.0]
     };
-    for (phi, across) in [(30.0, false), (60.0, false), (30.0, true), (60.0, true)] {
+    // the offset of the crater's centre from the place the ball touched, as measured (metres; the physics step of the document is 1/240 s)
+    for (phi, across, measured) in
+        [(0.0, false, 0.343), (30.0, false, 0.252), (60.0, false, 0.768), (30.0, true, 0.775), (60.0, true, 1.035)]
+    {
         let what =
             format!("20 degrees, {phi} degrees from the normal, {}", if across { "across" } else { "down the slope" });
         let (node, ground) = hit_oblique("oblique", 20.0, phi, across);
@@ -213,17 +241,17 @@ fn a_ball_that_comes_at_an_angle_to_the_normal_of_a_slope_makes_the_crater_of_it
         let off = (0..3).map(|i| (spec.center[i] - at[i]).powi(2)).sum::<f64>().sqrt();
         println!("OBLIQUE {what}: axis {angle:.2} degrees off the normal, the centre {off:.3} m from where the ball touched, law {law:.2} m3");
         // A RESULT, recorded and not hidden: the point that the world gives is the mean of the manifold's contacts at the end of the step in which the ball
-        // touched, and it is off the place it touched by 0.25, 0.77, 0.77 and 1.04 m in the four cases here (the ball goes on by up to 0.6 m tangentially in a
-        // step at sixty degrees, the impulse weights the later contacts of the step, and the contacts of the voxel collider are not a symmetric patch: the
-        // sideways error is as large across the slope as down it, and about 0.4 m for a ball that comes along the normal). A crater's centre is therefore known
-        // to about four cells, a sixth of its crest radius at the worst: the bound below is that, with a margin, and the volume of the cut is the plane's and not
-        // the centre's.
+        // touched, and it is off the place it touched by the numbers above, as measured, with no decomposition that a test supports (the ball goes on 0.625 m
+        // in a step at 60 degrees and 0.21 m at 30, and the stair's cells are filled up to 0.117 m over the analytic plane, which makes it meet cells early:
+        // neither is measured here as a cause). A crater's centre is known to about four cells, a sixth of its crest radius at the worst; it moves with the
+        // document's physics step (a crater where the ball touched asks a smaller fixedStep), and the volume of the cut is the plane's and not the centre's.
         assert!(
-            off < 1.2,
-            "{what}: the centre of the crater is {off} m from the place the ball touched: {:?} against {:?}",
+            (off - measured).abs() < 0.05,
+            "{what}: the centre of the crater is {off} m from the place the ball touched, measured {measured}: {:?} against {:?}",
             spec.center,
             at
         );
+        assert!(off < 1.2, "{what}: the centre is {off} m from the place the ball touched (bound 1.2 m)");
         let cut = crater_cut_of(grown, &ground, &settings(), seed_of("ground")).unwrap();
         let volume = cut.cut.cut.destroyed.len() as f64 * 0.015625;
         println!(
@@ -237,11 +265,12 @@ fn a_ball_that_comes_at_an_angle_to_the_normal_of_a_slope_makes_the_crater_of_it
             let along: f64 = (0..3).map(|i| p[i] * spec.outward[i]).sum();
             let r = (0..3).map(|i| (p[i] - along * spec.outward[i]).powi(2)).sum::<f64>().sqrt();
             assert!(
-                r < spec.radius + spec.rim_width + 0.5 && along <= spec.radius + 0.5,
+                r < spec.radius + spec.rim_width && along <= spec.radius,
                 "{what}: {c:?} is outside the reach ({r}, {along})"
             );
         }
-        // the model has no downrange bias: the cells thrown carry no net momentum along the surface (a stated limit: the law's own list of ejecta has some)
+        // the model has no downrange bias: the cells thrown carry no net momentum along the surface. This tests the symmetry of the ejection about the axis
+        // (directions radial about it, quantile speeds), not a physics claim: the law's own list of ejecta has a downrange bias that the cut does not carry
         let mut tangential = [0.0f64; 3];
         let mut total = 0.0;
         for t in &cut.excavation.thrown {
@@ -330,15 +359,13 @@ fn ground_that_slopes_along_x_and_z_at_once_is_cut_about_its_normal_which_is_out
         cut.cut.cut.destroyed.len(),
         cut.cut.cut.added.len()
     );
+    // -2.0 percent against the band of 2.5: about 32 cells of margin, thin, kept
     assert!((volume - law).abs() < 0.025 * law, "{volume} m3 against the law's {law}");
     for c in &cut.cut.cut.destroyed {
         let p: [f64; 3] = std::array::from_fn(|i| (f64::from(c[i]) + 0.5) * 0.25 - spec.center[i]);
         let along: f64 = (0..3).map(|i| p[i] * spec.outward[i]).sum();
         let r = (0..3).map(|i| (p[i] - along * spec.outward[i]).powi(2)).sum::<f64>().sqrt();
-        assert!(
-            r < spec.radius + spec.rim_width + 0.5 && along <= spec.radius + 0.5,
-            "{c:?} is outside the reach ({r}, {along})"
-        );
+        assert!(r < spec.radius + spec.rim_width && along <= spec.radius, "{c:?} is outside the reach ({r}, {along})");
     }
     let mut have: Vec<[i32; 3]> = node.voxels.as_ref().unwrap().grid.cells().collect();
     have.sort_unstable();
