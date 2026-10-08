@@ -51,6 +51,11 @@ fn oblique_document(degrees: f64, phi: f64, across: bool) -> String {
     // it first touches at the surface point when its centre is at the point plus the radius along the normal, and it starts ten metres back along its velocity
     let touch: [f64; 3] = std::array::from_fn(|i| surface[i] + normal[i] * 2.0);
     let start: [f64; 3] = std::array::from_fn(|i| touch[i] - velocity[i] / speed * 10.0);
+    scene_document(start, velocity, f64::from(top_key(degrees)) * 0.25)
+}
+
+/// The document of the ground and the ball: where the ball starts, its velocity, and where the object of cells is (the loader moves the box of cells to the origin).
+fn scene_document(start: [f64; 3], velocity: [f64; 3], ground_y: f64) -> String {
     format!(
         r##"<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/>
         <assets><voxelAsset id="model" src="slope.srvol"/></assets>
@@ -65,7 +70,7 @@ fn oblique_document(degrees: f64, phi: f64, across: bool) -> String {
           </object3D>
         </composition>
         <physics gravityY="0" pixelsPerMeter="1" fixedStep="0.004166666666666667" bounds="none"/></scene>"##,
-        ground_y = f64::from(top_key(degrees)) * 0.25,
+        ground_y = ground_y,
         bx = start[0],
         by = start[1],
         bz = start[2],
@@ -250,4 +255,94 @@ fn a_ball_that_comes_at_an_angle_to_the_normal_of_a_slope_makes_the_crater_of_it
         println!("OBLIQUE {what}: net tangential speed of the thrown cells {net:.1} of {total:.1} m/s summed");
         assert!(net < 0.03 * total, "{what}: the thrown cells have a net tangential momentum of {net} for {total}");
     }
+}
+
+/// Ground that falls toward +x at `x_degrees` and toward +z at `z_degrees` at once: the cells under the plane y = 12 m + x tan(x_degrees) + z tan(z_degrees).
+/// Its normal is out of both planes of the lattice that the slopes above were in.
+fn tilted(x_degrees: f64, z_degrees: f64) -> Occupancy {
+    let (a, b) = (x_degrees.to_radians().tan(), z_degrees.to_radians().tan());
+    let top = tilted_top_key(x_degrees, z_degrees);
+    let floor = ((12.0 + 30.0 * (a + b) + 12.0) / 0.25).ceil() as i32;
+    let mut cells = Vec::new();
+    for k in 0..120 {
+        for i in 0..120 {
+            let surface =
+                ((12.0 + (f64::from(i) + 0.5) * 0.25 * a + (f64::from(k) + 0.5) * 0.25 * b) / 0.25).floor() as i32;
+            for j in surface..floor {
+                cells.push(([i, j - top, k], 1 + ((i + j + k) % 3) as u8));
+            }
+        }
+    }
+    Occupancy::from_cells(cells).unwrap()
+}
+
+fn tilted_top_key(x_degrees: f64, z_degrees: f64) -> i32 {
+    ((12.0 + 0.125 * (x_degrees.to_radians().tan() + z_degrees.to_radians().tan())) / 0.25).floor() as i32
+}
+
+/// The unit outward normal of that ground (y down, out of the ground toward minus y).
+fn tilted_normal(x_degrees: f64, z_degrees: f64) -> [f64; 3] {
+    let (a, b) = (x_degrees.to_radians().tan(), z_degrees.to_radians().tan());
+    let length = (1.0 + a * a + b * b).sqrt();
+    [a / length, -1.0 / length, b / length]
+}
+
+/// The ball of the slope's document, coming along the normal of the tilted ground and first touching it at x = 15 m, z = 15 m.
+fn tilted_document(x_degrees: f64, z_degrees: f64) -> String {
+    let normal = tilted_normal(x_degrees, z_degrees);
+    let (a, b) = (x_degrees.to_radians().tan(), z_degrees.to_radians().tan());
+    let surface = [15.0, 12.0 + 15.0 * a + 15.0 * b, 15.0];
+    let start: [f64; 3] = std::array::from_fn(|i| surface[i] + normal[i] * 12.0);
+    let velocity: [f64; 3] = std::array::from_fn(|i| -normal[i] * 86.6);
+    scene_document(start, velocity, f64::from(tilted_top_key(x_degrees, z_degrees)) * 0.25)
+}
+
+#[test]
+fn ground_that_slopes_along_x_and_z_at_once_is_cut_about_its_normal_which_is_out_of_both_planes_of_the_lattice() {
+    let (xd, zd) = (15.0, 15.0);
+    let dir = Dir::new("tilted-diagonal");
+    let ground = tilted(xd, zd);
+    std::fs::write(dir.0.join("slope.srvol"), srvol::write(&ground, 0.25).unwrap()).unwrap();
+    let xml = tilted_document(xd, zd);
+    assert!(xml.contains("velocityZ=\"-"), "the ball comes in along z too");
+    let ev = evaluator(&dir, &xml);
+    assert_every_frame_is_clean(&ev, "the ground that slopes along x and z");
+    let frame = ev.evaluate(0.6);
+    let node = frame.nodes.iter().find(|n| &*n.id == "ground").unwrap();
+    let grown = node.crater_impact.as_ref().expect("the impact");
+    assert_eq!(node.voxels.as_ref().expect("cells").revision, 1);
+    // the axis is the ground's normal, which is 15 degrees off the vertical about both x and z: out of both planes of the lattice
+    let want = tilted_normal(xd, zd);
+    let spec = crater_spec(grown, &ground, &settings());
+    let angle = (0..3).map(|i| spec.outward[i] * want[i]).sum::<f64>().clamp(-1.0, 1.0).acos().to_degrees();
+    let lattice = spec.outward.iter().map(|c| c.abs()).fold(0.0, f64::max).clamp(0.0, 1.0).acos().to_degrees();
+    println!("TILTED: the axis is {angle:.2} degrees off the normal and {lattice:.1} degrees from the nearest axis of the lattice");
+    assert!(lattice > 15.0, "the case is out of both planes: {lattice} degrees from the lattice");
+    assert!(angle < 3.0, "the axis is {angle} degrees off the ground's normal: {:?} against {want:?}", spec.outward);
+    // the law is the flat ground's and the cut is as the slopes' (the plane's volume, the reach about the axis, and the cells that the pure function keeps)
+    let flat = hit(0.0).0.crater_impact.as_ref().expect("the impact").law().volume;
+    let law = grown.law().volume;
+    assert!((law - flat).abs() < 0.005 * flat, "the law's volume is {law} m3 and the flat ground's {flat}");
+    let cut = crater_cut_of(grown, &ground, &settings(), seed_of("ground")).unwrap();
+    let volume = cut.cut.cut.destroyed.len() as f64 * 0.015625;
+    println!(
+        "TILTED: destroyed {} cells {volume:.2} m3 for the law's {law:.2}, heaped {}",
+        cut.cut.cut.destroyed.len(),
+        cut.cut.cut.added.len()
+    );
+    assert!((volume - law).abs() < 0.025 * law, "{volume} m3 against the law's {law}");
+    for c in &cut.cut.cut.destroyed {
+        let p: [f64; 3] = std::array::from_fn(|i| (f64::from(c[i]) + 0.5) * 0.25 - spec.center[i]);
+        let along: f64 = (0..3).map(|i| p[i] * spec.outward[i]).sum();
+        let r = (0..3).map(|i| (p[i] - along * spec.outward[i]).powi(2)).sum::<f64>().sqrt();
+        assert!(
+            r < spec.radius + spec.rim_width + 0.5 && along <= spec.radius + 0.5,
+            "{c:?} is outside the reach ({r}, {along})"
+        );
+    }
+    let mut have: Vec<[i32; 3]> = node.voxels.as_ref().unwrap().grid.cells().collect();
+    have.sort_unstable();
+    let mut stays = cut.cut.stays.clone();
+    stays.sort_unstable();
+    assert_eq!(have, stays);
 }
