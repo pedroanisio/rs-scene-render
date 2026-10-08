@@ -214,6 +214,8 @@ fn fingerprint(held: &[u32], broken: &[bool]) -> u64 {
 pub struct StressBalance {
     pub force: [f64; 3],
     pub moment: [f64; 3],
+    /// The mean of the manifolds' ratios, weighted by the size of their vectors, before the bound: a diagnostic of the ratio the solver's sub-steps gave, not of what was read (a friction over the
+    /// bound is the bound or is not read, whatever this says).
     pub friction_scale: f64,
     /// The sum of the friction impulses that were put on the body in the step (the vectors of the manifolds taken to the step's totals), in the world.
     pub friction: [f64; 3],

@@ -267,6 +267,8 @@ impl Step<'_> {
                 let share = part.mass / whole_mass;
                 on_force = add(on_force, left.map(|v| v * share));
                 on_moment = add(on_moment, cross(arm, left.map(|v| v * share)));
+                // the spin that makes up the moment that is left is a small thing next to the loads (its angular momentum is the part's share of the body's I times the turn that the moment gave in
+                // the step), and it is taken about the pose of the end of the step, whose half-step's turn from the middle is a second-order change of it: not formed at the middle as the arms are
                 if let Some(omega) = solve3(&self.after.inertia(&self.whole), left_moment) {
                     let spin = Rigid { linear: [0.0; 3], angular: omega, ..self.after };
                     on_force = add(on_force, momentum(part, &spin));
