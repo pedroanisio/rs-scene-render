@@ -41,6 +41,15 @@ pub fn mesh_quads(grid: &Occupancy, classes: &Classes) -> Vec<Quad> {
 pub const BYTES_PER_QUAD: usize =
     3 * std::mem::size_of::<Quad>() + 2 * (4 * std::mem::size_of::<crate::Vertex>() + 6 * 4);
 
+/// The error of a surface that does not fit `max_bytes` of surface memory: what a quad costs at the peak and how many the budget admits.
+/// Every place that refuses a surface for its budget says it with these words.
+pub fn budget_error(max_bytes: usize) -> String {
+    format!(
+        "voxel surface exceeds memory budget (surfaceMemoryMiB): its quads cost {BYTES_PER_QUAD} bytes each at the peak and the budget of {max_bytes} bytes admits {} quads, and the surface has more",
+        max_bytes / BYTES_PER_QUAD
+    )
+}
+
 /// [`mesh_quads`] under a budget of `max_bytes` (the object's `surfaceMemoryMiB`): the quads are counted as the planes are merged, in
 /// a fixed order, and the first plane that takes the surface over the budget stops the work with an error that says how many quads the
 /// budget admits, so a surface that cannot fit costs the time of the quads it was allowed and the error does not depend on how many
@@ -59,9 +68,7 @@ pub fn mesh_quads_within(grid: &Occupancy, classes: &Classes, max_bytes: usize) 
         ControlFlow::Continue(())
     });
     if over {
-        return Err(format!(
-            "voxel surface exceeds memory budget (surfaceMemoryMiB): its quads cost {BYTES_PER_QUAD} bytes each at the peak and the budget of {max_bytes} bytes admits {admitted} quads, and the surface has more"
-        ));
+        return Err(budget_error(max_bytes));
     }
     quads.sort_by_key(|q| (q.axis, q.positive, q.plane, q.v0, q.u0));
     Ok(quads)

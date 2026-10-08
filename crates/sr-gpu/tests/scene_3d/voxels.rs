@@ -551,3 +551,55 @@ fn what_the_renderer_keeps_of_a_voxels_object_is_only_what_the_frames_still_have
     let out = renderer.render(&gone, ev.program());
     assert_eq!(out.stats.voxel_states, 0);
 }
+
+#[test]
+fn a_piece_that_stops_fitting_the_budget_is_refused_without_making_its_meshes_again_at_every_frame() {
+    let Some(gpu) = gpu() else { return };
+    let file = vox_file("refused.vox", &block(2, 1), &[RED]);
+    let xml = document(&file, r#"surfaceMemoryMiB="2""#, "", "");
+    let doc = sr_model::load_str(&xml, &sr_model::LoadOptions::default()).unwrap();
+    let ev = sr_eval::Evaluator::new(&doc, &Default::default()).unwrap();
+    let mut renderer = sr_gpu::Renderer::new(gpu.clone(), ev.program());
+    let with_piece = |owner_cells: i32| {
+        let mut frame = ev.evaluate(0.5);
+        let node = frame.nodes.iter_mut().find(|n| &*n.id == "obj").unwrap();
+        node.voxels = Some(std::sync::Arc::new(sr_eval::voxel_cut::SimVoxels {
+            enabled: true,
+            revision: owner_cells as u64,
+            grid: checker(owner_cells, [0, 0, 0]),
+            changed_bricks: Vec::new(),
+            steps: Vec::new(),
+            thrown: None,
+            pieces: vec![sr_eval::voxel_cut::SimVoxelPiece {
+                body: 5,
+                enabled: true,
+                revision: 1,
+                grid: checker(6, [0, 0, 0]),
+                pose3: glam::Mat4::from_translation(glam::Vec3::new(12.0, 0.0, 0.0)).to_cols_array().map(f64::from),
+            }],
+        }));
+        frame
+    };
+    // 2 MiB holds 2,361 quads: the piece (648) fits beside an object of 5 cubed (378 quads) and not beside one of 9 cubed (2,190), which
+    // leaves 171
+    let first = renderer.render(&with_piece(5), ev.program());
+    assert!(first.stats.errors.is_empty(), "{:?}", first.stats.errors);
+    assert_eq!(first.stats.voxel_surfaces.len(), 2, "both fit");
+    let grown = renderer.render(&with_piece(9), ev.program());
+    assert_eq!(grown.stats.voxel_surfaces.len(), 1, "only the object is drawn: {:?}", grown.stats.voxel_surfaces);
+    assert_eq!(
+        grown.stats.errors.iter().filter(|e| e.contains("surfaceMemoryMiB")).count(),
+        1,
+        "{:?}",
+        grown.stats.errors
+    );
+    // the same frame again: the piece is refused again and nothing is expanded or uploaded for it
+    let again = renderer.render(&with_piece(9), ev.program());
+    assert_eq!(
+        again.stats.errors.iter().filter(|e| e.contains("surfaceMemoryMiB")).count(),
+        1,
+        "{:?}",
+        again.stats.errors
+    );
+    assert_eq!(again.stats.voxel_groups_uploaded, 0, "a refused surface is not made to be refused");
+}

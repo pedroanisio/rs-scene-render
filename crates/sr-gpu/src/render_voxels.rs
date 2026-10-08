@@ -372,6 +372,13 @@ impl Renderer {
                         continue;
                     }
                 }
+                // a surface held at a revision the cache had already read is not checked by the update: what it holds must fit what is left
+                // before it is expanded and uploaded
+                if state.cache.quad_count() * sr_3d::voxel::surface::BYTES_PER_QUAD > left {
+                    state.groups.clear();
+                    plan.stats.errors.push(format!("{}: {}", n.id, sr_3d::voxel::surface::budget_error(left)));
+                    continue;
+                }
                 let quads = state.cache.quads();
                 state.quads = quads.len();
                 state.hash = sr_3d::voxel::surface::quads_hash(&quads);
@@ -431,12 +438,7 @@ impl Renderer {
             if state.quads * sr_3d::voxel::surface::BYTES_PER_QUAD > left && !state.groups.is_empty() {
                 state.groups.clear();
                 state.signature = None;
-                plan.stats.errors.push(format!(
-                    "{}: voxel surface exceeds memory budget (surfaceMemoryMiB): the quads of the object and of its pieces cost {} bytes each at the peak and the budget of {budget} bytes admits {} quads in all",
-                    n.id,
-                    sr_3d::voxel::surface::BYTES_PER_QUAD,
-                    budget / sr_3d::voxel::surface::BYTES_PER_QUAD
-                ));
+                plan.stats.errors.push(format!("{}: {}", n.id, sr_3d::voxel::surface::budget_error(left)));
                 continue;
             }
             if !state.groups.is_empty() {

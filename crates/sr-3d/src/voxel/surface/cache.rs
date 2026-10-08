@@ -42,6 +42,11 @@ impl SurfaceCache {
         Self::default()
     }
 
+    /// How many quads the surface has.
+    pub fn quad_count(&self) -> usize {
+        self.slices.values().map(|s| s.len()).sum()
+    }
+
     /// How many planes the last update meshed, whether it came to an end or was refused for the budget.
     pub fn planes_meshed(&self) -> usize {
         self.meshed
@@ -162,9 +167,7 @@ impl SurfaceCache {
         }
         if !fits {
             *self = Self { meshed, ..Self::default() };
-            return Err(format!(
-                "voxel surface exceeds memory budget (surfaceMemoryMiB): its quads cost {BYTES_PER_QUAD} bytes each at the peak and the budget of {max_bytes} bytes admits {limit} quads, and the surface has more"
-            ));
+            return Err(super::budget_error(max_bytes));
         }
         self.meshed = meshed;
         self.held = Some((ident.0, ident.1, classes.clone()));
