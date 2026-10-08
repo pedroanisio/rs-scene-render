@@ -52,6 +52,22 @@ use crate::types::{self, flag, src, Draw, Gen, Globals, Mask, Vertex};
 use crate::vector::Attrs;
 use sr_vector::{Scene, Xf};
 
+/// What the surface of one body of cells is at a frame: the revision of its cells, its quads and their fingerprint
+/// ([`sr_3d::voxel::surface::quads_hash`]), and what the update that made it did (`remeshed` planes, or `full`).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct VoxelSurfaceStat {
+    pub id: String,
+    /// The body of a piece that came away from the object; none for the object itself.
+    pub body: Option<usize>,
+    pub revision: u64,
+    pub quads: usize,
+    pub hash: u64,
+    pub remeshed: usize,
+    pub full: bool,
+    /// The planes (axis, plane) that an incremental update meshed again; empty for a whole remesh and for a frame that made nothing.
+    pub planes: Vec<(u8, i32)>,
+}
+
 /// Counters for one rendered frame.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct RenderStats {
@@ -98,6 +114,16 @@ pub struct RenderStats {
     pub sim_rigid_seconds: f64,
     /// Seconds the ocean solver spent producing this frame's surface (inclusive, like all four `sim_*` fields).
     pub sim_ocean_seconds: f64,
+    /// Groups of voxel cells drawn (one draw each) and the CPU seconds spent preparing the surfaces of voxel objects this frame.
+    pub voxel_groups: usize,
+    pub voxel_mesh_seconds: f64,
+    /// The surface of each body of cells drawn this frame (an object of cells and the pieces that came away from it).
+    pub voxel_surfaces: Vec<VoxelSurfaceStat>,
+    /// Surfaces of voxel bodies the renderer keeps after this frame, the cells it read to see which palette indices are in use, and the
+    /// meshes it made and uploaded (a group whose quads did not change keeps its mesh).
+    pub voxel_states: usize,
+    pub voxel_cells_scanned: u64,
+    pub voxel_groups_uploaded: usize,
     /// Seconds the smoke (participating medium) solver spent advancing to this frame, including any
     /// rigid-body stepping its colliders trigger.
     pub sim_smoke_seconds: f64,
@@ -349,6 +375,8 @@ pub struct Renderer {
     text: crate::text::TextCache,
     /// The current mesh key of each clay object (its old meshes are dropped when it changes).
     clay_keys: HashMap<Arc<str>, String>,
+    /// The surface of each voxels object between frames, by node id.
+    voxel_surfaces: HashMap<(Arc<str>, Option<usize>), render_three::VoxelState>,
     glyph_tex: HashMap<u64, Option<Arc<Tex>>>,
     /// Burn only this caption track (an output's `burnCaptions`); otherwise tracks with mode burn or both.
     pub burn_captions: Option<String>,
@@ -940,6 +968,7 @@ impl Renderer {
             svgs: HashMap::new(),
             text: Default::default(),
             clay_keys: HashMap::new(),
+            voxel_surfaces: HashMap::new(),
             glyph_tex: HashMap::new(),
             burn_captions: None,
             captions_off: false,
@@ -1749,7 +1778,7 @@ impl Renderer {
             Some(a) => Self::element_state(ctx, a),
             None => 0,
         };
-        h(&[
+        let hash = h(&[
             Self::effects_state(ctx, n),
             sr_eval::rng::hash_str(&n.id),
             Arc::as_ptr(&n.elem) as u64,
@@ -1778,7 +1807,20 @@ impl Renderer {
                     h(&p.pos.iter().chain(&p.vel).flat_map(|q| q.map(|v| v.to_bits() as u64)).collect::<Vec<u64>>())
                 })
                 .unwrap_or(7),
-        ])
+        ]);
+        // the cells of an object that a simulation cuts change without an attribute of the node changing: a group that holds it and is
+        // kept between frames must be drawn again after a cut. Nodes without them hash as they did.
+        match n.voxels.as_deref() {
+            None => hash,
+            Some(v) => {
+                let mut words = vec![hash, v.enabled as u64, v.revision, v.grid.lineage()];
+                for piece in &v.pieces {
+                    words.extend([piece.body as u64, piece.enabled as u64, piece.revision, piece.grid.lineage()]);
+                    words.extend(piece.pose3.iter().map(|c| c.to_bits()));
+                }
+                h(&words)
+            }
+        }
     }
 
     /// Hash of a node and its subtree (and mattes) in a target space.
@@ -3202,6 +3244,11 @@ impl Renderer {
         plan.stats.sim_smoke_seconds = g.sim_seconds.smoke;
         plan.stats.sim_particles_seconds = g.sim_seconds.particles;
         self.used.clear();
+        // what is kept of a voxels object that the frame no longer has goes with it
+        {
+            let ids: std::collections::HashSet<&str> = g.nodes.iter().map(|n| &*n.id).collect();
+            self.voxel_surfaces.retain(|(id, _), _| ids.contains(&**id));
+        }
         let mut kids: Vec<Vec<usize>> = vec![Vec::new(); g.nodes.len()];
         let mut roots = Vec::new();
         for (i, n) in g.nodes.iter().enumerate() {
@@ -3363,6 +3410,7 @@ impl Renderer {
         self.pool.trim();
         stats.textures_created = self.pool.created - created_before;
         stats.textures_released = self.pool.released - released_before;
+        stats.voxel_states = self.voxel_surfaces.len();
         Frame { texture: frame, stats }
     }
 

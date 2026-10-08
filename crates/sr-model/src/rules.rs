@@ -1526,11 +1526,34 @@ impl<'a> Eval<'a> {
                     "an object3D of primitive voxels names a voxelAsset in voxels.".into()
                 });
                 self.check(
-                    voxels || !["voxels", "cellSize", "palette", "surface"].iter().any(|k| has(k)),
+                    voxels || !["voxels", "cellSize", "palette", "surface", "surfaceMemoryMiB"].iter().any(|k| has(k)),
                     n,
                     "VOX5",
-                    || "voxels, cellSize, palette and surface belong to primitive=\"voxels\".".into(),
+                    || "voxels, cellSize, palette, surface and surfaceMemoryMiB belong to primitive=\"voxels\".".into(),
                 );
+                // measured: the raster renderer's shadow of a block of cells of 0.25 differs in 23 pixels of 51 from that of cells of 1, and is
+                // gone at 0.1 (its offsets and biases are fixed in the units of the scene); from 0.5 up the difference is that of a unit. The
+                // size that counts is the cell's in the scene: the object's cellSize, else its asset's, times the smallest side of the object's scale
+                if voxels {
+                    let asset_size = a("voxels").and_then(|id| {
+                        n.document()
+                            .root_element()
+                            .descendants()
+                            .find(|d| d.is_element() && is(*d, "voxelAsset") && d.attribute("id") == Some(id))
+                            .and_then(|d| d.attribute("cellSize"))
+                    });
+                    // the numbers are read as the schema reads an xs:double (a sign and spaces around it are valid there, and not in an XPath number)
+                    let double = |v: &str| v.trim().parse::<f64>().ok();
+                    let scale = ["scaleX", "scaleY", "scaleZ"].map(|k| a(k).and_then(double).map_or(1.0, f64::abs));
+                    let size = a("cellSize").or(asset_size).and_then(double);
+                    if size.is_some_and(|c| c * scale.into_iter().fold(f64::INFINITY, f64::min) < 0.5) {
+                        self.warn(
+                            n,
+                            "W09",
+                            "the cells of a voxels object are smaller than 0.5 in the scene (the cell size times the object's scale): the shadow the raster renderer casts from them is displaced or lost, and the path tracer's holds down to 0.05; larger cells in the scene (a coarser model or a larger object) or the path tracer avoid it.".into(),
+                        );
+                    }
+                }
                 let palette_ok = a("palette").is_none_or(|p| {
                     let tokens: Vec<&str> = p.split_whitespace().collect();
                     p.trim() == "file"

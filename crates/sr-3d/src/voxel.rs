@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 pub mod default_palette;
 pub mod material;
 pub mod srvol;
+pub mod surface;
 pub mod vox;
 
 /// What an importer makes of a file.

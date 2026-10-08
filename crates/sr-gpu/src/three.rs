@@ -1181,8 +1181,13 @@ impl ThreeEngine {
 
     /// Uploads a mesh.
     pub fn upload_mesh(&self, vertices: &[Vertex], indices: &[u32]) -> Arc<MeshGpu> {
+        self.upload_mesh_owned(vertices.to_vec(), indices.to_vec())
+    }
+
+    /// As [`Self::upload_mesh`], keeping the vectors as the host copy instead of copying them.
+    pub fn upload_mesh_owned(&self, vertices: Vec<Vertex>, indices: Vec<u32>) -> Arc<MeshGpu> {
         let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-        for v in vertices {
+        for v in &vertices {
             lo = lo.min(Vec3::from(v.pos));
             hi = hi.max(Vec3::from(v.pos));
         }
@@ -1191,22 +1196,15 @@ impl ThreeEngine {
         }
         let vbuf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mesh-v"),
-            contents: bytemuck::cast_slice(vertices),
+            contents: bytemuck::cast_slice(&vertices),
             usage: wgpu::BufferUsages::VERTEX,
         });
         let ibuf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mesh-i"),
-            contents: bytemuck::cast_slice(indices),
+            contents: bytemuck::cast_slice(&indices),
             usage: wgpu::BufferUsages::INDEX,
         });
-        Arc::new(MeshGpu {
-            vbuf,
-            ibuf,
-            count: indices.len() as u32,
-            cpu: Arc::new((vertices.to_vec(), indices.to_vec())),
-            lo,
-            hi,
-        })
+        Arc::new(MeshGpu { vbuf, ibuf, count: indices.len() as u32, cpu: Arc::new((vertices, indices)), lo, hi })
     }
 
     /// Prefilters and uploads an environment.

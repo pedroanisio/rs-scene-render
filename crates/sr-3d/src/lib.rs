@@ -42,6 +42,7 @@ pub mod voxel;
 use glam::{Mat4, Quat, Vec3};
 
 pub use material::{AlphaMode, FoamMix, MaterialParams};
+pub use occupancy::Occupancy;
 
 /// Y-up, metre-based assets (glTF, OBJ, PLY, FBX, USD after unit conversion)
 /// to scene space: a 180° turn about x, 100 scene units per metre.

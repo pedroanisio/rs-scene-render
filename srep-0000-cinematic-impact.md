@@ -3168,10 +3168,53 @@ absent; `model` is the number from 0 of one model of a `vox` file; `voxelGrid` n
 128 MiB and the grid `voxels`, and over either is an error that names the number, never a model cut short. The provenance
 attributes are those of the other assets.
 
-An `object3D` of primitive `voxels` names its asset (VOX4). `cellSize`, `palette` and `surface` belong to that primitive (VOX5).
+An `object3D` of primitive `voxels` names its asset (VOX4). `cellSize`, `palette`, `surface` and `surfaceMemoryMiB` belong to that primitive (VOX5).
 `palette` is the word `file` or at most 255 material IDs, in the order of the palette indices 1, 2, ... (VOX6); the material of a
 cell is the one of its index, else the object's `material`, else the colour of the file, and an index with none of the three is an
-error that names it. `surface="blocks"` (the only value) draws every exposed face of a cell as a quad. The object has no `mesh`,
+error that names it. `surface="blocks"` (the only value) draws every exposed face of a cell as a quad. `surfaceMemoryMiB` (1 to 4096; the engine's default is 128) is the most memory the
+surface may take while it is made and drawn, at 888 bytes for each quad at the peak of the surface in the raster renderer and the cache (24 in the cache's slices, 24 in the list of quads and 24 in the copy that sorts them into the groups drawn, and 408, the vertices and indices of its mesh, on the host and on the device; the meshes that a rebuild replaces are released before the new ones are made, and the device's 408 is counted from the sizes of the buffers, not measured). The path tracer takes the triangles into its own world at every build (the copy of every triangle, its acceleration structure and the buffers of both, and the staging copy of the upload) and that memory is not in the 888 and not in the budget: the budget is the surface's, not the pass's. The quads that a budget admits are its bytes over 888, rounded down (151,146 at 128 MiB), the surface is made plane by
+plane in a fixed order and the budget is checked after each plane is made, so the first plane that takes it over stops the work (at most one plane beyond the budget is made) with an error that says what the budget admits. The budget is the object's: the object and the pieces that come away from it share it, each body taking what the ones before it left (the object first, then the pieces in the order of the frame), and a piece that does not fit is not drawn and reports the error. Faces that
+lie on one plane, look one way and are of one class merge into rectangles, scanning the plane by `v` and then by `u` and taking the widest run first;
+the result is a function of the cells alone.
+
+**Drawing.** The renderer draws the quads as meshes of the raster pass and of the path tracer, with no change to either shader. The material of a
+palette index is the one that `palette` names for it (the i-th id), else the object's `material`, else the colour and the material of the file; an
+index with none of the three is an error that names it. Cells whose indices look alike (the same document material, or the same colour and file
+material, or the same emissive colour and strength) are one class: they merge into one quad, and the face between two cells of one see-through class
+(glass, a blended or transmissive material) is not made; between two see-through classes the lesser owns the face. A draw is made for each document
+material in use, for the file's indices that differ only in colour (the colour is in the vertices) and for each distinct emissive colour and strength;
+`voxel_groups` and `voxel_mesh_seconds` of the frame statistics count them. The file's materials are mapped as the engine decides, the format having no
+photometric unit: diffuse is a rough dielectric (`_rough`, else 0.8), metal has `_metal` (else 1) and `_rough` (else 0.2), glass has `_trans` (else 1), the
+index of refraction `_ri` or one plus `_ior` (else 1.5) and `_rough` (else 0.05), emit is an emission of `_emit` (else 1) times the colour, and blend is
+an alpha-blended opacity of `_alpha`; a type the reader does not know is drawn as diffuse and said so in the frame's notes. An emitter does not light
+its neighbours in the raster renderer, and in the path tracer only the paths that sample its faces see it (a light of the scene is the reliable way).
+The surface is made once for a grid, a palette and its materials and kept between frames: a frame that changes none of them makes no mesh.
+
+**T-junctions.** The merge leaves vertices of smaller quads on the edges of larger ones. A probe renders an unlit white ball of radius 6 cells
+(about 1,100 pixels of a picture of 64 x 64) on black from 10 poses all round it, in the raster renderer (with its multisampling) and in the path tracer
+(4 samples), and counts the pixels of the background enclosed by the body (not reached from the corners without crossing it): 0 in all 20 pictures, so
+no crack shows at that size. The probe says nothing of larger pictures or of bodies with larger flat faces, where a sub-pixel gap between the edges of
+two quads is more likely; the surface is not conformed (no vertex is added on the longer edge).
+
+**Small cells (W09).** A block of 4 cells on a floor under a sun that casts shadows, with the camera and the floor moved in proportion to the cell size, is
+the same picture at any size if the shadow scales with the scene. Measured against the picture of cells of 1 (the shadow is 51 pixels in the raster renderer and 61
+in the path tracer): the raster picture differs by 6, 5, 9, 23 and 51 pixels at cells of 4, 2, 0.5, 0.25 and 0.1 (and 51 at 0.05 and 0.02, where the shadow is gone), because
+the offsets and biases of its shadow map are fixed in the units of the scene; the path tracer differs by 0, 0, 0, 2, 5, 5 and 12 pixels at 4, 2, 0.5, 0.25, 0.1, 0.05 and
+0.02. The size that matters is the cell's in the scene: the object's `cellSize` (else the asset's, else the file's) times the smallest side of the object's scale. A voxels object whose cells are smaller than 0.5 in the scene has the warning W09 where the document says it: the `cellSize` of the object or of its asset, and the object's `scaleX`, `scaleY` and `scaleZ` (read as `xs:double`). What the validator does not know is not in it: the scale of a parent group and the grid scale that an `srvol` file carries (so the ground of a crater at a quarter of a unit from a file has no warning), and the renderer reports nothing of it, since it draws the object as authored. Cells of 1 on an object scaled to a quarter are cells of 0.25 and are warned; the remedy is larger cells in the scene (a coarser model or a larger object) or the path tracer, not a change of `cellSize` that a scale undoes. The measurement is one scene and one sun angle.
+
+**Measured cost** (`crates/sr-3d/examples/voxel_surface_probe.rs`, `ci` profile, one core of the host, the CPU side only: the exposed faces, their merge
+into quads and the expansion into 96-byte vertices; the upload and the draw are not in it):
+
+| grid | cells | exposed faces | quads | faces | merge | expansion | vertices |
+|---|---|---|---|---|---|---|---|
+| cube of 100 | 1,000,000 | 60,000 | 6 | 0.016 s | 0.018 s | 0.000 s | 0 MiB |
+| sphere of radius 62 | 998,592 | 72,576 | 31,392 | 0.020 s | 0.023 s | 0.005 s | 11.5 MiB |
+| shell of radius 100, 2 cells thick | 245,768 | 369,600 | 157,716 | 0.044 s | 0.061 s | 0.026 s | 57.8 MiB |
+| checkerboard of 126 | 1,000,188 | 6,001,128 | 6,001,128 | 0.40 s | 0.77 s | 0.92 s | 2,198 MiB |
+
+The checkerboard, the worst case, is refused by any budget the schema admits (6,001,128 quads at 1,240 bytes are 7.1 GB), at the first plane that takes it
+over. A cut of 904 cells of a radius of 12 out of the side of the shell touches 9 bricks and remeshes 59 planes in 0.004 s, where a full mesh of the cut
+grid takes 0.060 s; a frame that changes nothing remeshes none. The object has no `mesh`,
 `volume`, `terrain`, `map`, `text` or `path`, and no `medium` or `pyro` child (VOX7). Position, scale and rotation are those of
 every `object3D`; the origin of the cells is the corner of the bounding box of the occupied cells.
 
@@ -3282,7 +3325,7 @@ The rows of a mesh's box are cut a chunk at a time, so that the memory of a cut 
 | VOX2 | exactly one of `src` and `fromMesh`; `format`, `model`, `voxelGrid` only with a file of that format; `fromMesh` and `cellSize` together |
 | VOX3 | `fromMesh` names a mesh asset |
 | VOX4 | an object of primitive `voxels` names a `voxelAsset` in `voxels` |
-| VOX5 | `voxels`, `cellSize`, `palette`, `surface` belong to primitive `voxels` |
+| VOX5 | `voxels`, `cellSize`, `palette`, `surface`, `surfaceMemoryMiB` belong to primitive `voxels` |
 | VOX6 | `palette` is `file` or at most 255 material IDs |
 | VOX7 | a voxels object has no mesh, volume, terrain, map, text or path, and no medium or pyro child |
 | VOX8 | `rigidBody@shape="voxels"` belongs to an object of primitive `voxels` |

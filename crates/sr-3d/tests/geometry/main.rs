@@ -7,3 +7,4 @@ mod occupancy;
 mod pieces;
 mod pieces_sections;
 mod terrain;
+mod voxel_surface;

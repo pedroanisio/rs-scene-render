@@ -263,22 +263,27 @@
       "CRT12"
     ],
     "crt13-mantle.scene.xml": [
-      "CRT13"
+      "CRT13",
+      "W09"
     ],
     "crt14-curve.scene.xml": [
-      "CRT14"
+      "CRT14",
+      "W09"
     ],
     "crt15-no-source.scene.xml": [
-      "CRT15"
+      "CRT15",
+      "W09"
     ],
     "crt16-count.scene.xml": [
-      "CRT16"
+      "CRT16",
+      "W09"
     ],
     "crt16-no-count.scene.xml": [
       "CRT16"
     ],
     "crt17-angle.scene.xml": [
-      "CRT17"
+      "CRT17",
+      "W09"
     ],
     "crt2.scene.xml": [
       "CRT2"
@@ -317,34 +322,44 @@
       "FRX1"
     ],
     "frx10-pieces.scene.xml": [
-      "FRX10"
+      "FRX10",
+      "W09"
     ],
     "frx11-infinite.scene.xml": [
-      "FRX11"
+      "FRX11",
+      "W09"
     ],
     "frx11-no-partition.scene.xml": [
-      "FRX11"
+      "FRX11",
+      "W09"
     ],
     "frx11-planes.scene.xml": [
-      "FRX11"
+      "FRX11",
+      "W09"
     ],
     "frx11-zero-normal.scene.xml": [
-      "FRX11"
+      "FRX11",
+      "W09"
     ],
     "frx12-labels.scene.xml": [
-      "FRX12"
+      "FRX12",
+      "W09"
     ],
     "frx13-no-strength.scene.xml": [
-      "FRX13"
+      "FRX13",
+      "W09"
     ],
     "frx13-strength-alone.scene.xml": [
-      "FRX13"
+      "FRX13",
+      "W09"
     ],
     "frx14-static.scene.xml": [
-      "FRX14"
+      "FRX14",
+      "W09"
     ],
     "frx15-source.scene.xml": [
-      "FRX15"
+      "FRX15",
+      "W09"
     ],
     "frx2.scene.xml": [
       "FRX2"
@@ -372,7 +387,8 @@
       "FRX7"
     ],
     "frx8-interior.scene.xml": [
-      "FRX8"
+      "FRX8",
+      "W09"
     ],
     "frx9-partition.scene.xml": [
       "FRX9"
@@ -971,28 +987,36 @@
       "VOX1"
     ],
     "vox10-mass.scene.xml": [
-      "VOX10"
+      "VOX10",
+      "W09"
     ],
     "vox10-no-density.scene.xml": [
-      "VOX10"
+      "VOX10",
+      "W09"
     ],
     "vox11-slots.scene.xml": [
-      "VOX11"
+      "VOX11",
+      "W09"
     ],
     "vox12-anchor.scene.xml": [
-      "VOX12"
+      "VOX12",
+      "W09"
     ],
     "vox13-scale.scene.xml": [
-      "VOX13"
+      "VOX13",
+      "W09"
     ],
     "vox14-both.scene.xml": [
-      "VOX14"
+      "VOX14",
+      "W09"
     ],
     "vox15-fracture-box.scene.xml": [
-      "VOX15"
+      "VOX15",
+      "W09"
     ],
     "vox15-mesh-collider.scene.xml": [
-      "VOX15"
+      "VOX15",
+      "W09"
     ],
     "vox2-both-sources.scene.xml": [
       "VOX2"
@@ -1022,6 +1046,9 @@
       "VOX4"
     ],
     "vox5-orphan.scene.xml": [
+      "VOX5"
+    ],
+    "vox5-surface-memory-orphan.scene.xml": [
       "VOX5"
     ],
     "vox6-palette.scene.xml": [
@@ -1105,17 +1132,11 @@
     "volume-light-grid.scene.xml": [],
     "volume-sequence.scene.xml": [],
     "volume.scene.xml": [],
-    "voxel-body.scene.xml": [],
     "voxel-crater-signed-scale.scene.xml": [],
-    "voxel-crater.scene.xml": [],
-    "voxel-ejecta.scene.xml": [],
-    "voxel-fracture-labels.scene.xml": [],
-    "voxel-fracture-planes.scene.xml": [],
-    "voxel-fracture-stress.scene.xml": [],
-    "voxel-fracture.scene.xml": [],
     "voxels-from-mesh.scene.xml": [],
     "voxels-srvol-format.scene.xml": [],
     "voxels-srvol.scene.xml": [],
+    "voxels-surface-memory.scene.xml": [],
     "voxels.scene.xml": [],
     "whitewater-checkpoint.scene.xml": [],
     "whitewater-foam-albedo.scene.xml": []
@@ -1126,6 +1147,27 @@
     ],
     "a04-sequence-hold.scene.xml": [
       "A04"
+    ],
+    "voxel-body.scene.xml": [
+      "W09"
+    ],
+    "voxel-crater.scene.xml": [
+      "W09"
+    ],
+    "voxel-ejecta.scene.xml": [
+      "W09"
+    ],
+    "voxel-fracture-labels.scene.xml": [
+      "W09"
+    ],
+    "voxel-fracture-planes.scene.xml": [
+      "W09"
+    ],
+    "voxel-fracture-stress.scene.xml": [
+      "W09"
+    ],
+    "voxel-fracture.scene.xml": [
+      "W09"
     ],
     "w01-non-finite.scene.xml": [
       "W01"
@@ -1150,6 +1192,9 @@
     ],
     "w08-foam-unlit.scene.xml": [
       "W08"
+    ],
+    "w09-voxel-cells-small.scene.xml": [
+      "W09"
     ]
   }
 }

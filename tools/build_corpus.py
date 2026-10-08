@@ -124,6 +124,7 @@ CASES = [
     ("vox4-asset", ["VOX4"], lambda _: VOXELS.replace('voxels="model"', 'voxels="shape"')),
     ("vox4-no-asset", ["VOX4"], lambda _: VOXELS.replace(' voxels="model"', '')),
     ("vox5-orphan", ["VOX5"], lambda _: VOXELS.replace('primitive="voxels"', 'primitive="box"')),
+    ("vox5-surface-memory-orphan", ["VOX5"], lambda _: VOXELS.replace('primitive="voxels"', 'primitive="box" surfaceMemoryMiB="64"')),
     ("vox6-palette", ["VOX6"], lambda _: VOXELS.replace('palette="stone moss"', 'palette="stone nothing"')),
     ("vox8-shape", ["VOX8"], lambda _: CRATER_IMPACT.replace('<rigidBody type="static"/>', '<rigidBody type="static" shape="voxels"/>')),
     ("vox9-density", ["VOX9"], lambda _: FRACTURE.replace('<rigidBody mass="8"/>', '<rigidBody mass="8" density="2400"/>')),
@@ -489,6 +490,7 @@ WARN_CASES = [
     ("w06-foam-material", ["W06"], lambda _: OCEAN.replace('</composition>', '<camera id="cam" renderer="pathtrace"/></composition>').replace('</ocean>', '<whitewater foamMode="albedo" foamMaterial="foam"/></ocean>').replace('<composition>', '<materials><material id="foam"/></materials><composition>')),
     ("w08-foam-unlit", ["W08"], lambda _: OCEAN.replace('</composition>', '<camera id="cam" renderer="pathtrace"/></composition>').replace('<ocean id="sea" ', '<ocean id="sea" material="glow" ').replace('</ocean>', '<whitewater foamMode="albedo"/></ocean>').replace('<composition>', '<materials><material id="glow" unlit="true"/></materials><composition>')),
     ("w07-foam-raster", ["W07"], lambda _: OCEAN.replace('</ocean>', '<whitewater foamMode="albedo"/></ocean>')),
+    ("w09-voxel-cells-small", ["W09"], lambda _: VOXELS.replace('cellSize="2"', 'cellSize="0.25"', 1)),
     ("w03-no-lens", ["W03"], lambda _: BLACKHOLE.replace(' geodesics="true"', '')),
     ("w01-non-finite", ["W01"], sub('<marker id="drop" time="4.2"', '<marker id="drop" time="4.2" duration="1"/>\n    <marker id="late" time="INF"')),
 ]
@@ -547,6 +549,7 @@ VALID = {
     "voxels-from-mesh": VOXELS_FROM_MESH,
     # the extension is what says the format: a `.srvol` file with a grid, and one with the format said and no extension to say it
     "voxels-srvol": VOXELS.replace('src="../media/voxels.vox"', 'src="../media/uniform.srvol" voxelGrid="voxels"'),
+    "voxels-surface-memory": VOXELS.replace('surface="blocks"', 'surface="blocks" surfaceMemoryMiB="64"'),
     "voxels-srvol-format": VOXELS.replace('src="../media/voxels.vox"', 'src="../media/uniform.srvol" format="srvol" voxelGrid="voxels"'),
     "voxel-body": VOXEL_BODY,
     "voxel-crater": VOXEL_GROUND,
@@ -583,6 +586,33 @@ def write(path, text, expect):
     path.write_text(decl + header + body)
     return (decl + header + body).encode()
 
+def small_cells(text):
+    """Whether a voxels object of the document has cells smaller than 0.5 in the scene (rules.rs W09): its cellSize, else its asset's, times the smallest scale."""
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.fromstring(re.sub(r"<!--.*?-->", "", text, flags=re.S))
+    except ET.ParseError:
+        return False
+    assets = {a.get("id"): a for a in root.iter() if a.tag.endswith("voxelAsset")}
+    for o in root.iter():
+        if not o.tag.endswith("object3D") or o.get("primitive") != "voxels":
+            continue
+        size = o.get("cellSize") or (assets[o.get("voxels")].get("cellSize") if o.get("voxels") in assets else None)
+        try:
+            cell = float(size.strip())
+            scale = min(abs(float(o.get(k, "1").strip())) for k in ("scaleX", "scaleY", "scaleZ"))
+        except (AttributeError, ValueError):
+            continue
+        if cell * scale < 0.5:
+            return True
+    return False
+
+
+def with_small_cells(text, expect):
+    """The expected codes of a document, with W09 when it has cells smaller than 0.5 in the scene."""
+    return list(expect) + ["W09"] if small_cells(text) and "W09" not in expect else list(expect)
+
+
 def oracle_codes(expected, blind=False):
     """Translate Rust diagnostics into the independent schema oracle's scope."""
     codes = {code for code in expected if not code.startswith(("S", "A", "W"))}
@@ -598,14 +628,16 @@ def main():
             f.unlink()
     ok = True
     for name, text in VALID.items():
-        data = write(CORPUS / "valid" / f"{name}.scene.xml", text, [])
+        expect = with_small_cells(text, [])
+        data = write(CORPUS / "valid" / f"{name}.scene.xml", text, expect)
         xsd, sch = verdict(data)
         if xsd or sch:
             ok = False
             print(f"valid/{name}: oracle disagrees: {xsd} {sch}")
-        manifest["valid"][f"{name}.scene.xml"] = []
+        manifest["warnings" if expect else "valid"][f"{name}.scene.xml"] = expect
     for name, expect, fn in CASES:
         text = fn(base)
+        expect = with_small_cells(text, expect)
         data = write(CORPUS / "invalid" / f"{name}.scene.xml", text, expect)
         xsd, sch = verdict(data)
         got = sorted(set(i for i, _ in sch) | ({"XSD"} if xsd else set()))
@@ -618,6 +650,7 @@ def main():
     for name, expect, fn in ASSET_CASES + WARN_CASES:
         is_warn = (name, expect, fn) in WARN_CASES
         text = fn(base)
+        expect = with_small_cells(text, expect)
         data = write(CORPUS / ("valid" if is_warn else "invalid") / f"{name}.scene.xml", text, expect)
         xsd, sch = verdict(data)
         if xsd or sch:

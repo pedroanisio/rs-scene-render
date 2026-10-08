@@ -40,3 +40,7 @@ mod three;
 mod three_shadow_catcher;
 #[path = "scene_3d/three_unevenness.rs"]
 mod three_unevenness;
+#[path = "scene_3d/voxel_crater.rs"]
+mod voxel_crater;
+#[path = "scene_3d/voxels.rs"]
+mod voxels;
