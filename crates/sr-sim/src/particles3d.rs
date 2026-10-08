@@ -67,6 +67,10 @@ pub struct Spec {
     pub checkpoint_bytes: usize,
     /// Water that takes the particles that fall into it; none by default.
     pub water: Option<Water>,
+    /// Speed, relative to the surface, under which a particle that has just hit a surface is at rest there: it is
+    /// taken out where it lies and told to the driver as ground (`Absorbed::ground`), so that what it is made of
+    /// can be given to the ground it fell on. None by default: particles bounce on until they die.
+    pub settle: Option<f64>,
     /// Maximum emission events, accepted births, motion segments and curvature
     /// refinements in one seek.
     pub max_work: u64,
@@ -103,6 +107,7 @@ impl Default for Spec {
             max_bytes: 256 << 20,
             checkpoint_bytes: 64 << 20,
             water: None,
+            settle: None,
             max_work: 100_000_000,
         }
     }
@@ -118,7 +123,8 @@ pub struct Water {
     pub extent: [[f64; 2]; 2],
 }
 
-/// A particle that fell into the water: when, where and how fast it crossed, and what it was.
+/// A particle that fell into the water, or came to rest on the ground: when, where and how fast it crossed or
+/// settled, and what it was.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Absorbed {
     pub id: u64,
@@ -127,6 +133,8 @@ pub struct Absorbed {
     pub velocity: [f64; 3],
     /// Kilograms; zero for a particle that came from no driver birth.
     pub mass: f64,
+    /// True for a particle that came to rest on a surface (`Spec::settle`), false for one that fell into the water.
+    pub ground: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -415,7 +423,9 @@ impl Emitter {
             }
         }
         self.frame = advance(&self.spec, &self.state, time.max(self.state.frame.time), driver, &mut work)?.frame;
-        self.frame.time = time;
+        // a time that is within rounding of the step it was taken to is that step's: the particles of the step were
+        // born as late as its end, and none of them may be younger than the frame it is in
+        self.frame.time = time.max(self.state.frame.time);
         Ok(&self.frame)
     }
 }
@@ -584,6 +594,10 @@ fn advance(s: &Spec, state: &State, hi: f64, d: &mut dyn Driver, work: &mut u64)
                 Some(fell) => next.absorbed.push(fell),
                 None => next.frame.particles.push(p),
             }
+        } else if s.water.is_some() {
+            // it dies inside this step: it still falls into the water if it gets there first
+            let mut p = particle.clone();
+            next.absorbed.extend(motion(s, &mut p, lo, (death - lo).max(0.), d, work)?);
         }
     }
     for event in events {
@@ -610,6 +624,8 @@ fn advance(s: &Spec, state: &State, hi: f64, d: &mut dyn Driver, work: &mut u64)
                     Some(fell) => next.absorbed.push(fell),
                     None => next.frame.particles.push(p),
                 }
+            } else if s.water.is_some() {
+                next.absorbed.extend(motion(s, &mut p, event.time, (death - event.time).max(0.), d, work)?);
             }
             continue;
         }
@@ -638,6 +654,8 @@ fn advance(s: &Spec, state: &State, hi: f64, d: &mut dyn Driver, work: &mut u64)
                     Some(fell) => next.absorbed.push(fell),
                     None => next.frame.particles.push(p),
                 }
+            } else if s.water.is_some() {
+                next.absorbed.extend(motion(s, &mut p, event.time, (death - event.time).max(0.), d, work)?);
             }
         }
     }
@@ -814,6 +832,7 @@ fn motion(
                             position,
                             velocity,
                             mass: p.mass,
+                            ground: false,
                         }));
                     }
                 }
@@ -878,6 +897,17 @@ fn motion(
         p.position = add(hit.position, scale(n, separation));
         if !finite(p.position) || !finite(p.velocity) {
             return Err(Error::Invalid("nonfinite collision response"));
+        }
+        // At rest on the surface: slower than the rest speed after the contact, relative to the surface.
+        if s.settle.is_some_and(|rest| length(add(p.velocity, scale(hit.velocity, -1.))) < rest) {
+            return Ok(Some(Absorbed {
+                id: p.id,
+                time: time + elapsed,
+                position: p.position,
+                velocity: p.velocity,
+                mass: p.mass,
+                ground: true,
+            }));
         }
         contact = (dot(add(p.velocity, scale(hit.velocity, -1.)), n).abs() < 1e-9).then_some((n, hit.velocity));
         time += elapsed;

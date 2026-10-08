@@ -3,35 +3,57 @@ name: release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
+  validated-ci:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 310
+    outputs:
+      run-id: ${{ steps.ci.outputs.run-id }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/release_ci.py
   validation:
+    needs: validated-ci
+    if: needs.validated-ci.outputs.run-id == ''
     uses: ./.github/workflows/ci.yml
   linux:
-    needs: validation
+    needs: [validated-ci, validation]
+    if: ${{ !cancelled() && needs.validated-ci.result == 'success' && (needs.validated-ci.outputs.run-id != '' || needs.validation.result == 'success') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
       contents: write
+      actions: read
     env:
       CARGO_BUILD_JOBS: 2
       SR_GPU_BACKEND: vulkan
     steps:
       - uses: actions/checkout@v5
       - name: Check release version
+        id: version
         run: |
           python3 - <<'PY'
           import os, tomllib
           with open('Cargo.toml', 'rb') as f:
               version = tomllib.load(f)['workspace']['package']['version']
-          assert os.environ['GITHUB_REF_NAME'] == f'v{version}', 'tag must match Cargo.toml'
+          tag = f'v{version}'
+          if os.environ['GITHUB_EVENT_NAME'] == 'push':
+              assert os.environ['GITHUB_REF_NAME'] == tag, 'tag must match Cargo.toml'
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              print(f'tag={tag}', file=f)
           PY
           python3 tools/check_release_hygiene.py --all
       - name: Install runtime dependencies for smoke tests
@@ -42,12 +64,16 @@ jobs:
         with:
           name: validated-linux-tools
           path: target/release
+          github-token: ${{ github.token }}
+          run-id: ${{ needs.validated-ci.outputs.run-id || github.run_id }}
       - name: Verify validated binary
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
         run: |
           test "$(cat target/release/COMMIT)" = "$GITHUB_SHA"
           (cd target/release && sha256sum -c SHA256SUMS)
           chmod +x target/release/scene-render
-          test "$(target/release/scene-render --version)" = "scene-render ${GITHUB_REF_NAME#v}"
+          test "$(target/release/scene-render --version)" = "scene-render ${RELEASE_TAG#v}"
       - name: Smoke test the release binary
         run: |
           export XDG_RUNTIME_DIR="$RUNNER_TEMP/runtime"
@@ -61,8 +87,10 @@ jobs:
           target/release/scene-render encode "$RUNNER_TEMP/smoke.xml" -o "$RUNNER_TEMP/smoke.mkv" --codec ffv1 --hw software --parallel 1 --strict --no-upload
           test "$(ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 "$RUNNER_TEMP/smoke.mkv")" = 2
       - name: Package
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
         run: |
-          package="scene-render-${GITHUB_REF_NAME}-linux-x86_64"
+          package="scene-render-${RELEASE_TAG}-linux-x86_64"
           mkdir -p "dist/$package"
           cp target/release/scene-render README.md LICENSE "dist/$package/"
           printf '%s\n' "$GITHUB_SHA" > "dist/$package/COMMIT"
@@ -77,8 +105,10 @@ jobs:
             dist/*.sha256
           if-no-files-found: error
       - name: Publish GitHub Release
+        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.sha256 \
-            --verify-tag --title "scene-render $GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md
+          gh release create "$RELEASE_TAG" dist/*.tar.gz dist/*.sha256 \
+            --verify-tag --title "scene-render $RELEASE_TAG" --notes-file RELEASE_NOTES.md

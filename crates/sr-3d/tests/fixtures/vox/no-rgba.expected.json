@@ -1,0 +1,82 @@
+{
+ "cells": [
+  [
+   2,
+   -5,
+   0,
+   1
+  ],
+  [
+   0,
+   -1,
+   0,
+   1
+  ],
+  [
+   1,
+   -4,
+   2,
+   255
+  ],
+  [
+   2,
+   -5,
+   3,
+   2
+  ],
+  [
+   0,
+   -1,
+   3,
+   7
+  ]
+ ],
+ "models": [
+  {
+   "size": [
+    3,
+    4,
+    5
+   ],
+   "voxels": [
+    [
+     0,
+     0,
+     0,
+     1
+    ],
+    [
+     2,
+     3,
+     4,
+     2
+    ],
+    [
+     1,
+     2,
+     3,
+     255
+    ],
+    [
+     0,
+     3,
+     0,
+     7
+    ],
+    [
+     2,
+     0,
+     4,
+     1
+    ]
+   ]
+  }
+ ],
+ "palette": null,
+ "unproved": [
+  "palette offset by one",
+  "model centre under the scene graph",
+  "rotation byte",
+  "MATL id is the palette index"
+ ]
+}

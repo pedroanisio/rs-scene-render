@@ -36,6 +36,7 @@ pub mod diag;
 pub mod document;
 pub mod effect_attrs;
 pub mod element;
+pub mod foam;
 pub mod model;
 pub mod parse;
 pub mod rules;
