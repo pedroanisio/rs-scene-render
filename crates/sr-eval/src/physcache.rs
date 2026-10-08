@@ -190,7 +190,36 @@ fn absorb_shape(id: &mut Identity, shape: &Shape3) {
         Shape3::TriMesh(v, t) => absorb_mesh(id, "trimesh", v, t),
         Shape3::Decomposition(v, t) => absorb_mesh(id, "decomposition", v, t),
         Shape3::Convex(v) => absorb_mesh(id, "convex", v, &[]),
+        Shape3::Voxels { size, cells } => {
+            id.value("voxels", &(size.map(f64::to_bits), cells.len()));
+            for k in cells.iter().flatten() {
+                id.0.update(k.to_le_bytes());
+            }
+        }
         other => id.value("shape", other),
+    }
+}
+
+/// A fracture event as the identity of a world has always read it: by its `Debug` text, which for an event that fires
+/// at a time is what it was before events could fire on a contact, so that no cache of such a world is lost.
+struct Identified<'a>(&'a Fracture3);
+
+impl Debug for Identified<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Fracture3 { source, at, radial_impulse, fragments, contact, dust } = self.0;
+        let mut text = f.debug_struct("Fracture3");
+        text.field("source", source)
+            .field("at", at)
+            .field("radial_impulse", radial_impulse)
+            .field("fragments", fragments);
+        if let Some(contact) = contact {
+            text.field("contact", contact);
+        }
+        // only when there is dust, so that the identity of every fracture without it is what it was
+        if let Some(dust) = dust {
+            text.field("dust", dust);
+        }
+        text.finish()
     }
 }
 
@@ -201,6 +230,7 @@ pub(crate) fn digest_world3(
     events: &[Fracture3],
     watches: &[ImpactWatch],
     links: &[crate::sim3d::CraterLink],
+    splits: &[sr_sim::physics3d::VoxelSplit3],
 ) -> [u8; 32] {
     let World3Spec { start, step, gravity, pixels_per_meter, iterations, bounds, bodies, joints, fix_internal_edges } =
         spec;
@@ -238,11 +268,44 @@ pub(crate) fn digest_world3(
         id.value("joint", joint);
     }
     for event in events {
-        id.value("fracture", event);
+        id.value("fracture", &Identified(event));
     }
     id.value("impacts", &watches);
     for link in links {
         id.value("crater", &(link.watch, link.owner, &*link.source));
     }
+    // only where bodies of cells can be cut, so that the identity of every other world is what it was
+    for split in splits {
+        id.value("voxelSplit", &(split.parent, &split.slots));
+    }
     id.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sr_sim::physics3d::{FractureContact, Fragment3};
+
+    fn event(contact: Option<FractureContact>) -> Fracture3 {
+        Fracture3 {
+            source: 1,
+            at: 0.5,
+            radial_impulse: 2.0,
+            fragments: vec![Fragment3 { body: 2, offset: [0.0; 3], impulse: [0.0; 3] }],
+            contact,
+            dust: None,
+        }
+    }
+
+    #[test]
+    fn the_identity_of_an_event_at_a_time_is_what_it_was_before_events_could_fire_on_a_contact() {
+        // the text the derived `Debug` of the event gave when it had no contact: a cache baked then is still served
+        let before = "Fracture3 { source: 1, at: 0.5, radial_impulse: 2.0, fragments: [Fragment3 { body: 2, offset: \
+                      [0.0, 0.0, 0.0], impulse: [0.0, 0.0, 0.0] }] }";
+        assert_eq!(format!("{:?}", Identified(&event(None))), before);
+        // and one that fires on a contact is another world
+        let with = format!("{:?}", Identified(&event(Some(FractureContact { watch: 0, energy_fraction: 0.3 }))));
+        assert_ne!(with, before);
+        assert!(with.contains("energy_fraction: 0.3"), "{with}");
+    }
 }

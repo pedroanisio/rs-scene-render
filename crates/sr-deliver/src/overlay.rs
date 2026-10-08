@@ -32,6 +32,7 @@ pub(crate) fn failure_message(stats: &sr_gpu::RenderStats) -> String {
 pub struct Overlay {
     ev: Evaluator,
     renderer: Renderer,
+    safe_area_force: bool,
     /// The layer fitted to the output's frame.
     tex: Arc<Tex>,
 }
@@ -49,6 +50,7 @@ impl Overlay {
         captions: &OutputCaptions,
         gpu: &Gpu,
         options: &EvalOptions,
+        quality: Option<m::ProjectQuality>,
         representation: Option<&str>,
     ) -> Result<Option<Overlay>, DeliverError> {
         let symbol = match &output.overlay {
@@ -78,19 +80,48 @@ impl Overlay {
         s.scene360 = None;
         // the document's captions are in composition time: the layer burns the output's
         s.captions = burns.then(|| m::Captions { loc: Default::default(), caption_tracks: captions.tracks.clone() });
+        if let Some(tracks) = &mut s.captions {
+            if let Some(id) = &output.burn_captions {
+                tracks.caption_tracks.retain(|t| t.id == *id);
+                // An explicit selection burns even a track otherwise marked sidecar-only.
+                for track in &mut tracks.caption_tracks {
+                    track.mode = m::CaptionTrackMode::Burn;
+                }
+            }
+        }
         // Keep caller inputs, but use the symbol/output frame established above rather than
         // reapplying the composition's layout to this independent layer.
         let ev =
             Evaluator::new(&d, &EvalOptions { layout: None, ..options.clone() }).map_err(DeliverError::Document)?;
         let mut renderer = Renderer::new(gpu.clone(), ev.program());
+        renderer.quality = quality;
         renderer.representation = representation.map(str::to_owned);
         renderer.burn_captions = output.burn_captions.clone();
         let tex = renderer.texture(size);
-        Ok(Some(Overlay { ev, renderer, tex }))
+        Ok(Some(Overlay { ev, renderer, tex, safe_area_force: symbol.is_some_and(|s| s.safe_area_force) }))
     }
 
     pub fn warnings(&self) -> &[sr_model::Diagnostic] {
         self.ev.warnings()
+    }
+
+    /// Shader audio uses the same output clock as this layer's evaluator.
+    pub fn set_audio(&mut self, audio: Option<Arc<sr_gpu::shader::AudioSignals>>) {
+        self.renderer.audio = audio;
+    }
+
+    /// Audit the independent output layer at its delivered times, before encoding starts.
+    pub fn safe_diagnostics(&self, times: &[f64]) -> Vec<sr_model::Diagnostic> {
+        let p = self.ev.program();
+        if p.safe_enforce == sr_eval::safe_area::SafeEnforce::Off && p.scene.captions.is_none() {
+            return Vec::new();
+        }
+        sr_gpu::safe_audit::audit(&self.ev, times)
+            .into_iter()
+            // A forced overlay symbol exempts its children, but not output captions.
+            .filter(|t| !self.safe_area_force || t.finding.kind == "caption")
+            .map(|t| t.diagnostic(p))
+            .collect()
     }
 
     /// Measure each visible text layer (and burned captions) with and without it

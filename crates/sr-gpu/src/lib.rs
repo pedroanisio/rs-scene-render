@@ -6,6 +6,7 @@ pub mod caption_dump;
 pub mod color;
 pub mod drape;
 pub mod fx;
+pub mod geodesic;
 pub mod glsl;
 pub mod golden;
 pub mod gpu;

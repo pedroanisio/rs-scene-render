@@ -62,19 +62,27 @@ pub struct Spec {
     pub dry_tolerance: f64,
     /// Conservative resident state/workspace ceiling, excluding checkpoints.
     pub max_bytes: usize,
+    /// Bytes of checkpoints. The states of the last few steps of a seek, kept for the frames asked for among them
+    /// (at most 16, within a quarter of this budget), come on top of it.
     pub checkpoint_bytes: usize,
-    /// Work units per seek: eight per cell for each impulse and each substep.
+    /// Work units per seek, charged by cell: per CFL substep 8 in first order and 24 in second (two stages, each
+    /// a reconstruction and a flux sweep); with a moving bed one more for the bed interpolated to the substep and,
+    /// when the bodies relax the water to their velocity (`bodies` without `body_push`), one more for their
+    /// thickness and velocity; 8 for each impulse, authored or asked for by the driver; 16 for each entry of a
+    /// splash; and one a cell for the samples of the bodies of each canonical step of a seek with `body_owners`, and one
+    /// for the tags of each stretch that is advanced with `body_owners` and without `body_push`.
     pub max_work: u64,
     /// The bed is supplied by a [`Driver`] at every canonical step and the solver
-    /// is sampled with [`Ocean::at_driven`]. Charges three more bed vectors per cell.
+    /// is sampled with [`Ocean::at_driven`]. Charges 64 more bytes per cell: three bed vectors and what is kept of
+    /// the step passed on the way ahead (a state and the bed vectors of its two ends).
     pub moving_bed: bool,
     /// The driver also fills the thickness and horizontal velocity of bodies in
     /// the water column, and the water's momentum relaxes toward theirs. Needs
-    /// `moving_bed`; charges 72 more bytes per cell.
+    /// `moving_bed`; charges 120 more bytes per cell.
     pub bodies: bool,
     /// With `bodies`: the driver also tags every occupied cell with the index of the body that
     /// holds most of it (`Forcing::owner`, below this count, at most 4096), and what each body
-    /// gave the water and stands in is reported per body in `Forcing::bodies`. Charges 12 more
+    /// gave the water and stands in is reported per body in `Forcing::bodies`. Charges 20 more
     /// bytes per cell and 16 per body in every checkpoint. Zero: nothing is tagged.
     pub body_owners: usize,
     /// With `body_owners`: bodies do not relax the water toward their own velocity; the driver gives
@@ -198,7 +206,8 @@ pub struct SplashCell {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Lift {
     pub owner: u32,
-    /// Columns and the height each is raised by (not negative); a column once.
+    /// Columns and the height each is raised by (not negative); a column once for a body, in all its lifts: a
+    /// column named twice is an error.
     pub columns: Vec<(u32, f64)>,
 }
 
@@ -279,6 +288,15 @@ struct Ends {
     next: Forcing,
 }
 
+/// A state the solver passed on its way to a later one, with its ends, kept for a frame that is asked for before
+/// the solver's own step: a reader that wants the water ahead of a frame steps the solver past it, and the next
+/// frame is then behind it.
+struct Near {
+    step: u64,
+    state: State,
+    ends: Option<Ends>,
+}
+
 /// Interpolated bed and body arrays of the current substep.
 #[derive(Default)]
 struct Scratch {
@@ -304,6 +322,21 @@ struct State {
     /// variation (`Spec::body_owners` elements, or none): [`BodySample::pressure`].
     pressure_by: Vec<[f64; 2]>,
 }
+/// The canonical step of a solver whose step is `dt` that holds `time`: the last whole step that has ended by it.
+/// Division can round a time immediately before a tick up to the tick's index (0.85 / 0.05 == 17, but 17 * 0.05 >
+/// 0.85), so the actual products are compared and an impulse never fires before its timestamp. Every reader of a
+/// solver's steps counts them with this.
+pub fn canonical_step(time: f64, dt: f64) -> u64 {
+    let mut step = (time / dt).floor() as u64;
+    while step > 0 && step as f64 * dt > time {
+        step -= 1;
+    }
+    while (step + 1) as f64 * dt <= time {
+        step += 1;
+    }
+    step
+}
+
 struct Work {
     remaining: u64,
     substeps: u64,
@@ -329,6 +362,14 @@ pub struct Ocean {
     every: u64,
     frame: Frame,
     ends: Option<Ends>,
+    near: Option<Near>,
+    /// The states of the last few canonical steps of the last forward seek, by step, for the frames that are asked for
+    /// among them: a reader that looks a few steps past a frame makes the next frame start at one of these and not
+    /// again. Bounded by [`Ocean::recent_capacity`].
+    recent: Vec<(u64, State)>,
+    recent_capacity: usize,
+    /// What bodies gave the water in the last whole canonical step of the last seek.
+    exchanged: [f64; 2],
     last_substeps: u64,
 }
 impl Ocean {
@@ -384,9 +425,11 @@ impl Ocean {
         let bytes = n
             .checked_mul(
                 256 + if spec.order == Order::Second { ORDER2_EXTRA_BYTES } else { 0 }
-                    + if spec.moving_bed { 3 * std::mem::size_of::<f64>() } else { 0 }
-                    + if spec.bodies { 72 } else { 0 }
-                    + if spec.body_owners > 0 { 12 } else { 0 }
+                    // three bed vectors (the two ends of a step and the interpolated one), and the state and
+                    // the bed vectors of the two ends that are kept of the step passed on the way ahead
+                    + if spec.moving_bed { 3 * std::mem::size_of::<f64>() + 24 + 16 } else { 0 }
+                    + if spec.bodies { 72 + 48 } else { 0 }
+                    + if spec.body_owners > 0 { 12 + 8 } else { 0 }
                     + if spec.body_push { 32 } else { 0 },
             )
             .and_then(|v| bed_y.capacity().saturating_sub(n).checked_mul(8).and_then(|b| v.checked_add(b)))
@@ -428,6 +471,7 @@ impl Ocean {
         advance(&spec, Bed::Fixed(&bed_y), &impulses, &mut initial, 0.0, &mut work, &mut Scratch::default())?;
         let frame = publish(&initial, spec.dry_tolerance)?;
         let spec_dt = spec.dt;
+        let (spec_checkpoint_bytes, spec_owners) = (spec.checkpoint_bytes, spec.body_owners);
         let checkpoint_capacity =
             (spec.checkpoint_bytes / (n * std::mem::size_of::<Q>() + 128 + 32 * spec.body_owners)).min(4096);
         Ok(Self {
@@ -442,6 +486,11 @@ impl Ocean {
             every: (1.0 / spec_dt).ceil().clamp(1.0, 1e12) as u64,
             frame,
             ends: None,
+            near: None,
+            recent: Vec::new(),
+            recent_capacity: (spec_checkpoint_bytes / 4 / (n * std::mem::size_of::<Q>() + 128 + 32 * spec_owners))
+                .min(16),
+            exchanged: [0.0; 2],
             last_substeps: 0,
         })
     }
@@ -469,6 +518,22 @@ impl Ocean {
 
     /// Keeps `state` as the checkpoint of `step` when the cadence asks for it,
     /// thinning the older ones when the budget is full.
+    /// Keeps `state`, the state of `step`, among the recent ones when it is within the last few steps of a seek to
+    /// `target`: a long seek would copy every state it passes.
+    fn keep_recent(&mut self, step: u64, target: u64, state: &State) {
+        if self.recent_capacity == 0 || target - step >= self.recent_capacity as u64 {
+            return;
+        }
+        let at = self.recent.partition_point(|(k, _)| *k < step);
+        if self.recent.get(at).is_some_and(|(k, _)| *k == step) {
+            return;
+        }
+        self.recent.insert(at, (step, state.clone()));
+        if self.recent.len() > self.recent_capacity {
+            self.recent.remove(0);
+        }
+    }
+
     fn remember(&mut self, step: u64, state: &State) {
         if self.checkpoint_capacity == 0 || step % self.every != 0 || self.checkpoints.iter().any(|(k, _)| *k == step) {
             return;
@@ -545,6 +610,13 @@ impl Ocean {
         {
             return Err(Error::Invalid("driver lift owner, columns or height"));
         }
+        // a column once for a body: the amounts of a column are added to know whose it is
+        let mut raised: Vec<(u32, u32)> =
+            out.lifts.iter().flat_map(|l| l.columns.iter().map(|(c, _)| (l.owner, *c))).collect();
+        raised.sort_unstable();
+        if raised.windows(2).any(|w| w[0] == w[1]) {
+            return Err(Error::Invalid("driver lift raises a column twice for one body"));
+        }
         let columns: usize = out.pushes.iter().map(|p| p.columns.len()).sum();
         if columns > 2 * n {
             return Err(Error::Limit("columns of the pushes of the bodies"));
@@ -582,23 +654,41 @@ impl Ocean {
         if !quotient.is_finite() || quotient > (1_u64 << 48) as f64 {
             return Err(Error::Limit("timeline precision"));
         }
-        let mut target = quotient.floor() as u64;
-        // Division can round a time immediately before a tick up to the tick
-        // index (e.g. 0.85/0.05 == 17, but 17*0.05 > 0.85). Compare the actual
-        // canonical times so an impulse never fires before its timestamp.
-        while target > 0 && target as f64 * self.spec.dt > time {
-            target -= 1;
+        let target = canonical_step(time, self.spec.dt);
+        // Start from the latest of the states at or before the target: the one the solver is at, the one it passed
+        // on its way ahead, a checkpoint, or the initial one. They are all the same states, so the frame does not
+        // depend on which one is used.
+        let (mut k, mut state, mut ends_at) = if self.step <= target {
+            // the ends are moved out of the cache unless they are kept as the nearer state's: a copy of the two
+            // samples held beside the cache would double what a seek charges
+            let keep = self.near.is_none() && self.step < target;
+            let ends = if keep {
+                self.ends.as_ref().map(|e| (e.step, e.now.clone(), e.next.clone()))
+            } else {
+                self.ends.take().map(|e| (e.step, e.now, e.next))
+            };
+            (self.step, self.canonical.clone(), ends)
+        } else {
+            (0, self.initial.clone(), None)
+        };
+        if self.near.as_ref().is_some_and(|n| n.step <= target && n.step > k) {
+            // the nearer state is replaced when the seek is done, so it is moved out
+            let near = self.near.take().expect("checked");
+            k = near.step;
+            state = near.state;
+            ends_at = near.ends.map(|e| (e.step, e.now, e.next));
         }
-        while (target + 1) as f64 * self.spec.dt <= time {
-            target += 1;
+        if let Some((step, recent)) = self.recent.iter().rev().find(|(step, _)| *step <= target && *step > k) {
+            k = *step;
+            state = recent.clone();
+            ends_at = None;
         }
-        let (mut k, mut state) =
-            if self.step <= target { (self.step, self.canonical.clone()) } else { (0, self.initial.clone()) };
         if let Some((step, checkpoint)) =
             self.checkpoints.iter().filter(|(step, _)| *step <= target && *step > k).max_by_key(|(step, _)| step)
         {
             k = *step;
             state = checkpoint.clone();
+            ends_at = None;
         }
         let mut work = Work { remaining: self.spec.max_work, substeps: 0 };
         // Reject impossible replays before entering the loop.
@@ -609,8 +699,8 @@ impl Ocean {
         let mut scratch = Scratch::default();
         let mut ends = match driver.as_deref_mut() {
             None => None,
-            Some(driver) => Some(match &self.ends {
-                Some(e) if e.step == k => (e.now.clone(), e.next.clone()),
+            Some(driver) => Some(match ends_at {
+                Some((step, now, next)) if step == k => (now, next),
                 _ => {
                     let (mut now, mut next) = (Forcing::default(), Forcing::default());
                     self.sample(driver, k as f64 * dt, &mut now, None, Vec::new())?;
@@ -649,6 +739,7 @@ impl Ocean {
                 )?,
             }
             self.remember(k, &state);
+            self.keep_recent(k, target, &state);
         }
         let mut sampled = state.clone();
         let mut frame_bed = Vec::new();
@@ -672,10 +763,24 @@ impl Ocean {
         }
         let mut frame = publish(&sampled, self.spec.dry_tolerance)?;
         frame.bed = frame_bed;
-        self.canonical = state;
-        self.step = target;
+        let ends = ends.map(|(now, next)| Ends { step: target, now, next });
+        self.exchanged = state.exchange;
+        if target >= self.step {
+            // forward: what the solver was at stays as the nearer state when none is kept, for the frames that
+            // will be asked for behind where it goes now
+            if self.near.is_none() && self.step < target {
+                let ends = self.ends.take();
+                self.near = Some(Near { step: self.step, state: std::mem::replace(&mut self.canonical, state), ends });
+            } else {
+                self.canonical = state;
+            }
+            self.step = target;
+            self.ends = ends;
+        } else {
+            // behind the solver: it keeps where it is, and this is the nearer state for the next frame
+            self.near = Some(Near { step: target, state, ends });
+        }
         self.frame = frame;
-        self.ends = ends.map(|(now, next)| Ends { step: target, now, next });
         self.last_substeps = work.substeps;
         Ok(&self.frame)
     }
@@ -688,7 +793,7 @@ impl Ocean {
     /// during the last whole canonical step this solver reached. It is the input
     /// for a reaction on the bodies; the bodies themselves are not touched.
     pub fn exchanged_impulse(&self) -> [f64; 2] {
-        self.canonical.exchange
+        self.exchanged
     }
     pub fn frame(&self) -> &Frame {
         &self.frame

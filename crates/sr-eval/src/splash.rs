@@ -52,6 +52,8 @@ pub(crate) struct Ocean {
     /// Its canonical step, and the composition time of its local time zero.
     pub(crate) dt: f64,
     pub(crate) start: f64,
+    /// Its density, kilograms per cubic metre: what the momentum the particles bring is divided by.
+    pub(crate) density: f64,
     /// World to the ocean's own axes.
     pub(crate) to_local: DMat4,
 }
@@ -84,13 +86,7 @@ impl Emitter {
     pub(crate) fn needed_until(&self, time: f64, own_start: f64) -> f64 {
         let (dt, local) = (self.ocean.dt, (time - self.ocean.start).max(0.0));
         // the step the solver counts the time in
-        let mut step = (local / dt).floor() as u64;
-        while step > 0 && step as f64 * dt > local {
-            step -= 1;
-        }
-        while (step + 1) as f64 * dt <= local {
-            step += 1;
-        }
+        let step = sr_sim::ocean::canonical_step(local, dt);
         self.needed_for(step, own_start)
     }
 
@@ -104,6 +100,9 @@ impl Emitter {
 #[derive(Default)]
 struct Inner {
     entries: Option<ExchangeLog<Entry>>,
+    /// What settled on the ground, by emitter and fixed step: the particles' debris, which is the ground's and not the
+    /// ocean's (`crater@repose`).
+    settled: Option<ExchangeLog<crate::debris::Settled>>,
     emitters: Vec<Emitter>,
 }
 
@@ -130,10 +129,26 @@ impl Log {
         inner.entries.get_or_insert_with(|| ExchangeLog::new(LOG_BYTES)).put(channel, step, entries)
     }
 
-    /// Whether an emitter that falls into `ocean` has made itself known: until one has, a read of the ocean's steps
-    /// would be empty because nobody had said anything, not because nothing fell.
-    pub(crate) fn knows(&self, ocean: &str) -> bool {
-        self.inner().emitters.iter().any(|e| &*e.ocean.id == ocean)
+    /// Record what settled on the ground in fixed step `step` of the emitter. A replay must reproduce it exactly.
+    pub(crate) fn put_settled(
+        &self,
+        channel: u32,
+        step: u64,
+        settled: &[crate::debris::Settled],
+    ) -> Result<Put, String> {
+        let mut inner = self.inner();
+        inner.settled.get_or_insert_with(|| ExchangeLog::new(LOG_BYTES)).put(channel, step, settled)
+    }
+
+    /// What settled in fixed step `step` of the emitter; none for a step that has not been computed.
+    pub(crate) fn settled(&self, channel: u32, step: u64) -> Option<Vec<crate::debris::Settled>> {
+        self.inner().settled.as_ref().and_then(|l| l.get(channel, step)).map(<[_]>::to_vec)
+    }
+
+    /// Whether the `listed` emitters that fall into `ocean` have all made themselves known: until they have, a read
+    /// of the ocean's steps would be empty because nobody had said anything, not because nothing fell.
+    pub(crate) fn knows(&self, ocean: &str, listed: usize) -> bool {
+        self.inner().emitters.iter().filter(|e| &*e.ocean.id == ocean).count() >= listed
     }
 
     /// What the particles give ocean `ocean` in its canonical step `step`, by cell in order of cell: the
@@ -170,11 +185,13 @@ impl Log {
 /// What the particles that fell in one fixed step of `emitter` give the ocean, by canonical step and cell: the
 /// volume is the mass over `solid_density` in scene units cubed (`pixels_per_meter` scene units a metre), the
 /// momentum is mass times the horizontal velocity in the ocean's own axes, over `water_density`, in scene
-/// units to the fourth a second. Sums run in the order of the particles' ids, so they are the same however the
-/// particles were stepped.
+/// units to the fourth a second. The particles' times are on the emitter's node clock, which starts at
+/// `own_start` on the composition clock. Sums run in the order of the particles' ids, so they are the same
+/// however the particles were stepped.
 pub(crate) fn aggregate(
     list: &[Absorbed],
     emitter: &Emitter,
+    own_start: f64,
     pixels_per_meter: f64,
     solid_density: f64,
     water_density: f64,
@@ -182,14 +199,15 @@ pub(crate) fn aggregate(
     let ocean = &emitter.ocean;
     let mut sums: std::collections::BTreeMap<(u64, u32), Entry> = Default::default();
     let units = pixels_per_meter.powi(3);
-    for a in list {
+    // what settled on the ground is not water's
+    for a in list.iter().filter(|a| !a.ground) {
         let local = ocean.to_local.transform_point3(DVec3::from(a.position));
         let velocity = ocean.to_local.transform_vector3(DVec3::from(a.velocity));
         let ix = (((local.x - ocean.origin[0]) / ocean.cell_size).floor().max(0.0) as usize).min(ocean.cells[0] - 1);
         let iz = (((local.z - ocean.origin[1]) / ocean.cell_size).floor().max(0.0) as usize).min(ocean.cells[1] - 1);
         let cell = (iz * ocean.cells[0] + ix) as u32;
         // the canonical step whose window (n dt, (n + 1) dt] holds the instant, in the ocean's local time
-        let local_time = a.time + emitter.start - ocean.start;
+        let local_time = a.time + own_start - ocean.start;
         let step = ((local_time / ocean.dt - 1e-9).ceil() - 1.0).max(0.0) as u64;
         let entry =
             sums.entry((step, cell)).or_insert(Entry { ocean_step: step, cell, volume: 0.0, momentum: [0.0; 2] });

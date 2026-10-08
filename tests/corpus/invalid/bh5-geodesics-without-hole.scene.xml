@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- expect: BH5 -->
+<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/><composition><shape id="sky" shape="rect" x="0" y="0" width="64" height="64" fill="#000000"/><camera id="eye" x="0" y="0" z="-60" geodesics="true"/></composition></scene>

@@ -4150,7 +4150,7 @@ mod draw_uniform_tests {
 
     #[test]
     fn mask_coverage_budget_counts_all_images_used_in_the_current_frame() {
-        let gpu = match Gpu::new() {
+        let gpu = match crate::gpu::test_gpu() {
             Ok(gpu) => gpu,
             Err(error) => {
                 assert!(std::env::var("SR_REQUIRE_GPU").as_deref() != Ok("1"), "{error}");
@@ -4216,7 +4216,7 @@ mod draw_uniform_tests {
 
     #[test]
     fn cached_mask_coverage_preserves_pixels_across_opacity_and_geometry_changes() {
-        let gpu = match Gpu::new() {
+        let gpu = match crate::gpu::test_gpu() {
             Ok(gpu) => gpu,
             Err(error) => {
                 assert!(std::env::var("SR_REQUIRE_GPU").as_deref() != Ok("1"), "{error}");

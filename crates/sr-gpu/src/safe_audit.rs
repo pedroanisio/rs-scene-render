@@ -85,8 +85,8 @@ impl Outcome {
 
 /// Audits the frames of `from..to` seconds that matter: every frame of a short range, else the window
 /// edges and key times of the checked nodes, the caption page edges, and a coarse grid (see
-/// [`sr_eval::safe_area::sample_times`]). Placement is evaluated without simulations, which do not move text,
-/// captions or tagged nodes.
+/// [`sr_eval::safe_area::sample_times`]). When node enforcement is enabled, placement includes physics:
+/// tagged nodes and text can be rigid bodies or inherit a simulated parent's transform.
 pub fn check(ev: &Evaluator, from: f64, to: f64) -> Outcome {
     let p = ev.program();
     let mut s = sr_eval::safe_area::sample_times(p, from, to);
@@ -131,7 +131,11 @@ fn audit_forced(ev: &Evaluator, times: &[f64]) -> (Vec<Timed>, Vec<String>) {
         }
     };
     for &t in times {
-        let g = ev.evaluate_layout(t);
+        let g = if p.safe_enforce != SafeEnforce::Off && ev.has_simulation() {
+            ev.evaluate(t)
+        } else {
+            ev.evaluate_layout(t)
+        };
         for id in sr_eval::safe_area::forced(p, &g) {
             if !forced.contains(&id) {
                 forced.push(id);

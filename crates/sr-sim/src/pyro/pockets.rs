@@ -104,7 +104,13 @@ fn an_expanding_sealed_pocket_fails_with_a_pressure_error_in_both_domains() {
                 panic!("{solver:?} {boundary:?}: expanding sealed pocket must not solve");
             };
             // The unremovable divergence of the pocket is what trips the check.
-            assert!(matches!(error, Error::Pressure(r) if r > 1e-3), "{solver:?} {boundary:?}: {error}");
+            // and it says where the residual is largest, which is in the pocket
+            let Error::Pressure { residual, worst: Some(worst) } = &error else {
+                panic!("{solver:?} {boundary:?}: {error}");
+            };
+            assert!(*residual > 1e-3, "{solver:?} {boundary:?}: {error}");
+            assert!(worst.cell.iter().all(|c| (6..10).contains(c)), "{solver:?} {boundary:?}: {error}");
+            assert!(error.to_string().contains("largest at cell ["), "{error}");
         }
     }
 }

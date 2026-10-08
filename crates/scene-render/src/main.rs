@@ -1227,9 +1227,12 @@ fn render(
     }
     // a renderer kept from an earlier render of this document (watch), while it still fits
     let inputs = changes::effective_files(file, &doc, ev.program())?;
+    let persistent = sr_gpu::shader::has_persistent(ev.program(), doc.base_dir());
     let setup = changes::setup_key(&text, &inputs);
     let mut keep = inc.keep;
-    let kept = keep.as_mut().and_then(|k| k.take()).filter(|(key, _)| *key == setup).map(|(_, r)| r);
+    // Feedback checkpoints contain pixels from the previous document, even when renderer
+    // setup is unchanged. Rebuild them on a watch run before replaying edited history.
+    let kept = keep.as_mut().and_then(|k| k.take()).filter(|(key, _)| *key == setup && !persistent).map(|(_, r)| r);
     let mut r = match kept {
         Some(r) => r,
         None => {
@@ -1357,7 +1360,7 @@ fn render(
         let prints = inc.changed_only.then(|| {
             let effective = quality.unwrap_or(doc.scene.project.quality).as_str();
             let settings = format!("{effective} {bit_depth} {:?}", opts);
-            changes::Fingerprints::new(&text, &doc, &inputs, &settings)
+            changes::Fingerprints::new(&text, &doc, &inputs, &settings, ev.has_simulation(), persistent)
         });
         let dir = output.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")).to_path_buf();
         // every render keeps them true: a frame written anew loses the fingerprint recorded for the old one

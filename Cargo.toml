@@ -46,6 +46,15 @@ anstyle = "1"
 lto = "thin"
 codegen-units = 1
 
+# The profile for test runs and verification: release code, but without the link-time optimization and
+# the single codegen unit of the shipped binary, which only slow the hundreds of test links down.
+[profile.ci]
+inherits = "release"
+lto = false
+codegen-units = 16
+# the edit-and-test loop rebuilds only what changed
+incremental = true
+
 [profile.dev]
 debug = "line-tables-only"
 incremental = false
