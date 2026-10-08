@@ -706,3 +706,60 @@ fn the_brute_force_comparisons_run_on_a_gpu_and_on_a_software_adapter_only_when_
     assert_eq!(brute_force_for(true, Some("1")), Some(REDUCED), "asked, it renders the reduced size");
     assert_eq!(brute_force_for(true, Some("full")), Some(FULL), "or the full size on request");
 }
+
+/// Diagnostic for CI (to be removed with the fix): which light and which render of the steep sea
+/// leave pixels that are not finite, and where they are.
+#[test]
+fn diagnostic_where_the_steep_sea_is_not_finite() {
+    let steep = r#"<wave wavelength="10" amplitude="1.2" direction="25" phase="0"/>"#;
+    let Some(gpu) = common::gpu() else { return };
+    let sun = r##"<light id="sun" type="directional" color="#FFFFFF" yaw="-35" pitch="-50" intensity="3" castShadow="true"/>"##;
+    let sky = r##"<light id="sky" type="dome" environment="gray.png" environmentVisible="true" intensity="1"/>"##;
+    let wavy = wavy_sea(true, steep);
+    let variants = [
+        ("steep, as the test", wavy.clone()),
+        ("steep, dome only", wavy.replace(sun, "")),
+        ("steep, sun only", wavy.replace(sky, "")),
+        ("steep, sun without shadows", wavy.replace(r#"castShadow="true""#, r#"castShadow="false""#)),
+        (
+            "steep, sun only without shadows",
+            wavy.replace(sky, "").replace(r#"castShadow="true""#, r#"castShadow="false""#),
+        ),
+        ("flat sea", wavy_sea(true, "")),
+        ("dry floor", wavy_sea(false, "")),
+    ];
+    let mut report = Vec::new();
+    for (name, xml) in &variants {
+        assert!(xml != &wavy || *name == "steep, as the test", "{name}: the variant changed nothing");
+        let doc = match sr_model::load_str(
+            xml,
+            &sr_model::LoadOptions { verify_assets: true, base_dir: Some(common::fixtures()) },
+        ) {
+            Ok(doc) => doc,
+            Err(e) => {
+                report.push(format!("{name}: does not load: {e:?}"));
+                continue;
+            }
+        };
+        let Some(shot) = common::render_times_on(gpu.clone(), &doc, &[0.3]) else {
+            report.push(format!("{name}: no render"));
+            continue;
+        };
+        let bad: Vec<(usize, usize, [f32; 4])> = shot
+            .px
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| !p.iter().all(|c| c.is_finite()))
+            .map(|(i, p)| (i % 160, i / 160, *p))
+            .collect();
+        let rows: Vec<usize> = bad.iter().map(|b| b.1).collect();
+        report.push(format!(
+            "{name}: {} pixels not finite (rows {:?}..{:?}); first {:?}",
+            bad.len(),
+            rows.iter().min(),
+            rows.iter().max(),
+            &bad[..bad.len().min(6)]
+        ));
+    }
+    panic!("diagnostic report:\n{}", report.join("\n"));
+}
