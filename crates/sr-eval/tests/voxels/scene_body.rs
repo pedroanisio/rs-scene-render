@@ -9,8 +9,20 @@ use std::path::PathBuf;
 /// A directory of its own for one test, removed with it.
 pub(crate) struct Dir(pub PathBuf);
 
+/// The names that the directories of this process were made with: the tests of a process run at once and a name is one directory, which `new` empties and
+/// `drop` removes, so two tests that take the same name take each other's files away.
+static NAMES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
 impl Dir {
     pub(crate) fn new(name: &str) -> Dir {
+        {
+            let mut names = NAMES.lock().unwrap_or_else(|e| e.into_inner());
+            assert!(
+                !names.iter().any(|n| n == name),
+                "the directory name {name:?} is taken twice in this process: the tests that run at once would share it"
+            );
+            names.push(name.to_string());
+        }
         let path = std::env::temp_dir().join(format!("voxel-scene-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
