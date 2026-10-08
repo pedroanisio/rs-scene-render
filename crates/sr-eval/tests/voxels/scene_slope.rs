@@ -320,7 +320,7 @@ fn ground_that_slopes_along_x_and_z_at_once_is_cut_about_its_normal_which_is_out
     assert!(lattice > 15.0, "the case is out of both planes: {lattice} degrees from the lattice");
     assert!(angle < 3.0, "the axis is {angle} degrees off the ground's normal: {:?} against {want:?}", spec.outward);
     // the law is the flat ground's and the cut is as the slopes' (the plane's volume, the reach about the axis, and the cells that the pure function keeps)
-    let flat = hit(0.0).0.crater_impact.as_ref().expect("the impact").law().volume;
+    let flat = hit_oblique("tilted-flat", 0.0, 0.0, false).0.crater_impact.as_ref().expect("the impact").law().volume;
     let law = grown.law().volume;
     assert!((law - flat).abs() < 0.005 * flat, "the law's volume is {law} m3 and the flat ground's {flat}");
     let cut = crater_cut_of(grown, &ground, &settings(), seed_of("ground")).unwrap();
