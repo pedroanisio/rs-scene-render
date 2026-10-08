@@ -4387,6 +4387,10 @@
     <xs:attribute name="lightGridCell" default="1"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="64"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="lightGridDomeDirections" default="64"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:minInclusive value="8"/><xs:maxInclusive value="512"/></xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="lightGridMemoryMiB" default="128"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
+    <xs:attribute name="scatterBounces" default="1">
+      <xs:annotation><xs:documentation>Version 1.3. The most collisions a path may have in the medium before the light reaches the camera, counting the one that is lit directly: 1 is single scattering (what the medium does without the attribute), 0 is a medium that does not scatter (absorption and emission only), and more add the light that has been scattered more than once, estimated by the path tracer by a random walk.</xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:nonNegativeInteger"><xs:maxInclusive value="32"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
   </xs:complexType>
   <xs:complexType name="particles3DType">
     <xs:choice minOccurs="0" maxOccurs="unbounded"><xs:group ref="animationElements"/><xs:element name="transformConstraint" type="transformConstraintType"/><xs:element name="burst" type="burst3DType"/></xs:choice>

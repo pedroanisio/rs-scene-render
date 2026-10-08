@@ -925,6 +925,12 @@
     "vol-lighting-enum.scene.xml": [
       "S06"
     ],
+    "vol-scatter-bounces-fraction.scene.xml": [
+      "S06"
+    ],
+    "vol-scatter-bounces-range.scene.xml": [
+      "S06"
+    ],
     "vol1.scene.xml": [
       "VOL1"
     ],
@@ -1091,6 +1097,8 @@
     "thermal-volume.scene.xml": [],
     "version-1.0.scene.xml": [],
     "volume-light-grid.scene.xml": [],
+    "volume-scatter-bounces-zero.scene.xml": [],
+    "volume-scatter-bounces.scene.xml": [],
     "volume-sequence.scene.xml": [],
     "volume.scene.xml": [],
     "voxel-body.scene.xml": [],
@@ -1137,6 +1145,9 @@
     ],
     "w08-foam-unlit.scene.xml": [
       "W08"
+    ],
+    "w10-scatter-black-albedo.scene.xml": [
+      "W10"
     ]
   }
 }

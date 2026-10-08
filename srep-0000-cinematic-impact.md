@@ -338,6 +338,7 @@ Add one optional owned `<medium>` child to volume and pyro objects:
 | `lightGridCell` | integer 1–64; 1 | Grid node spacing, in voxels of the finest density grid |
 | `lightGridDomeDirections` | integer 8–512; 64 | Fixed environment directions of an anisotropic medium's grid |
 | `lightGridMemoryMiB` | integer 1–4096; 128 | Largest memory the grids of the pass may take |
+| `scatterBounces` | integer 0–32; 1 | The most collisions a path may have in the medium, counting the one that is lit directly: 1 is single scattering, 0 does not scatter, more add the light scattered more than once (the path tracer's random walk). W10 warns of more than 1 with an albedo of black |
 
 Extinction integrates over world distance, including nonuniform object scale.
 Overlapping media contribute to total extinction and source terms; reversing

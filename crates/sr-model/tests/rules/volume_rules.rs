@@ -159,3 +159,35 @@ fn motion_interpolation_requires_all_velocity_components_and_a_sequence() {
     let mesh = r#"<meshSequence id="mesh" src="m-%d.obj" first="0" last="1" interpolation="advect"/>"#;
     assert!(!codes("1.3", mesh, "").is_empty());
 }
+
+#[test]
+fn scatter_bounces_is_a_whole_number_from_0_to_32_and_one_is_the_default() {
+    let medium = |attrs: &str| OBJECT.replace("<medium ", &format!("<medium {attrs} "));
+    for ok in ["0", "1", "2", "8", "32"] {
+        let got = codes("1.3", ASSET, &medium(&format!(r#"scatterBounces="{ok}""#)));
+        assert!(got.is_empty(), "{ok}: {got:?}");
+    }
+    for bad in ["33", "-1", "1.5", "many", "", "1e1", "100"] {
+        assert!(!codes("1.3", ASSET, &medium(&format!(r#"scatterBounces="{bad}""#))).is_empty(), "{bad:?}");
+    }
+}
+
+#[test]
+fn more_scattering_in_a_medium_that_does_not_scatter_has_a_warning() {
+    let medium = |attrs: &str| OBJECT.replace("<medium ", &format!("<medium {attrs} "));
+    // an albedo of black scatters nothing: the bounces have nothing to do
+    for black in ["#000000", "#000000FF"] {
+        let got = codes("1.3", ASSET, &medium(&format!(r##"scatterBounces="4" albedo="{black}""##)));
+        assert_eq!(got, ["W10"], "{black}: {got:?}");
+    }
+    // one is what there is without the attribute, and zero is a medium that does not scatter on purpose
+    for quiet in [
+        r##"scatterBounces="1" albedo="#000000""##,
+        r##"scatterBounces="0" albedo="#000000""##,
+        r##"scatterBounces="4" albedo="#808080""##,
+        r#"scatterBounces="4""#,
+    ] {
+        let got = codes("1.3", ASSET, &medium(quiet));
+        assert!(got.is_empty(), "{quiet}: {got:?}");
+    }
+}
