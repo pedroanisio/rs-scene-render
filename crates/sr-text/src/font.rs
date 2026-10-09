@@ -12,6 +12,20 @@ use std::sync::{Arc, Mutex};
 use crate::style::Style;
 use rustybuzz::ttf_parser;
 
+/// The ascent and descent (positive below the baseline) a line of text is seated with, in font units (SREP 20): the
+/// `hhea` ascender and descender of the face, or `OS/2` `usWinAscent` and `usWinDescent` when `hhea`'s are both 0.
+/// Never the typographic metrics, even when `OS/2` sets USE_TYPO_METRICS: switching would move every line of text.
+pub fn line_metrics(f: &ttf_parser::Face) -> (f64, f64) {
+    let h = f.tables().hhea;
+    if h.ascender != 0 || h.descender != 0 {
+        return (h.ascender as f64, -(h.descender as f64));
+    }
+    match f.tables().os2 {
+        Some(o) => (o.windows_ascender() as f64, -(o.windows_descender() as f64)),
+        None => (0.0, 0.0),
+    }
+}
+
 /// A loaded face.
 #[derive(Debug, Clone)]
 pub struct FaceData {

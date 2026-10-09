@@ -539,7 +539,8 @@ pub fn layout_at(lib: &mut FontLib, para: &Para, k: f64) -> (Layout, bool) {
     let metrics = |face: usize, size: f64| -> (f64, f64) {
         lib.with_face(face, &[], |f| {
             let sc = size / f.units_per_em() as f64;
-            (f.ascender() as f64 * sc, -(f.descender() as f64) * sc)
+            let (a, d) = crate::font::line_metrics(f);
+            (a * sc, d * sc)
         })
         .unwrap_or((size * 0.8, size * 0.2))
     };
