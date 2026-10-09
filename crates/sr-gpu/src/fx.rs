@@ -200,6 +200,61 @@ pub struct Pass {
     pub label: String,
 }
 
+/// Moved accumulations return zero outside the source rectangle. Scissoring
+/// that region keeps the original viewport, sample coordinates and half-float
+/// additions, unlike resizing the accumulator. Clears still cover the target.
+fn accumulation_scissor(p: &Pass) -> Option<[u32; 4]> {
+    if p.entry != Entry::Combine || !p.additive || !matches!(p.params.i[0], 9 | 10) {
+        return None;
+    }
+    let Aux::Tex(source) = &p.aux else { return None };
+    let [sw, sh] = source.size.map(f64::from);
+    let [fw, fh] = p.out.size.map(f64::from);
+    let count = if p.params.i[0] == 10 { p.params.i[1].clamp(1, 16) } else { 1 };
+    let mut bounds = [f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
+    for k in 0..count as usize {
+        let (linear, offset, weight) = if p.params.i[0] == 10 {
+            (p.params.x[2 * k], p.params.x[2 * k + 1], p.params.x[2 * k + 1][2])
+        } else {
+            (p.params.v[1], p.params.v[2], p.params.v[0][0])
+        };
+        let [a, b, c, d] = linear.map(f64::from);
+        let (tx, ty) = (offset[0] as f64, offset[1] as f64);
+        if !weight.is_finite() || ![a, b, c, d, tx, ty].iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        let det = a * d - b * c;
+        let scale = a.abs().max(b.abs()).max(c.abs()).max(d.abs());
+        // Ill-conditioned inverses are not useful bounds; retain the full pass.
+        if det.abs() <= scale * scale * 1e-6 {
+            return None;
+        }
+        // Bound the shader's f32 multiply/add/divide rounding using the uploaded
+        // coefficients, then invert an expanded source rectangle in f64. The
+        // extra source texel and output pixel also cover edge rounding.
+        let epsilon = 8.0 * f32::EPSILON as f64;
+        let ex = (a.abs() * fw + c.abs() * fh + tx.abs() + sw) * epsilon + 1.0;
+        let ey = (b.abs() * fw + d.abs() * fh + ty.abs() + sh) * epsilon + 1.0;
+        for [x, y] in [[-ex, -ey], [sw + ex, -ey], [sw + ex, sh + ey], [-ex, sh + ey]] {
+            let x = x - tx;
+            let y = y - ty;
+            let q = [(d * x - c * y) / det, (a * y - b * x) / det];
+            if !q.iter().all(|v| v.is_finite()) {
+                return None;
+            }
+            bounds[0] = bounds[0].min(q[0]);
+            bounds[1] = bounds[1].min(q[1]);
+            bounds[2] = bounds[2].max(q[0]);
+            bounds[3] = bounds[3].max(q[1]);
+        }
+    }
+    let x = (bounds[0].floor() - 1.0).clamp(0.0, fw) as u32;
+    let y = (bounds[1].floor() - 1.0).clamp(0.0, fh) as u32;
+    let right = (bounds[2].ceil() + 1.0).clamp(0.0, fw) as u32;
+    let bottom = (bounds[3].ceil() + 1.0).clamp(0.0, fh) as u32;
+    Some([x, y, right.saturating_sub(x), bottom.saturating_sub(y)])
+}
+
 /// GPU time of one effect pass.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PassTime {
@@ -214,7 +269,7 @@ pub struct PassTime {
 pub struct GpuTimes {
     /// The whole frame's command buffer, when the adapter can time inside an encoder.
     pub frame_ms: Option<f64>,
-    /// Each effect pass (custom GLSL passes are not timed).
+    /// Timed effect and 3D passes (custom GLSL passes are not timed).
     pub passes: Vec<PassTime>,
 }
 
@@ -558,6 +613,10 @@ impl FxEngine {
     /// Records passes in order. The parameters of every pass go into one uniform buffer (a
     /// dynamic offset selects the pass), and passes reading the same textures share a bind group.
     pub fn record(&mut self, enc: &mut wgpu::CommandEncoder, passes: &[Pass]) -> usize {
+        self.record_scissored(enc, passes, true)
+    }
+
+    fn record_scissored(&mut self, enc: &mut wgpu::CommandEncoder, passes: &[Pass], scissor: bool) -> usize {
         use wgpu::util::DeviceExt;
         let mut n = 0;
         let stride = {
@@ -659,9 +718,17 @@ impl FxEngine {
             });
             rp.set_pipeline(&pipe);
             rp.set_bind_group(0, &bg, &[offset]);
+            let bounds = scissor.then(|| accumulation_scissor(p)).flatten();
             let instances =
                 if p.entry == Entry::Combine && p.params.i[0] == 10 { p.params.i[1].clamp(1, 16) } else { 1 };
-            rp.draw(0..3, 0..instances);
+            match bounds {
+                Some([_, _, 0, _] | [_, _, _, 0]) => {} // Keep the clear, but no sample reaches the target.
+                Some([x, y, w, h]) => {
+                    rp.set_scissor_rect(x, y, w, h);
+                    rp.draw(0..3, 0..instances);
+                }
+                None => rp.draw(0..3, 0..instances),
+            }
             n += 1;
         }
         n
@@ -1455,6 +1522,11 @@ impl Builder<'_> {
                     "halation" => lin(colour("color", [1.0, 0.3, 0.12, 1.0])),
                     _ => lin(colour("color", [1.0; 4])),
                 };
+                if intensity == 0.0 {
+                    // Retain the combine pass's sampling and working-space conversion.
+                    // Its auxiliary contribution is zero, so no highlights or blur are needed.
+                    return Ok(self.combine(1, input, input, intensity, [1.0; 3], 0.0));
+                }
                 // glow keeps the part of each pixel above `threshold` of its working-space luminance
                 v[0] = [threshold as f32, if kind == "glow" { 0.0 } else { 0.5 }, 0.0, 0.0];
                 v[1] = [tint[0] as f32, tint[1] as f32, tint[2] as f32, 1.0];
@@ -2909,7 +2981,7 @@ mod tests {
         let layout = crate::resources::source_layout(d);
         let size = [7, 5];
         let input = Arc::new(crate::resources::create(d, &layout, size, 1, "effect oracle input"));
-        let output = Arc::new(crate::resources::create(d, &layout, size, 1, "effect oracle output"));
+        let output = Arc::new(crate::resources::create(d, &layout, [96, 64], 1, "effect oracle output"));
         let bytes: Vec<u8> = (0..35)
             .flat_map(|i| {
                 let alpha = (i % 5) as f32 / 4.0;
@@ -2933,7 +3005,20 @@ mod tests {
         let reader = crate::Renderer::new(gpu.clone(), evaluator.program());
         let mut engine = FxEngine::new(gpu.device.clone(), gpu.queue.clone());
         let mut pool = Pool::default();
-        for count in [2usize, 16, 19] {
+        for (count, linear, origin) in [2usize, 16, 19].into_iter().flat_map(|count| {
+            [
+                [1.0, 0.0, 0.0, 1.0],
+                [0.8, 0.6, -0.6, 0.8],
+                [-1.0, 0.0, 0.0, 1.0],
+                [1.0, 0.2, 0.5, 1.0],
+                [1.0, 1.0, 1.0, 1.0],
+                [1e-9, 0.0, 0.0, 1.0],
+            ]
+            .into_iter()
+            .flat_map(move |linear| {
+                [[40.0, 25.0], [-2.25, -1.25], [200.0, 150.0]].into_iter().map(move |origin| (count, linear, origin))
+            })
+        }) {
             let mut builder = Builder {
                 eng: &mut engine,
                 pool: &mut pool,
@@ -2948,7 +3033,9 @@ mod tests {
             let mut reference = Vec::new();
             for k in 0..count {
                 let shift = (k as f64 - count as f64 / 2.0) / 8.0;
-                let m = [1.0, 0.07, -0.13, 0.93, shift, -shift];
+                let [a, b, c, d] = linear;
+                // Place the source inside, across the edge, or outside a much larger accumulator.
+                let m = [a, b, c, d, -origin[0] * a - origin[1] * c + shift, -origin[0] * b - origin[1] * d - shift];
                 let weight = 1.0 / count as f64;
                 builder.accumulate_moved(&output, &input, weight, k == 0, m);
                 let mut v = [[0.0; 4]; 8];
@@ -2970,15 +3057,26 @@ mod tests {
                 });
             }
             let fused = builder.passes;
-            let render = |engine: &mut FxEngine, passes: &[Pass]| {
+            let render = |engine: &mut FxEngine, passes: &[Pass], scissor: bool| {
                 let mut encoder = d.create_command_encoder(&Default::default());
-                engine.record(&mut encoder, passes);
+                engine.record_scissored(&mut encoder, passes, scissor);
                 gpu.queue.submit([encoder.finish()]);
                 reader.read(&output)
             };
-            let expected = render(&mut engine, &reference);
-            let actual = render(&mut engine, &fused);
-            assert_eq!(actual, expected, "{count} samples must retain every intermediate rounding");
+            let expected = render(&mut engine, &reference, false);
+            let actual = render(&mut engine, &fused, true);
+            assert!(
+                actual == expected,
+                "{count} samples, {linear:?}, {origin:?}: scissoring must retain every pixel and addition"
+            );
+            for pass in &fused {
+                if (linear[0] * linear[3] - linear[1] * linear[2]).abs() < 1e-6 {
+                    assert!(accumulation_scissor(pass).is_none(), "ill-conditioned transforms keep the full pass");
+                    continue;
+                }
+                let [_, _, w, h] = accumulation_scissor(pass).expect("bounded moved image");
+                assert!(w * h < 96 * 64 / 4, "shade only the region a sample can reach: {w}x{h}");
+            }
             assert_eq!(fused.len(), 1 + count.saturating_sub(16), "consecutive samples should share a pass");
         }
     }

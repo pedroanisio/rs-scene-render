@@ -30,8 +30,8 @@ libm.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 regex.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 sr-sim = { path = "../sr-sim" }
 naga = { version = "30", features = ["wgsl-in"] }
-sha2.workspace = true

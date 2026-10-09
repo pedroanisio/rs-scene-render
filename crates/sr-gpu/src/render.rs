@@ -258,6 +258,42 @@ struct VBatch {
     first: String,
 }
 
+/// Completed 3D samples retained only while a contrast probe renders its counterfactuals.
+#[derive(Default)]
+struct ContrastThreeCache {
+    entries: std::collections::VecDeque<([u8; 32], Arc<Tex>)>,
+    bytes: u64,
+}
+
+impl ContrastThreeCache {
+    const BUDGET: u64 = 128 << 20;
+
+    fn get(&mut self, key: &[u8; 32]) -> Option<Arc<Tex>> {
+        let index = self.entries.iter().position(|(k, _)| k == key)?;
+        let entry = self.entries.remove(index)?;
+        let texture = entry.1.clone();
+        self.entries.push_back(entry);
+        Some(texture)
+    }
+
+    /// Retain the sample and return evictions to the caller's texture pool.
+    fn insert(&mut self, key: [u8; 32], texture: Arc<Tex>) -> Vec<Arc<Tex>> {
+        let bytes = texture.size[0] as u64 * texture.size[1] as u64 * 8;
+        let mut evicted = Vec::new();
+        if bytes > Self::BUDGET {
+            return evicted;
+        }
+        while self.bytes + bytes > Self::BUDGET {
+            let Some((_, old)) = self.entries.pop_front() else { break };
+            self.bytes -= old.size[0] as u64 * old.size[1] as u64 * 8;
+            evicted.push(old);
+        }
+        self.bytes += bytes;
+        self.entries.push_back((key, texture));
+        evicted
+    }
+}
+
 struct Prefix {
     hashes: Vec<u64>,
     tex: Arc<Tex>,
@@ -347,7 +383,11 @@ pub struct Renderer {
     frame_three: Option<([f64; 3], [f64; 2], glam::Mat4)>,
     /// Reuse effect results across frames (off with `SR_FX_NO_CACHE`, for measuring effect cost).
     fx_cache: bool,
+    /// Bounded accumulations of plain shapes whose complete shutter samples are unchanged.
+    motion_cache: HashMap<Arc<str>, render_fx::MotionBlurCache>,
+    motion_cache_budget: u64,
     three: Option<Box<crate::three::ThreeEngine>>,
+    contrast_three_cache: Option<ContrastThreeCache>,
     three_assets: HashMap<String, Arc<Result<sr_3d::Asset, String>>>,
     volume_assets: HashMap<(std::path::PathBuf, String), CachedVolume>,
     volume_cache_bytes: usize,
@@ -369,6 +409,8 @@ pub struct Renderer {
     particles: Option<Box<crate::particles::ParticleEngine>>,
     /// Measure the contrast of burned-in text (`accessibility@contrastCheck`).
     pub contrast_probe: bool,
+    /// Inline probes split vector batches, so deferred comparisons may need a 2D replay.
+    contrast_batch_split: bool,
     grid: Option<(wgpu::RenderPipeline, wgpu::BindGroupLayout)>,
     /// Blurred glyph groups of the text layer being drawn (radius in node pixels, node-local scene).
     pending_blur: Vec<(f64, Scene)>,
@@ -939,7 +981,10 @@ impl Renderer {
             frame_rect: None,
             frame_three: None,
             fx_cache: std::env::var_os("SR_FX_NO_CACHE").is_none(),
+            motion_cache: HashMap::new(),
+            motion_cache_budget: render_fx::MOTION_BLUR_CACHE_BUDGET,
             three: None,
+            contrast_three_cache: None,
             three_assets: HashMap::new(),
             volume_assets: HashMap::new(),
             volume_cache_bytes: 0,
@@ -955,6 +1000,7 @@ impl Renderer {
             sphere: None,
             particles: None,
             contrast_probe: false,
+            contrast_batch_split: false,
             grid: None,
             pending_blur: Vec::new(),
             video: crate::video::VideoEngine::new(gpu_device, gpu_queue),
@@ -995,6 +1041,9 @@ impl Renderer {
         let mut times = t.read(&self.gpu.device, period);
         for pt in self.three.iter().flat_map(|e| &e.pt_timers) {
             times.extend(pt.read(&self.gpu.device, period));
+        }
+        for raster in self.three.iter().flat_map(|e| &e.raster_timers) {
+            times.extend(raster.read(&self.gpu.device, period));
         }
         Some(times)
     }
@@ -2859,6 +2908,7 @@ impl Renderer {
         }
         let at_ink = cmds.len();
         let probe = self.contrast_probe.then(|| {
+            self.contrast_batch_split = true;
             self.flush_vec(plan, cmds);
             cmds.len()
         });
@@ -3203,6 +3253,7 @@ impl Renderer {
         p: &Program,
         provider: Option<&mut dyn FnMut(f64) -> FrameGraph>,
     ) -> Frame {
+        self.contrast_batch_split = false;
         self.tier = Tier::of(self.quality.unwrap_or(p.scene.project.quality));
         let dimensions = if self.view_override.is_none() {
             p.scene.scene360.as_ref().map(|s| [s.width as f64, s.height as f64])
@@ -3386,6 +3437,14 @@ impl Renderer {
         self.last_used.retain(|_, at| now - *at < CACHE_KEEP);
         let live = &self.last_used;
         let mut evicted = Vec::new();
+        self.motion_cache.retain(|_, cached| {
+            if now - cached.used < CACHE_KEEP {
+                true
+            } else {
+                evicted.push(cached.texture.clone());
+                false
+            }
+        });
         self.subtree.retain(|k, (_, t)| {
             let keep = live.contains_key(k);
             if !keep {
@@ -3694,6 +3753,7 @@ impl Renderer {
         if let Some(eng) = self.three.as_mut() {
             eng.time_gpu = self.time_gpu && self.gpu.timestamps;
             eng.pt_timers.clear();
+            eng.raster_timers.clear();
         }
         if self.time_gpu && self.gpu.timestamps {
             let passes: usize = plan
@@ -3830,8 +3890,22 @@ impl Renderer {
                     plan.stats.fx_passes += self.fx.record(&mut enc, &pre.passes);
                     if let (Some(three), Some(eng)) = (&pre.three, self.three.as_mut()) {
                         eng.stats = Default::default();
-                        if let Err(error) = eng.render(&mut enc, &three.0, Some(&pre.snapshot.view), &three.1.view) {
-                            plan.stats.errors.push(error);
+                        let key = self.contrast_three_cache.as_ref().and_then(|_| three.0.contrast_cache_key());
+                        let cached = key.as_ref().and_then(|k| self.contrast_three_cache.as_mut()?.get(k));
+                        if let Some(cached) = cached {
+                            Self::copy(&mut enc, &cached, &three.1, [0, 0, three.1.size[0], three.1.size[1]]);
+                            plan.stats.cache_hits += 1;
+                        } else {
+                            match eng.render(&mut enc, &three.0, Some(&pre.snapshot.view), &three.1.view) {
+                                Err(error) => plan.stats.errors.push(error),
+                                Ok(()) => {
+                                    if let (Some(key), Some(cache)) = (key, self.contrast_three_cache.as_mut()) {
+                                        for old in cache.insert(key, three.1.clone()) {
+                                            self.pool.put(old);
+                                        }
+                                    }
+                                }
+                            }
                         }
                         plan.stats.pt_assemble_seconds += eng.stats.pt_assemble_seconds;
                         plan.stats.pt_bvh_seconds += eng.stats.pt_bvh_seconds;

@@ -300,6 +300,106 @@ pub struct Scene3 {
     pub geodesic: Option<crate::geodesic::GeodesicScene>,
 }
 
+impl Scene3 {
+    /// Identity of a self-contained raster pass for contrast counterfactuals.
+    /// Hash resolved geometry and shader inputs, not frame time or node ids:
+    /// shutter samples and simulated geometry can differ at the same time.
+    /// External textures, media and backdrop-dependent transmission stay uncached.
+    pub(crate) fn contrast_cache_key(&self) -> Option<[u8; 32]> {
+        use sha2::{Digest, Sha256};
+        let Self {
+            cam,
+            clip_fix,
+            size,
+            exposure,
+            dof,
+            lens_k1,
+            draws,
+            lights,
+            env,
+            splats,
+            volumes,
+            encode_srgb,
+            ao,
+            ssr,
+            path,
+            geodesic,
+        } = self;
+        if env.is_some() || !splats.is_empty() || !volumes.is_empty() || path.is_some() || geodesic.is_some() {
+            return None;
+        }
+        let CameraView { view, proj, eye, focal_px, near, far, orthographic } = cam;
+        let mut hash = Sha256::new();
+        hash.update(b"contrast-raster-v1");
+        hash.update(bytemuck::cast_slice(size));
+        for matrix in [view, proj, clip_fix] {
+            hash.update(bytemuck::cast_slice(&matrix.to_cols_array()));
+        }
+        hash.update(bytemuck::cast_slice(&[eye.x, eye.y, eye.z, *focal_px, *near, *far, *exposure, *lens_k1]));
+        hash.update([*orthographic as u8, *encode_srgb as u8, *ssr as u8, dof.is_some() as u8, ao.is_some() as u8]);
+        if let Some(Dof { coc_scale, focus, max_coc, blades }) = dof {
+            hash.update(bytemuck::cast_slice(&[*coc_scale, *focus, *max_coc]));
+            hash.update(blades.to_le_bytes());
+        }
+        if let Some(ao) = ao {
+            hash.update(bytemuck::cast_slice(ao));
+        }
+        hash.update((draws.len() as u64).to_le_bytes());
+        for Draw3 { mesh, model, material, maps, opacity, cast_shadow, receive_shadow, shadow_catcher } in draws {
+            if maps.iter().any(Option::is_some) || material.transmission != 0.0 || material.foam_mix.is_some() {
+                return None;
+            }
+            let (vertices, indices) = mesh.cpu();
+            hash.update([matches!(mesh, MeshSrc::Deformed(..)) as u8]);
+            hash.update((vertices.len() as u64).to_le_bytes());
+            hash.update(bytemuck::cast_slice(vertices));
+            hash.update((indices.len() as u64).to_le_bytes());
+            hash.update(bytemuck::cast_slice(indices));
+            let gpu = mesh.mesh();
+            hash.update(gpu.count.to_le_bytes());
+            hash.update(bytemuck::cast_slice(&[gpu.lo.x, gpu.lo.y, gpu.lo.z, gpu.hi.x, gpu.hi.y, gpu.hi.z]));
+            hash.update(bytemuck::cast_slice(&model.to_cols_array()));
+            hash.update(bytemuck::bytes_of(&material_u(material, maps)));
+            hash.update(opacity.to_le_bytes());
+            hash.update([*cast_shadow as u8, *receive_shadow as u8, *shadow_catcher as u8]);
+        }
+        hash.update((lights.len() as u64).to_le_bytes());
+        for Light3 {
+            kind,
+            pos,
+            dir,
+            right,
+            color,
+            range,
+            falloff,
+            cos_outer,
+            cos_inner,
+            cast_shadow,
+            softness,
+            bias,
+            map_size,
+            size,
+            ies,
+            affects_diffuse,
+            affects_specular,
+            contact,
+        } in lights
+        {
+            if ies.is_some() {
+                return None;
+            }
+            hash.update((*kind as u32).to_le_bytes());
+            hash.update(bytemuck::cast_slice(&[
+                pos.x, pos.y, pos.z, dir.x, dir.y, dir.z, right.x, right.y, right.z, color.x, color.y, color.z, *range,
+                *falloff, *cos_outer, *cos_inner, *softness, *bias, size[0], size[1], size[2], *contact,
+            ]));
+            hash.update(map_size.to_le_bytes());
+            hash.update([*cast_shadow as u8, *affects_diffuse as u8, *affects_specular as u8]);
+        }
+        Some(hash.finalize().into())
+    }
+}
+
 /// Counters for statistics and tests.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Stats3 {
@@ -460,6 +560,21 @@ fn material_u(m: &MaterialParams, maps: &Maps) -> MaterialU {
 struct PipeKey {
     cull: bool,
     blend: bool,
+    plain: bool,
+    global_lights: bool,
+    alpha_mask: bool,
+}
+
+fn plain_material(draw: &Draw3) -> bool {
+    let m = &draw.material;
+    draw.maps.iter().all(Option::is_none)
+        && m.foam_mix.is_none()
+        && m.unevenness == 0.0
+        && m.anisotropy.abs() <= 1e-3
+        && m.clearcoat == 0.0
+        && m.sheen_color == [0.0; 3]
+        && m.iridescence == 0.0
+        && m.transmission == 0.0
 }
 
 /// GPU state of the 3D renderer.
@@ -472,6 +587,11 @@ pub struct ThreeEngine {
     targets: Arc<std::sync::Mutex<TargetPool>>,
     queue: Arc<wgpu::Queue>,
     main_mod: wgpu::ShaderModule,
+    #[cfg(test)]
+    specialize_plain: bool,
+    #[cfg(test)]
+    specialize_alpha_mask: bool,
+    specialize_global_lights: bool,
     bgl_frame: wgpu::BindGroupLayout,
     bgl_mat: wgpu::BindGroupLayout,
     bgl_obj: wgpu::BindGroupLayout,
@@ -497,9 +617,11 @@ pub struct ThreeEngine {
     blit_pipe: wgpu::RenderPipeline,
     under_pipe: wgpu::RenderPipeline,
     dof_pipe: wgpu::RenderPipeline,
+    dof_kernel_pipe: Option<wgpu::ComputePipeline>,
     tile_max_pipe: wgpu::RenderPipeline,
     tile_dilate_pipe: wgpu::RenderPipeline,
     depth_pipe: wgpu::RenderPipeline,
+    depth_coc_pipe: wgpu::RenderPipeline,
     sort_pipes: [wgpu::ComputePipeline; 4],
     software_scatter: Option<wgpu::ComputePipeline>,
     sorted_splats: sort_cache::Cache,
@@ -526,10 +648,25 @@ pub struct ThreeEngine {
     ies_rows: HashMap<usize, usize>,
     /// Statistics of the last render.
     pub stats: Stats3,
-    /// Whether path tracing records timestamp queries around its trace and denoise passes.
+    /// Whether raster and path-traced passes record timestamp queries.
     pub time_gpu: bool,
     /// Timestamps of the path-traced passes recorded since the caller last cleared them.
     pub pt_timers: Vec<crate::fx::Timer>,
+    /// Timestamps of raster passes recorded since the caller last cleared them.
+    pub raster_timers: Vec<crate::fx::Timer>,
+}
+
+fn raster_stamp<'a>(
+    timer: &'a mut Option<crate::fx::Timer>,
+    label: &str,
+) -> Option<wgpu::RenderPassTimestampWrites<'a>> {
+    let timer = timer.as_mut()?;
+    let begin = timer.labelled_pair(label)?;
+    Some(wgpu::RenderPassTimestampWrites {
+        query_set: &timer.set,
+        beginning_of_pass_write_index: Some(begin),
+        end_of_pass_write_index: Some(begin + 1),
+    })
 }
 
 fn tex_entry(
@@ -747,11 +884,17 @@ impl ThreeEngine {
                 tex_entry(2, VS_FS, wgpu::TextureSampleType::Float { filterable: false }, D2, false),
                 smp_entry(3, VS_FS, filt),
                 tex_entry(4, VS_FS, wgpu::TextureSampleType::Float { filterable: false }, D2, false),
+                buf_entry(5, VS_FS, uni, false),
             ],
             "three-post",
         );
-        let bgl_depth =
-            bgl(&[tex_entry(0, wgpu::ShaderStages::FRAGMENT, wgpu::TextureSampleType::Depth, D2, true)], "three-depth");
+        let bgl_depth = bgl(
+            &[
+                tex_entry(0, wgpu::ShaderStages::FRAGMENT, wgpu::TextureSampleType::Depth, D2, true),
+                buf_entry(1, wgpu::ShaderStages::FRAGMENT, uni, false),
+            ],
+            "three-depth",
+        );
         let cs = wgpu::ShaderStages::COMPUTE;
         let bgl_sort = bgl(
             &[
@@ -965,10 +1108,17 @@ impl ThreeEngine {
         };
         let under_pipe = post("fs_under", FORMAT);
         let dof_pipe = post("fs_dof", FORMAT);
-        let tile_max_pipe = post("fs_tile_max", scalar);
-        let tile_dilate_pipe = post("fs_tile_dilate", scalar);
+        let tile_format = if scalar == wgpu::TextureFormat::R32Float
+            && matches!(gbuffer, wgpu::TextureFormat::Rg32Float | wgpu::TextureFormat::Rgba32Float)
+        {
+            gbuffer
+        } else {
+            scalar
+        };
+        let tile_max_pipe = post("fs_tile_max", tile_format);
+        let tile_dilate_pipe = post("fs_tile_dilate", tile_format);
         let depth_layout = layout(&[&bgl_depth]);
-        let depth_pipe = {
+        let depth_pipeline = |entry: &str, target: wgpu::TextureFormat| {
             let _creation = crate::gpu::creation_lock();
             d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("three-depth-resolve"),
@@ -984,14 +1134,16 @@ impl ThreeEngine {
                 multisample: Default::default(),
                 fragment: Some(wgpu::FragmentState {
                     module: &depth_mod,
-                    entry_point: Some("fs_depth_resolve"),
+                    entry_point: Some(entry),
                     compilation_options: Default::default(),
-                    targets: &[Some(scalar.into())],
+                    targets: &[Some(target.into())],
                 }),
                 multiview_mask: None,
                 cache: None,
             })
         };
+        let depth_pipe = depth_pipeline("fs_depth_resolve", scalar);
+        let depth_coc_pipe = depth_pipeline("fs_depth_coc", gbuffer);
         let sort_layout = layout(&[&bgl_sort]);
         let sort_pipes = ["cs_keys", "cs_hist", "cs_scan", "cs_scatter"].map(|e| {
             let _creation = crate::gpu::creation_lock();
@@ -1042,6 +1194,11 @@ impl ThreeEngine {
             device: device.clone(),
             queue,
             main_mod,
+            #[cfg(test)]
+            specialize_plain: true,
+            #[cfg(test)]
+            specialize_alpha_mask: true,
+            specialize_global_lights: true,
             bgl_frame,
             bgl_mat,
             bgl_obj,
@@ -1065,9 +1222,11 @@ impl ThreeEngine {
             blit_pipe,
             under_pipe,
             dof_pipe,
+            dof_kernel_pipe: None,
             tile_max_pipe,
             tile_dilate_pipe,
             depth_pipe,
+            depth_coc_pipe,
             sort_pipes,
             software_scatter: None,
             sorted_splats: Default::default(),
@@ -1086,6 +1245,7 @@ impl ThreeEngine {
             stats: Stats3::default(),
             time_gpu: false,
             pt_timers: Vec::new(),
+            raster_timers: Vec::new(),
         };
         // 1×1 white and the BRDF table
         let white = eng.upload_rgba8(1, 1, &[255, 255, 255, 255], false);
@@ -1147,7 +1307,14 @@ impl ThreeEngine {
                     fragment: Some(wgpu::FragmentState {
                         module: m,
                         entry_point: Some("fs_main"),
-                        compilation_options: Default::default(),
+                        compilation_options: wgpu::PipelineCompilationOptions {
+                            constants: &[
+                                ("PLAIN_MATERIAL", key.plain as u32 as f64),
+                                ("ALL_GLOBAL_LIGHTS", key.global_lights as u32 as f64),
+                                ("ALPHA_MASK", key.alpha_mask as u32 as f64),
+                            ],
+                            ..Default::default()
+                        },
                         targets: &[Some(wgpu::ColorTargetState {
                             format: FORMAT,
                             blend: if key.blend { Some(PREMUL) } else { None },
@@ -1719,24 +1886,35 @@ impl ThreeEngine {
             map_size /= 2;
         }
         stats.shadow_views = shadow_mats.len();
+        let mut timer = self.time_gpu.then(|| crate::fx::Timer::new(&d, shadow_mats.len() as u32 + 32));
         // ------------------------------------------------ tiles
         let tiles = [size[0].div_ceil(TILE), size[1].div_ceil(TILE)];
-        let mut tile_data = vec![0u32; (tiles[0] * tiles[1]) as usize * (MAX_PER_TILE + 1)];
-        for (li, l) in scene.lights.iter().enumerate() {
-            let Some([x0, y0, x1, y1]) = light_tiles(l, &vp, size, tiles) else { continue };
-            for ty in y0..=y1 {
-                for tx in x0..=x1 {
-                    let base = (ty * tiles[0] + tx) as usize * (MAX_PER_TILE + 1);
-                    let n = tile_data[base] as usize;
-                    if n < MAX_PER_TILE {
-                        tile_data[base + 1 + n] = li as u32;
-                        tile_data[base] += 1;
-                    } else {
-                        stats.tile_overflow = true;
+        // Every global light appears in every tile in scene order. Keep the
+        // original 63-light cap and overflow diagnostic without a repeated list.
+        let global_lights = self.specialize_global_lights
+            && scene.lights.iter().all(|l| matches!(l.kind, LightKind::Ambient | LightKind::Directional));
+        let tile_data = if global_lights {
+            stats.tile_overflow = scene.lights.len() > MAX_PER_TILE;
+            vec![0u32]
+        } else {
+            let mut tile_data = vec![0u32; (tiles[0] * tiles[1]) as usize * (MAX_PER_TILE + 1)];
+            for (li, l) in scene.lights.iter().enumerate() {
+                let Some([x0, y0, x1, y1]) = light_tiles(l, &vp, size, tiles) else { continue };
+                for ty in y0..=y1 {
+                    for tx in x0..=x1 {
+                        let base = (ty * tiles[0] + tx) as usize * (MAX_PER_TILE + 1);
+                        let n = tile_data[base] as usize;
+                        if n < MAX_PER_TILE {
+                            tile_data[base + 1 + n] = li as u32;
+                            tile_data[base] += 1;
+                        } else {
+                            stats.tile_overflow = true;
+                        }
                     }
                 }
             }
-        }
+            tile_data
+        };
         // ------------------------------------------------ frame uniform
         let env = scene.env.as_ref();
         let mut sh = [[0.0f32; 4]; 9];
@@ -1745,6 +1923,10 @@ impl ThreeEngine {
                 *dst = [src[0], src[1], src[2], 0.0];
             }
         }
+        // Compute CoC only when both original depth and paired storage retain f32 precision.
+        let precompute_coc = scene.dof.is_some()
+            && self.scalar == wgpu::TextureFormat::R32Float
+            && matches!(self.gbuffer, wgpu::TextureFormat::Rg32Float | wgpu::TextureFormat::Rgba32Float);
         let dof = scene.dof.unwrap_or(Dof { coc_scale: 0.0, focus: 1.0, max_coc: 0.0, blades: 0 });
         let frame = FrameU {
             view_proj: vp.to_cols_array_2d(),
@@ -1776,7 +1958,7 @@ impl ThreeEngine {
                 scene.ao.map(|a| a[0]).unwrap_or(0.0),
                 scene.ao.map(|a| a[1]).unwrap_or(0.0),
                 scene.ssr as u32 as f32,
-                0.0,
+                precompute_coc as u32 as f32,
             ],
             sh,
             env_rot: env.map(|e| e.rotation.transpose()).unwrap_or(Mat4::IDENTITY).to_cols_array_2d(),
@@ -1842,7 +2024,7 @@ impl ThreeEngine {
                     key: [0; 6],
                     vbuf: None,
                     depth: 0.0,
-                    pipe: PipeKey { cull: false, blend: false },
+                    pipe: PipeKey { cull: false, blend: false, plain: false, global_lights: false, alpha_mask: true },
                     visible: false,
                     active: false,
                 });
@@ -1878,7 +2060,21 @@ impl ThreeEngine {
             } else {
                 Kind::Opaque
             };
-            let pipe = PipeKey { cull: !dr.material.double_sided, blend: kind == Kind::Blend };
+            let plain = plain_material(dr);
+            #[cfg(test)]
+            let plain = plain && self.specialize_plain;
+            // Only masked materials may discard fragments. Specializing this
+            // branch leaves opaque depth rejection available to the driver.
+            let alpha_mask = dr.material.alpha_mode == AlphaMode::Mask;
+            #[cfg(test)]
+            let alpha_mask = alpha_mask || !self.specialize_alpha_mask;
+            let pipe = PipeKey {
+                cull: !dr.material.double_sided,
+                blend: kind == Kind::Blend,
+                plain,
+                global_lights,
+                alpha_mask,
+            };
             self.pipe(pipe);
             let center = dr.model.transform_point3(lo * 0.5 + hi * 0.5);
             let vbuf = match &dr.mesh {
@@ -2023,6 +2219,54 @@ impl ThreeEngine {
         // the visible sky at the source's resolution, apart from the prefiltered chain
         let sky_view = env.map(|e| &e.env.sky).unwrap_or(&self.black_env);
         let no_tiles = pool([1, 1], self.scalar, 1, 1, 1, "three-no-tiles").create_view(&Default::default());
+        let aperture = d.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("three-dof-aperture"),
+            size: 128 * 16,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::UNIFORM,
+            mapped_at_creation: false,
+        });
+        if scene.dof.is_some() {
+            let pipe = self.dof_kernel_pipe.get_or_insert_with(|| {
+                let shader = d.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("three-dof-aperture"),
+                    source: wgpu::ShaderSource::Wgsl(
+                        format!("{TYPES}\n{}", include_str!("three_dof_kernel.wgsl")).into(),
+                    ),
+                });
+                let _creation = crate::gpu::creation_lock();
+                d.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("three-dof-aperture"),
+                    layout: None,
+                    module: &shader,
+                    entry_point: Some("cs_aperture"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                })
+            });
+            let bind = d.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("three-dof-aperture"),
+                layout: &pipe.get_bind_group_layout(0),
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: frame_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: aperture.as_entire_binding() },
+                ],
+            });
+            let stamp = timer.as_mut().and_then(|timer| {
+                let begin = timer.labelled_pair("three-dof-aperture")?;
+                Some(wgpu::ComputePassTimestampWrites {
+                    query_set: &timer.set,
+                    beginning_of_pass_write_index: Some(begin),
+                    end_of_pass_write_index: Some(begin + 1),
+                })
+            });
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("three-dof-aperture"),
+                timestamp_writes: stamp,
+            });
+            pass.set_pipeline(pipe);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.dispatch_workgroups(1, 4, 1);
+        }
         let post_bind3 = |src: &wgpu::TextureView, aux: &wgpu::TextureView, tiles: &wgpu::TextureView| {
             d.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("three-post"),
@@ -2033,6 +2277,7 @@ impl ThreeEngine {
                     wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(aux) },
                     wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.clamp_smp) },
                     wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(tiles) },
+                    wgpu::BindGroupEntry { binding: 5, resource: aperture.as_entire_binding() },
                 ],
             })
         };
@@ -2040,7 +2285,8 @@ impl ThreeEngine {
         let post_pass = |enc: &mut wgpu::CommandEncoder,
                          pipe: &wgpu::RenderPipeline,
                          bind: &wgpu::BindGroup,
-                         dst: &wgpu::TextureView| {
+                         dst: &wgpu::TextureView,
+                         stamp: Option<wgpu::RenderPassTimestampWrites<'_>>| {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("three-post"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -2053,7 +2299,7 @@ impl ThreeEngine {
                     },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: stamp,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -2139,7 +2385,7 @@ impl ThreeEngine {
                     depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes: raster_stamp(&mut timer, "three-shadow"),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -2202,7 +2448,7 @@ impl ThreeEngine {
                         }),
                         stencil_ops: None,
                     }),
-                    timestamp_writes: None,
+                    timestamp_writes: raster_stamp(&mut timer, "three-prepass"),
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
@@ -2219,8 +2465,8 @@ impl ThreeEngine {
                 }
             }
             if let Some((raw, ao)) = &ao_views {
-                post_pass(enc, &self.ssao_pipe, &post_bind(gn, gz), raw);
-                post_pass(enc, &self.ao_blur_pipe, &post_bind(raw, gz), ao);
+                post_pass(enc, &self.ssao_pipe, &post_bind(gn, gz), raw, raster_stamp(&mut timer, "three-ssao"));
+                post_pass(enc, &self.ao_blur_pipe, &post_bind(raw, gz), ao, raster_stamp(&mut timer, "three-ao-blur"));
             }
         }
         {
@@ -2240,7 +2486,7 @@ impl ThreeEngine {
                     depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0.0), store: wgpu::StoreOp::Store }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes: raster_stamp(&mut timer, "three-opaque"),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -2268,10 +2514,10 @@ impl ThreeEngine {
             };
             let black = pool([1, 1], FORMAT, 1, 1, 1, "three-black").create_view(&Default::default());
             let under = post_bind(&resolved, backdrop.unwrap_or(&black));
-            post_pass(enc, &self.under_pipe, &under, &lvl(0));
+            post_pass(enc, &self.under_pipe, &under, &lvl(0), raster_stamp(&mut timer, "three-backdrop"));
             for k in 1..mips {
                 let b = post_bind(&lvl(k - 1), &black);
-                post_pass(enc, &self.blit_pipe, &b, &lvl(k));
+                post_pass(enc, &self.blit_pipe, &b, &lvl(k), raster_stamp(&mut timer, "three-mip"));
             }
             fb_trans = Some(frame_bind(&sc.create_view(&Default::default()), env_view));
         }
@@ -2397,7 +2643,7 @@ impl ThreeEngine {
             splat_binds.push((sb, sp.gpu.n));
         }
         // ------------------------------------------------ transmissive, splats, blended
-        let depth_t = pool(size, self.scalar, 1, 1, 1, "three-depth");
+        let depth_t = pool(size, if precompute_coc { self.gbuffer } else { self.scalar }, 1, 1, 1, "three-depth");
         let depth_view = depth_t.create_view(&Default::default());
         {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2413,7 +2659,7 @@ impl ThreeEngine {
                     depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes: raster_stamp(&mut timer, "three-transparent"),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -2434,10 +2680,10 @@ impl ThreeEngine {
             let db = d.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("three-depth"),
                 layout: &self.bgl_depth,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&depth_ms),
-                }],
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&depth_ms) },
+                    wgpu::BindGroupEntry { binding: 1, resource: frame_buf.as_entire_binding() },
+                ],
             });
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("three-depth-resolve"),
@@ -2451,11 +2697,11 @@ impl ThreeEngine {
                     },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: raster_stamp(&mut timer, "three-depth-resolve"),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            rp.set_pipeline(&self.depth_pipe);
+            rp.set_pipeline(if precompute_coc { &self.depth_coc_pipe } else { &self.depth_pipe });
             rp.set_bind_group(0, &db, &[]);
             rp.draw(0..3, 0..1);
         }
@@ -2475,7 +2721,7 @@ impl ThreeEngine {
                     wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.repeat_smp) },
                 ],
             });
-            post_pass(enc, &self.ssr_pipe, &bind, &v);
+            post_pass(enc, &self.ssr_pipe, &bind, &v, raster_stamp(&mut timer, "three-ssr"));
             Some(v)
         } else {
             None
@@ -2483,15 +2729,32 @@ impl ThreeEngine {
         let resolved = ssr_view.as_ref().unwrap_or(&resolved);
         let pb = if scene.dof.is_some() {
             let tsize = [size[0].div_ceil(16), size[1].div_ceil(16)];
-            let a = pool(tsize, self.scalar, 1, 1, 1, "three-coc-tiles").create_view(&Default::default());
-            let b = pool(tsize, self.scalar, 1, 1, 1, "three-coc-dilated").create_view(&Default::default());
-            post_pass(enc, &self.tile_max_pipe, &post_bind(resolved, &depth_view), &a);
-            post_pass(enc, &self.tile_dilate_pipe, &post_bind(resolved, &a), &b);
+            let tile_format = if precompute_coc { self.gbuffer } else { self.scalar };
+            let a = pool(tsize, tile_format, 1, 1, 1, "three-coc-tiles").create_view(&Default::default());
+            let b = pool(tsize, tile_format, 1, 1, 1, "three-coc-dilated").create_view(&Default::default());
+            post_pass(
+                enc,
+                &self.tile_max_pipe,
+                &post_bind(resolved, &depth_view),
+                &a,
+                raster_stamp(&mut timer, "three-coc-tiles"),
+            );
+            post_pass(
+                enc,
+                &self.tile_dilate_pipe,
+                &post_bind(resolved, &a),
+                &b,
+                raster_stamp(&mut timer, "three-coc-dilate"),
+            );
             post_bind3(resolved, &depth_view, &b)
         } else {
             post_bind(resolved, &depth_view)
         };
-        post_pass(enc, &self.dof_pipe, &pb, out);
+        post_pass(enc, &self.dof_pipe, &pb, out, raster_stamp(&mut timer, "three-dof"));
+        if let Some(timer) = timer {
+            timer.resolve(enc);
+            self.raster_timers.push(timer);
+        }
         self.targets.lock().unwrap_or_else(|e| e.into_inner()).end_call();
         self.stats = stats;
         Ok(())
@@ -2579,12 +2842,12 @@ pub fn ssr_src() -> String {
 }
 
 pub fn post_src() -> String {
-    format!("{TYPES}\n{}", include_str!("three_post.wgsl"))
+    format!("{TYPES}\n{}\n{}", include_str!("three_coc.wgsl"), include_str!("three_post.wgsl"))
 }
 
 /// Multisampled depth resolve.
 pub fn depth_src() -> String {
-    include_str!("three_depth.wgsl").to_string()
+    format!("{TYPES}\n{}\n{}", include_str!("three_coc.wgsl"), include_str!("three_depth.wgsl"))
 }
 
 /// 360 reprojection.
@@ -2610,6 +2873,520 @@ mod tests {
         let before = bytes.clone();
         assert!(push_object(&mut bytes, &object, 512).is_err());
         assert_eq!(bytes, before, "reject before growing resident object storage");
+    }
+
+    #[test]
+    fn alpha_discard_specialization_matches_general_shader() {
+        use super::*;
+        let gpu = match crate::gpu::test_gpu() {
+            Ok(gpu) => gpu,
+            Err(error) => {
+                assert!(std::env::var("SR_REQUIRE_GPU").as_deref() != Ok("1"), "{error}");
+                return;
+            }
+        };
+        let mut engine =
+            ThreeEngine::new_with(gpu.device.clone(), gpu.queue.clone(), gpu.gbuffer_depth, gpu.scalar_target);
+        let sphere = sr_3d::prim::sphere(22.0, 24);
+        let mesh = engine.upload_mesh(&sphere.vertices, &sphere.indices);
+        let light = Light3 {
+            kind: LightKind::Directional,
+            pos: Vec3::new(20.0, 5.0, -80.0),
+            dir: Vec3::new(0.3, 0.4, 1.0).normalize(),
+            right: Vec3::X,
+            color: Vec3::new(0.8, 0.6, 0.4),
+            range: 0.0,
+            falloff: 2.0,
+            cos_outer: 0.0,
+            cos_inner: 1.0,
+            cast_shadow: false,
+            softness: 0.0,
+            bias: 0.001,
+            map_size: 64,
+            size: [0.0; 3],
+            ies: None,
+            affects_diffuse: true,
+            affects_specular: true,
+            contact: 0.0,
+        };
+        let mut ambient = light.clone();
+        ambient.kind = LightKind::Ambient;
+        ambient.color = Vec3::splat(0.25);
+        let draw = Draw3 {
+            mesh: MeshSrc::Cached(mesh),
+            model: Mat4::from_translation(Vec3::new(48.0, 32.0, 0.0)),
+            material: MaterialParams::default(),
+            maps: Default::default(),
+            opacity: 1.0,
+            cast_shadow: false,
+            receive_shadow: false,
+            shadow_catcher: false,
+        };
+        let mut scene = Scene3 {
+            cam: sr_3d::camera::resolve(&sr_3d::camera::CameraParams::default(), 96.0, 64.0),
+            clip_fix: Mat4::IDENTITY,
+            size: [96, 64],
+            exposure: 0.83,
+            dof: None,
+            lens_k1: 0.0,
+            draws: vec![draw],
+            lights: vec![light, ambient],
+            env: None,
+            splats: Vec::new(),
+            volumes: Vec::new(),
+            encode_srgb: false,
+            ao: None,
+            ssr: false,
+            path: None,
+            geodesic: None,
+        };
+        let plane = sr_3d::prim::plane(100.0, 80.0, 1);
+        scene.draws.push(Draw3 {
+            mesh: MeshSrc::Cached(engine.upload_mesh(&plane.vertices, &plane.indices)),
+            model: Mat4::from_translation(Vec3::new(48.0, 32.0, 28.0)),
+            material: MaterialParams { base_color: [0.13, 0.63, 0.27, 1.0], double_sided: true, ..Default::default() },
+            maps: Default::default(),
+            opacity: 1.0,
+            cast_shadow: false,
+            receive_shadow: false,
+            shadow_catcher: false,
+        });
+        let mask = engine.upload_rgba8(
+            2,
+            2,
+            &[255, 255, 255, 0, 255, 128, 64, 255, 64, 128, 255, 255, 255, 255, 255, 0],
+            false,
+        );
+        for mode in [AlphaMode::Opaque, AlphaMode::Mask, AlphaMode::Blend] {
+            for alpha in [0.0, 0.49, 1.0] {
+                for opacity in [0.4, 1.0] {
+                    for mapped in [false, true] {
+                        scene.draws[0].material = MaterialParams {
+                            base_color: [0.73, 0.21, 1.5, alpha],
+                            alpha_mode: mode,
+                            roughness: 0.38,
+                            metallic: 0.4,
+                            double_sided: mapped,
+                            ..Default::default()
+                        };
+                        scene.draws[0].maps[0] = mapped.then(|| mask.clone());
+                        scene.draws[0].opacity = opacity;
+                        engine.specialize_alpha_mask = true;
+                        let actual = engine.render_now(&scene, None);
+                        let stats = engine.stats;
+                        engine.specialize_alpha_mask = false;
+                        let expected = engine.render_now(&scene, None);
+                        assert!(actual.iter().any(|p| p[3] > 0.01));
+                        assert_eq!(
+                            actual, expected,
+                            "mode={mode:?}, alpha={alpha}, opacity={opacity}, mapped={mapped}"
+                        );
+                        assert_eq!(stats, engine.stats);
+                    }
+                }
+            }
+        }
+        assert!(engine.pipes.keys().any(|key| key.alpha_mask));
+        assert!(engine.pipes.keys().any(|key| !key.alpha_mask), "non-masked materials must omit discard");
+    }
+
+    #[test]
+    fn plain_material_matches_general_shader() {
+        use super::*;
+        let gpu = match crate::gpu::test_gpu() {
+            Ok(gpu) => gpu,
+            Err(error) => {
+                assert!(std::env::var("SR_REQUIRE_GPU").as_deref() != Ok("1"), "{error}");
+                return;
+            }
+        };
+        let mut engine =
+            ThreeEngine::new_with(gpu.device.clone(), gpu.queue.clone(), gpu.gbuffer_depth, gpu.scalar_target);
+        let mut rgba_reference = ThreeEngine::new_with(
+            gpu.device.clone(),
+            gpu.queue.clone(),
+            wgpu::TextureFormat::Rgba32Float,
+            gpu.scalar_target,
+        );
+        let sphere = sr_3d::prim::sphere(22.0, 24);
+        let mesh = engine.upload_mesh(&sphere.vertices, &sphere.indices);
+        let light = Light3 {
+            kind: LightKind::Directional,
+            pos: Vec3::new(20.0, 5.0, -80.0),
+            dir: Vec3::new(0.3, 0.4, 1.0).normalize(),
+            right: Vec3::X,
+            color: Vec3::new(0.8, 0.6, 0.4),
+            range: 0.0,
+            falloff: 2.0,
+            cos_outer: 0.0,
+            cos_inner: 1.0,
+            cast_shadow: false,
+            softness: 0.0,
+            bias: 0.001,
+            map_size: 64,
+            size: [0.0; 3],
+            ies: None,
+            affects_diffuse: true,
+            affects_specular: true,
+            contact: 0.0,
+        };
+        let mut ambient = light.clone();
+        ambient.kind = LightKind::Ambient;
+        ambient.color = Vec3::splat(0.25);
+        let draw = Draw3 {
+            mesh: MeshSrc::Cached(mesh),
+            model: Mat4::from_translation(Vec3::new(48.0, 32.0, 0.0)),
+            material: MaterialParams::default(),
+            maps: Default::default(),
+            opacity: 1.0,
+            cast_shadow: false,
+            receive_shadow: false,
+            shadow_catcher: false,
+        };
+        let mut scene = Scene3 {
+            cam: sr_3d::camera::resolve(&sr_3d::camera::CameraParams::default(), 96.0, 64.0),
+            clip_fix: Mat4::IDENTITY,
+            size: [96, 64],
+            exposure: 0.83,
+            dof: None,
+            lens_k1: 0.0,
+            draws: vec![draw],
+            lights: vec![light, ambient],
+            env: None,
+            splats: Vec::new(),
+            volumes: Vec::new(),
+            encode_srgb: false,
+            ao: None,
+            ssr: false,
+            path: None,
+            geodesic: None,
+        };
+        for case in 0..24 {
+            scene.draws[0].material = MaterialParams {
+                base_color: [0.23, 0.71, 1.5, if case % 4 == 0 { 0.45 } else { 1.0 }],
+                metallic: [0.0, 0.4, 1.0][case % 3],
+                roughness: [0.03, 0.38, 0.95][case / 3 % 3],
+                ior: if case % 2 == 0 { 1.5 } else { 2.3 },
+                specular: if case % 3 == 0 { 0.0 } else { 0.75 },
+                specular_color: [0.8, 0.3, 0.6],
+                emissive: [0.05, 0.0, 0.01],
+                unlit: case % 7 == 0,
+                double_sided: case % 2 == 0,
+                alpha_mode: if case % 4 == 0 { AlphaMode::Blend } else { AlphaMode::Opaque },
+                ..Default::default()
+            };
+            scene.encode_srgb = case % 2 == 1;
+            assert!(plain_material(&scene.draws[0]));
+            engine.specialize_plain = true;
+            engine.specialize_global_lights = true;
+            let actual = engine.render_now(&scene, None);
+            engine.specialize_global_lights = false;
+            assert_eq!(actual, engine.render_now(&scene, None), "global lighting, material case {case}");
+            engine.specialize_plain = false;
+            let expected = engine.render_now(&scene, None);
+            assert!(actual.iter().any(|p| p[3] > 0.01));
+            assert_eq!(actual, expected, "material case {case}");
+        }
+        assert!(engine.pipes.keys().any(|key| key.plain));
+        assert!(engine.pipes.keys().any(|key| !key.plain));
+        // Exercise both G-buffer channels and the paired depth/CoC target,
+        // including their interactions with transparent refraction and MSAA edges.
+        let plane = sr_3d::prim::plane(100.0, 80.0, 1);
+        scene.draws.push(Draw3 {
+            mesh: MeshSrc::Cached(engine.upload_mesh(&plane.vertices, &plane.indices)),
+            model: Mat4::from_translation(Vec3::new(48.0, 32.0, 28.0)),
+            material: MaterialParams {
+                base_color: [0.13, 0.63, 0.27, 1.0],
+                double_sided: true,
+                roughness: 0.2,
+                metallic: 0.7,
+                ..Default::default()
+            },
+            maps: Default::default(),
+            opacity: 1.0,
+            cast_shadow: false,
+            receive_shadow: false,
+            shadow_catcher: false,
+        });
+        engine.specialize_plain = true;
+        for feature in 0..32 {
+            scene.ao = (feature & 1 != 0).then_some([16.0, 1.0]);
+            scene.ssr = feature & 2 != 0;
+            scene.lights[0].contact = if feature & 4 != 0 { 32.0 } else { 0.0 };
+            scene.dof = (feature & 8 != 0).then_some(Dof { coc_scale: 24000.0, focus: 100.0, max_coc: 9.1, blades: 7 });
+            scene.draws[0].material = MaterialParams {
+                base_color: [0.73, 0.21, 1.5, 1.0],
+                roughness: 0.15,
+                metallic: 0.4,
+                transmission: if feature & 16 != 0 { 0.6 } else { 0.0 },
+                ..Default::default()
+            };
+            let actual = engine.render_now(&scene, None);
+            assert!(actual.iter().any(|p| p[0] > 0.01 && p[3] > 0.01));
+            assert_eq!(actual, rgba_reference.render_now(&scene, None), "depth format: feature bits {feature}");
+        }
+        scene.draws[0].material = MaterialParams::default();
+        assert!(plain_material(&scene.draws[0]));
+        // Exact reference uses the original tiled list and local-light branches.
+        // Include the tile cap, empty lists, local-light fallback and shadow paths.
+        let template = scene.lights[0].clone();
+        for (count, mixed) in [(0usize, false), (1, false), (3, false), (63, false), (64, false), (3, true)] {
+            scene.lights = (0..count)
+                .map(|k| {
+                    let mut light = template.clone();
+                    light.kind = if mixed && k == 1 {
+                        LightKind::Point
+                    } else if k % 3 == 0 {
+                        LightKind::Ambient
+                    } else {
+                        LightKind::Directional
+                    };
+                    light.color = Vec3::new(0.03 * (k % 5 + 1) as f32, 0.07, 0.11);
+                    light.pos = Vec3::new(30.0, 15.0, -50.0);
+                    light.range = if mixed { 300.0 } else { 0.0 };
+                    light.cast_shadow = k == 1;
+                    light.contact = if k == 2 { 12.0 } else { 0.0 };
+                    light
+                })
+                .collect();
+            scene.draws[0].cast_shadow = true;
+            scene.draws[0].receive_shadow = true;
+            for transparent in [false, true] {
+                scene.draws[0].material = MaterialParams {
+                    base_color: [0.23, 0.71, 1.5, if transparent { 0.45 } else { 1.0 }],
+                    roughness: 0.38,
+                    metallic: 0.4,
+                    alpha_mode: if transparent { AlphaMode::Blend } else { AlphaMode::Opaque },
+                    ..Default::default()
+                };
+                engine.specialize_plain = true;
+                engine.specialize_global_lights = true;
+                let actual = engine.render_now(&scene, None);
+                let actual_stats = engine.stats;
+                engine.specialize_global_lights = false;
+                let expected = engine.render_now(&scene, None);
+                assert_eq!(actual, expected, "global count={count}, mixed={mixed}, transparent={transparent}");
+                assert_eq!(actual_stats, engine.stats, "lighting statistics and overflow stay unchanged");
+                assert_eq!(actual_stats.tile_overflow, count > MAX_PER_TILE);
+            }
+        }
+        assert!(engine.pipes.keys().any(|key| key.global_lights));
+        assert!(engine.pipes.keys().any(|key| !key.global_lights));
+        scene.draws[0].material = MaterialParams::default();
+        let m = &mut scene.draws[0].material;
+        m.clearcoat = 0.5;
+        assert!(!plain_material(&scene.draws[0]));
+    }
+
+    #[test]
+    fn dof_matches_original_aperture_shader() {
+        use super::*;
+        let gpu = match crate::gpu::test_gpu() {
+            Ok(gpu) => gpu,
+            Err(error) => {
+                assert!(std::env::var("SR_REQUIRE_GPU").as_deref() != Ok("1"), "{error}");
+                return;
+            }
+        };
+        let mut engine =
+            ThreeEngine::new_with(gpu.device.clone(), gpu.queue.clone(), gpu.gbuffer_depth, gpu.scalar_target);
+        let mut rgba_reference = ThreeEngine::new_with(
+            gpu.device.clone(),
+            gpu.queue.clone(),
+            wgpu::TextureFormat::Rgba32Float,
+            gpu.scalar_target,
+        );
+        let shader = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("original-dof-oracle"),
+            source: wgpu::ShaderSource::Wgsl(
+                format!("{}\n{}", post_src(), include_str!("../tests/fixtures/three_dof_reference.wgsl")).into(),
+            ),
+        });
+        let layout = gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[Some(&engine.bgl_post)],
+            immediate_size: 0,
+        });
+        let dof_pipeline = |entry: &str| {
+            let _creation = crate::gpu::creation_lock();
+            gpu.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("original-dof-oracle"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_post"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    targets: &[Some(FORMAT.into())],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let mut reference = dof_pipeline("fs_dof_reference");
+        let mut classification = dof_pipeline("fs_uniform_coc_classification");
+        let plane = sr_3d::prim::plane(25.0, 19.0, 1);
+        let mesh = engine.upload_mesh(&plane.vertices, &plane.indices);
+        let draws = [
+            ([15.0, 18.0, -24.0], [0.9, 0.05, 0.2, 1.0]),
+            ([49.0, 28.0, 40.0], [0.07, 0.83, 0.21, 1.0]),
+            ([78.0, 42.0, 10.0], [0.04, 0.13, 1.7, 0.65]),
+        ]
+        .into_iter()
+        .map(|(position, color)| Draw3 {
+            mesh: MeshSrc::Cached(mesh.clone()),
+            model: Mat4::from_translation(Vec3::from_array(position)),
+            material: MaterialParams {
+                base_color: color,
+                unlit: true,
+                double_sided: true,
+                alpha_mode: if color[3] < 1.0 { AlphaMode::Blend } else { AlphaMode::Opaque },
+                ..Default::default()
+            },
+            maps: Default::default(),
+            opacity: 1.0,
+            cast_shadow: false,
+            receive_shadow: false,
+            shadow_catcher: false,
+        })
+        .collect();
+        let mut scene = Scene3 {
+            cam: sr_3d::camera::resolve(&sr_3d::camera::CameraParams::default(), 97.0, 61.0),
+            clip_fix: Mat4::IDENTITY,
+            size: [97, 61],
+            exposure: 0.73,
+            dof: None,
+            lens_k1: 0.0,
+            draws,
+            lights: Vec::new(),
+            env: None,
+            splats: Vec::new(),
+            volumes: Vec::new(),
+            encode_srgb: false,
+            ao: None,
+            ssr: false,
+            path: None,
+            geodesic: None,
+        };
+        // Cross ring-count thresholds, circular and polygonal apertures, transparent
+        // edges, HDR colour, lens distortion and encoded/linear working spaces.
+        for blades in [0, 3, 7, 11] {
+            for (case, max_coc) in [0.49, 0.51, 3.1, 6.1, 9.1, 64.0].into_iter().enumerate() {
+                scene.dof = Some(Dof { coc_scale: 24000.0, focus: 100.0, max_coc, blades });
+                scene.encode_srgb = case % 2 == 0;
+                scene.lens_k1 = if case % 3 == 0 { 0.035 } else { 0.0 };
+                let actual = engine.render_now(&scene, None);
+                assert_eq!(
+                    actual,
+                    rgba_reference.render_now(&scene, None),
+                    "depth format: blades={blades}, max_coc={max_coc}"
+                );
+                std::mem::swap(&mut engine.dof_pipe, &mut reference);
+                let expected = engine.render_now(&scene, None);
+                std::mem::swap(&mut engine.dof_pipe, &mut reference);
+                assert!(actual.iter().any(|p| p[3] > 0.01), "the oracle must render visible geometry");
+                assert_eq!(actual, expected, "blades={blades}, max_coc={max_coc}");
+            }
+        }
+
+        // A full-screen constant-depth surface with varying HDR vertex colours
+        // must activate the shortcut without making a wrong kernel look correct.
+        let mut plane = sr_3d::prim::plane(400.0, 400.0, 64);
+        for v in &mut plane.vertices {
+            // A symmetric blur can preserve a linear ramp despite wrong taps.
+            // Small alternating cells and asymmetric channel periods avoid that blind spot.
+            let x = ((v.pos[0] + 200.0) / 6.25).round() as u32;
+            let y = ((v.pos[1] + 200.0) / 6.25).round() as u32;
+            v.color = [
+                if (x + y).is_multiple_of(2) { 1.7 } else { 0.05 },
+                if x.is_multiple_of(3) { 0.13 } else { 0.91 },
+                if y.is_multiple_of(3) { 0.2 } else { 1.1 },
+                1.0,
+            ];
+        }
+        scene.draws = vec![Draw3 {
+            mesh: MeshSrc::Cached(engine.upload_mesh(&plane.vertices, &plane.indices)),
+            model: Mat4::from_translation(Vec3::new(48.5, 30.5, 0.0)),
+            material: MaterialParams { unlit: true, double_sided: true, ..Default::default() },
+            maps: Default::default(),
+            opacity: 1.0,
+            cast_shadow: false,
+            receive_shadow: false,
+            shadow_catcher: false,
+        }];
+        scene.dof = None;
+        let pattern = engine.render_now(&scene, None);
+        assert!(pattern.iter().any(|p| (p[0] - pattern[0][0]).abs() > 0.1), "nonlinear colour oracle is visible");
+        let mut radii = vec![0.49, 0.51, 3.1, 6.1, 9.1, 64.0];
+        // Neighbors of powers of two stress rounding in smoothstep's +/-1 edges.
+        for radius in [1.0f32, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0] {
+            radii.extend([f32::from_bits(radius.to_bits() - 1), radius, f32::from_bits(radius.to_bits() + 1)]);
+        }
+        for blades in [0, 3, 7, 11] {
+            for (case, max_coc) in radii.iter().copied().enumerate() {
+                scene.dof = Some(Dof { coc_scale: 48000.0, focus: 100.0, max_coc, blades });
+                scene.encode_srgb = case % 2 == 0;
+                scene.lens_k1 = if case % 3 == 0 { 0.035 } else { 0.0 };
+                let actual = engine.render_now(&scene, None);
+                assert_eq!(
+                    actual,
+                    rgba_reference.render_now(&scene, None),
+                    "depth format: blades={blades}, max_coc={max_coc}"
+                );
+                std::mem::swap(&mut engine.dof_pipe, &mut reference);
+                let expected = engine.render_now(&scene, None);
+                std::mem::swap(&mut engine.dof_pipe, &mut reference);
+                assert!(actual.iter().all(|p| p[3] > 0.99), "whole frame has geometry");
+                assert_eq!(actual, expected, "uniform CoC: blades={blades}, max_coc={max_coc}");
+            }
+        }
+        if gpu.scalar_target == wgpu::TextureFormat::R32Float
+            && matches!(gpu.gbuffer_depth, wgpu::TextureFormat::Rg32Float | wgpu::TextureFormat::Rgba32Float)
+        {
+            std::mem::swap(&mut engine.dof_pipe, &mut classification);
+            let mask = engine.render_now(&scene, None);
+            std::mem::swap(&mut engine.dof_pipe, &mut classification);
+            assert!(mask.iter().all(|p| p[0] > 0.99), "the uniform-CoC shortcut must be exercised");
+            // A larger radius in the conservative border invalidates the proof,
+            // even if it lies beyond the original maximum's tile neighborhood.
+            scene.dof = Some(Dof { coc_scale: 24000.0, focus: 100.0, max_coc: 64.0, blades: 7 });
+            scene.encode_srgb = false;
+            scene.lens_k1 = 0.0;
+            let edge = sr_3d::prim::plane(12.0, 200.0, 1);
+            scene.draws.push(Draw3 {
+                mesh: MeshSrc::Cached(engine.upload_mesh(&edge.vertices, &edge.indices)),
+                model: Mat4::from_translation(Vec3::new(78.0, 30.5, -24.0)),
+                material: MaterialParams {
+                    base_color: [0.1, 0.9, 0.3, 1.0],
+                    unlit: true,
+                    double_sided: true,
+                    ..Default::default()
+                },
+                maps: Default::default(),
+                opacity: 1.0,
+                cast_shadow: false,
+                receive_shadow: false,
+                shadow_catcher: false,
+            });
+            let actual = engine.render_now(&scene, None);
+            std::mem::swap(&mut engine.dof_pipe, &mut reference);
+            let expected = engine.render_now(&scene, None);
+            std::mem::swap(&mut engine.dof_pipe, &mut reference);
+            assert_eq!(actual, expected, "uniform-region boundary");
+            assert_eq!(actual, rgba_reference.render_now(&scene, None), "depth format at uniform-region boundary");
+            std::mem::swap(&mut engine.dof_pipe, &mut classification);
+            let mask = engine.render_now(&scene, None);
+            std::mem::swap(&mut engine.dof_pipe, &mut classification);
+            assert_eq!(mask[30 * 97][0], 0.0, "expanded-neighborhood maximum participates in proof");
+        }
     }
 
     #[test]

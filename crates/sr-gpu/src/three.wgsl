@@ -1,3 +1,8 @@
+// Optional surface features are removed only for materials that do not use them.
+override PLAIN_MATERIAL: bool = false;
+override ALL_GLOBAL_LIGHTS: bool = false;
+override ALPHA_MASK: bool = true;
+
 struct Material {
     base_color: vec4<f32>,
     // rgb, strength
@@ -298,7 +303,7 @@ fn shade_light(li: Light, s: Surface) -> vec3<f32> {
         let spec = (s.f0 * lut.x + s.f90 * lut.y) * s.specular_weight * s.metallic * li.flags.y;
         return (diff + spec) * radiance * s.occlusion;
     }
-    if (ty == 1u) {
+    if (ALL_GLOBAL_LIGHTS || ty == 1u) {
         l = -li.dir.xyz;
     } else {
         var to = li.pos.xyz - s.world;
@@ -339,7 +344,7 @@ fn shade_light(li: Light, s: Surface) -> vec3<f32> {
     let vh = max(dot(s.v, h), 0.0);
     let f = f_schlick(s.f0, s.f90, vh);
     var spec = vec3(0.0);
-    if (abs(mat.aniso.x) > 1e-3) {
+    if (!PLAIN_MATERIAL && abs(mat.aniso.x) > 1e-3) {
         let at = mix(a, 1.0, mat.aniso.x * mat.aniso.x);
         let ab = max(a, 1e-3);
         let d = d_aniso(nh, dot(s.t, h), dot(s.b, h), at, ab);
@@ -351,12 +356,12 @@ fn shade_light(li: Light, s: Surface) -> vec3<f32> {
     let kd = (vec3(1.0) - f) * (1.0 - s.metallic) * (1.0 - mat.p2.z);
     var out = (kd * s.albedo / PI) * li.flags.x + spec * s.specular_weight * li.flags.y;
     // sheen
-    if (max(mat.sheen.r, max(mat.sheen.g, mat.sheen.b)) > 0.0) {
+    if (!PLAIN_MATERIAL && max(mat.sheen.r, max(mat.sheen.g, mat.sheen.b)) > 0.0) {
         out = out * (1.0 - 0.157 * max(mat.sheen.r, max(mat.sheen.g, mat.sheen.b)));
         out += mat.sheen.rgb * d_charlie(nh, mat.sheen.w) * v_neubelt(nl, nv);
     }
     // clearcoat on top
-    if (mat.p2.x > 0.0) {
+    if (!PLAIN_MATERIAL && mat.p2.x > 0.0) {
         let ca = max(mat.p2.y * mat.p2.y, 1e-3);
         let fc = f_schlick(vec3(0.04), vec3(1.0), vh).x * mat.p2.x;
         out = out * (1.0 - fc) + vec3(fc * d_ggx(nh, ca) * v_smith(nl, nv, ca));
@@ -424,7 +429,7 @@ fn surface(i: VOut, front: bool) -> Surface {
     // the screen footprint of a pixel in the object's scene units (derivatives outside any branch)
     let footprint = max(length(fwidth(i.local)), 1e-6);
     let fade = clamp(vec3(mat.finish.y, mat.finish.y * 0.5, mat.finish.y * 0.25) / footprint - vec3(1.0), vec3(0.0), vec3(1.0));
-    let bits = u32(mat.aniso.w);
+    let bits = select(u32(mat.aniso.w), 0u, PLAIN_MATERIAL);
     var base = mat.base_color * i.color;
     if ((bits & 1u) != 0u) { base = base * material_fragment(base_map, i.uv, 0u); }
     s.albedo = base.rgb;
@@ -436,7 +441,7 @@ fn surface(i: VOut, front: bool) -> Surface {
         rough = rough * mr.g;
         metallic = metallic * mr.b;
     }
-    let unev = mat.finish.x;
+    let unev = select(mat.finish.x, 0.0, PLAIN_MATERIAL);
     var uh = 0.0;
     if (unev > 0.0) { uh = unevenness_height(i.local, fade); rough = rough + 0.25 * unev * uh; }
     s.metallic = clamp(metallic, 0.0, 1.0);
@@ -482,7 +487,7 @@ fn surface(i: VOut, front: bool) -> Surface {
     s.f0 = mix(dielectric, s.albedo, s.metallic);
     s.f90 = vec3(1.0);
     s.specular_weight = mix(mat.p3.w, 1.0, s.metallic);
-    if (mat.irid.x > 0.0) {
+    if (!PLAIN_MATERIAL && mat.irid.x > 0.0) {
         let nv = max(dot(s.n, s.v), 1e-3);
         s.f0 = mix(s.f0, iridescence(s.f0, nv, mat.irid.y, ior, mat.irid.z, s.metallic), mat.irid.x);
     }
@@ -546,7 +551,7 @@ fn fs_main(i: VOut, @builtin(front_facing) front: bool) -> FOut {
     var o: FOut;
     let s = surface(i, front);
     let mode = u32(mat.p1.x);
-    if (mode == 1u && s.alpha < mat.p0.w) { discard; }
+    if (ALPHA_MASK && mode == 1u && s.alpha < mat.p0.w) { discard; }
     let catcher = obj.params.w > 0.5;
     if (mat.p1.z > 0.5 && !catcher) {
         // unlit
@@ -561,12 +566,18 @@ fn fs_main(i: VOut, @builtin(front_facing) front: bool) -> FOut {
     // screen-space ambient occlusion darkens the ambient and environment light only
     var ao = 1.0;
     if (fr.lens.z > 0.5) { ao = textureLoad(ao_tex, vec2<i32>(i.clip.xy), 0).r; }
-    let tile = vec2<u32>(i.clip.xy) / TILE;
-    let tiles_x = u32(fr.params.z);
-    let base = (tile.y * tiles_x + tile.x) * (MAX_PER_TILE + 1u);
-    let count = min(tiles[base], MAX_PER_TILE);
+    var base = 0u;
+    var count = min(u32(fr.params.y), MAX_PER_TILE);
+    if (!ALL_GLOBAL_LIGHTS) {
+        let tile = vec2<u32>(i.clip.xy) / TILE;
+        let tiles_x = u32(fr.params.z);
+        base = (tile.y * tiles_x + tile.x) * (MAX_PER_TILE + 1u);
+        count = min(tiles[base], MAX_PER_TILE);
+    }
     for (var k = 0u; k < count; k++) {
-        let li = lights[tiles[base + 1u + k]];
+        var index = k;
+        if (!ALL_GLOBAL_LIGHTS) { index = tiles[base + 1u + k]; }
+        let li = lights[index];
         let ty = u32(li.pos.w);
         let contribution = shade_light(li, s);
         var sh = 1.0;
@@ -576,7 +587,7 @@ fn fs_main(i: VOut, @builtin(front_facing) front: bool) -> FOut {
             sh = shadow_factor(li, s.world, s.n);
             if (li.right.w > 0.0 && sh > 0.0) {
                 var l = -li.dir.xyz;
-                if (ty != 1u) { l = normalize(li.pos.xyz - s.world); }
+                if (!ALL_GLOBAL_LIGHTS && ty != 1u) { l = normalize(li.pos.xyz - s.world); }
                 sh = sh * contact_shadow(s.world + s.n * 0.5, l, li.right.w);
             }
         } else if (ty == 0u) {
@@ -598,7 +609,7 @@ fn fs_main(i: VOut, @builtin(front_facing) front: bool) -> FOut {
         let fr_avg = s.f0 + (1.0 - s.f0) * pow(1.0 - nv, 5.0);
         let diff = sh_irradiance(s.n) * s.albedo * (1.0 - s.metallic) * (1.0 - mat.p2.z) * (vec3(1.0) - fr_avg);
         var ibl = (diff + spec) * s.occlusion * ao;
-        if (mat.p2.x > 0.0) {
+        if (!PLAIN_MATERIAL && mat.p2.x > 0.0) {
             let fc = (0.04 + 0.96 * pow(1.0 - nv, 5.0)) * mat.p2.x;
             ibl = ibl * (1.0 - fc) + env_sample(r, mat.p2.y * (fr.params2.w - 1.0)) * fc;
         }
@@ -608,7 +619,7 @@ fn fs_main(i: VOut, @builtin(front_facing) front: bool) -> FOut {
             lit_sh += luma(ibl);
         }
     }
-    if (mat.p2.z > 0.0) {
+    if (!PLAIN_MATERIAL && mat.p2.z > 0.0) {
         let nv = max(dot(s.n, s.v), 1e-3);
         let ft = vec3(1.0) - f_schlick(s.f0, s.f90, nv);
         col += transmission(s) * ft * mat.p2.z * (1.0 - s.metallic);
@@ -621,7 +632,7 @@ fn fs_main(i: VOut, @builtin(front_facing) front: bool) -> FOut {
         return o;
     }
     var em = mat.emissive.rgb * mat.emissive.w;
-    if ((u32(mat.aniso.w) & 16u) != 0u) { em = em * material_fragment(emissive_map, i.emissive_uv, 4u).rgb; }
+    if (!PLAIN_MATERIAL && (u32(mat.aniso.w) & 16u) != 0u) { em = em * material_fragment(emissive_map, i.emissive_uv, 4u).rgb; }
     col += em;
     // transmissive surfaces are opaque layers over what they refract
     var a = 1.0;

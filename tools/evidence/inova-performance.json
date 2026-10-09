@@ -1,0 +1,318 @@
+{
+  "schema_version": 1,
+  "generated_by": "Codex GPT-6",
+  "measured_on": "2026-10-09",
+  "package": {
+    "file": "inova-institucional-1.0.0.vpkg.zip",
+    "sha256": "fa13205fb5b9367d6f2d0cd8bdff25d6b654ceb8f8499ba20bedfc616edbedbe"
+  },
+  "method": {
+    "environment": "Linux VM, Vulkan, llvmpipe LLVM19.1.7,256bits",
+    "isolation": "Heavy work serialized with a VM lock; other benchmark VM idle.",
+    "command": "scene-render encode film.scene.xml --output master --out-dir RUN --strict --no-upload --json",
+    "settings": {
+      "width": 1920,
+      "height": 1080,
+      "fps": 30,
+      "frames": 1500,
+      "quality": "final",
+      "motion_blur_samples": 4,
+      "adaptive_motion_blur": false
+    },
+    "timing": "Monotonic wall time for the complete encode command, including accessibility checks."
+  },
+  "full_package": {
+    "baseline_revision": "b08cb2b0911863db9fe07261b737901a9fe7705d",
+    "baseline_binary_sha256": "fcea485c21fc435522d8cd594a05b9331bbb36e42a58f5adbe5f6191488b8596",
+    "candidate_binary_sha256": "df954742f4d6c35517aadece3bb2d7f25ed1d86a14b61efe67e4b0b48d8a2b3f",
+    "baseline_wall_seconds": 3528.2679567040177,
+    "candidate_wall_seconds": 1752.1750964310195,
+    "speedup": 2.013650327464816,
+    "checks": {
+      "frames": true,
+      "quality": true,
+      "render_adapter": true,
+      "accessibility": true,
+      "unsupported": true,
+      "evaluation_warnings": true,
+      "warnings": true,
+      "loudness": true,
+      "true_peak": true,
+      "decoded_video_audio_identical": true,
+      "exit_status_identical": true,
+      "sidecars_identical": true
+    },
+    "encoded_mp4_identical": true,
+    "encoded_sha256": "eab253b7f45470e1fb65de3dd9badb9173b686d61718b2c6c043e59a4a9374d5",
+    "subtitle_sha256": "2818f810348ca0ab79928d6de5736c90c3220d924ab65a5ac61145c2f33c0797",
+    "strict_exit_code": 1,
+    "expected_finding": "contrastCheck: plateP3T1 reaches only 1.83:1 against its background at 28.800 s (minimum 4.5:1)",
+    "scope": "Prefetched contrast and earlier retained optimizations; excludes the subsequent depth-format and material/light specializations."
+  },
+  "subsequent_changes": {
+    "rg32_depth": {
+      "scope": "two ABBA12-frame render windows and two6-frame encoded windows; not full-package speedup",
+      "binary_sha256": "2299d62889c8a8c50ad1f71aa089aa8d89536f436ba159ab5819162211b30cf8",
+      "benchmarks": {
+        "600": {
+          "rows": [
+            {
+              "run": 1,
+              "binary": "candidate-prefetch-v2",
+              "median_ms": 1218.532
+            },
+            {
+              "run": 2,
+              "binary": "candidate-rg-depth",
+              "median_ms": 1205.831
+            },
+            {
+              "run": 3,
+              "binary": "candidate-rg-depth",
+              "median_ms": 1204.137
+            },
+            {
+              "run": 4,
+              "binary": "candidate-prefetch-v2",
+              "median_ms": 1261.429
+            }
+          ],
+          "before_mean_median_ms": 1239.9805000000001,
+          "after_mean_median_ms": 1204.984,
+          "diagnostic_speedup": 1.0290431242240563
+        },
+        "900": {
+          "rows": [
+            {
+              "run": 1,
+              "binary": "candidate-prefetch-v2",
+              "median_ms": 1203.589
+            },
+            {
+              "run": 2,
+              "binary": "candidate-rg-depth",
+              "median_ms": 1143.671
+            },
+            {
+              "run": 3,
+              "binary": "candidate-rg-depth",
+              "median_ms": 1183.983
+            },
+            {
+              "run": 4,
+              "binary": "candidate-prefetch-v2",
+              "median_ms": 1220.99
+            }
+          ],
+          "before_mean_median_ms": 1212.2894999999999,
+          "after_mean_median_ms": 1163.827,
+          "diagnostic_speedup": 1.041640639029684
+        }
+      },
+      "encoded_windows": {
+        "20": {
+          "equivalent": true,
+          "speedup": 1.0176958383049253,
+          "before_seconds": 14.443131561012706,
+          "after_seconds": 14.191992359003052,
+          "encoded_mp4_identical": true
+        },
+        "28.8": {
+          "equivalent": true,
+          "speedup": 1.0100638150717385,
+          "before_seconds": 17.494066802988527,
+          "after_seconds": 17.3197639019927,
+          "encoded_mp4_identical": true
+        }
+      },
+      "full_package_verified": false
+    },
+    "global_lights": {
+      "scope": "two ABBA12-frame render windows and two6-frame encoded windows; not full-package speedup",
+      "binary_sha256": "946734f0789785f928e4004958f7025ff32a5a2385b5d94bf3002c999e462b77",
+      "benchmarks": {
+        "600": {
+          "rows": [
+            {
+              "run": 1,
+              "binary": "candidate-rg-depth",
+              "median_ms": 1248.375
+            },
+            {
+              "run": 2,
+              "binary": "candidate-global-lights",
+              "median_ms": 1137.917
+            },
+            {
+              "run": 3,
+              "binary": "candidate-global-lights",
+              "median_ms": 1136.425
+            },
+            {
+              "run": 4,
+              "binary": "candidate-rg-depth",
+              "median_ms": 1215.475
+            }
+          ],
+          "before_mean_median_ms": 1231.925,
+          "after_mean_median_ms": 1137.1709999999998,
+          "diagnostic_speedup": 1.0833243197373132
+        },
+        "900": {
+          "rows": [
+            {
+              "run": 1,
+              "binary": "candidate-rg-depth",
+              "median_ms": 1175.505
+            },
+            {
+              "run": 2,
+              "binary": "candidate-global-lights",
+              "median_ms": 1079.739
+            },
+            {
+              "run": 3,
+              "binary": "candidate-global-lights",
+              "median_ms": 1076.589
+            },
+            {
+              "run": 4,
+              "binary": "candidate-rg-depth",
+              "median_ms": 1133.443
+            }
+          ],
+          "before_mean_median_ms": 1154.4740000000002,
+          "after_mean_median_ms": 1078.164,
+          "diagnostic_speedup": 1.0707777295476386
+        }
+      },
+      "encoded_windows": {
+        "20": {
+          "equivalent": true,
+          "speedup": 1.0432497569804888,
+          "before_seconds": 14.227099130977876,
+          "after_seconds": 13.63728966700728,
+          "encoded_mp4_identical": true
+        },
+        "28.8": {
+          "equivalent": true,
+          "speedup": 1.029839554396793,
+          "before_seconds": 17.645541535981465,
+          "after_seconds": 17.1342627700069,
+          "encoded_mp4_identical": true
+        }
+      },
+      "full_package_verified": false
+    },
+    "alpha_discard": {
+      "scope": "two ABBA12-frame render windows and two6-frame encoded windows; not full-package speedup",
+      "binary_sha256": "6c7310d0ba1e7a172fc0373f3749d7e45e4d7659c129d9c27f67773115614fa8",
+      "benchmarks": {
+        "600": {
+          "rows": [
+            {
+              "run": 1,
+              "binary": "candidate-global-lights",
+              "median_ms": 1219.852
+            },
+            {
+              "run": 2,
+              "binary": "candidate-alpha-discard",
+              "median_ms": 1194.935
+            },
+            {
+              "run": 3,
+              "binary": "candidate-alpha-discard",
+              "median_ms": 1153.143
+            },
+            {
+              "run": 4,
+              "binary": "candidate-global-lights",
+              "median_ms": 1205.45
+            }
+          ],
+          "before_mean_median_ms": 1212.651,
+          "after_mean_median_ms": 1174.039,
+          "diagnostic_speedup": 1.0328881749243424
+        },
+        "900": {
+          "rows": [
+            {
+              "run": 1,
+              "binary": "candidate-global-lights",
+              "median_ms": 1111.414
+            },
+            {
+              "run": 2,
+              "binary": "candidate-alpha-discard",
+              "median_ms": 1064.337
+            },
+            {
+              "run": 3,
+              "binary": "candidate-alpha-discard",
+              "median_ms": 1062.566
+            },
+            {
+              "run": 4,
+              "binary": "candidate-global-lights",
+              "median_ms": 1184.349
+            }
+          ],
+          "before_mean_median_ms": 1147.8815,
+          "after_mean_median_ms": 1063.4515000000001,
+          "diagnostic_speedup": 1.0793924311545942
+        }
+      },
+      "encoded_windows": {
+        "20": {
+          "equivalent": true,
+          "speedup": 1.0375102075228284,
+          "before_seconds": 14.478790316992672,
+          "after_seconds": 13.955323245987529,
+          "encoded_mp4_identical": true
+        },
+        "28.8": {
+          "equivalent": true,
+          "speedup": 1.0032277373739031,
+          "before_seconds": 17.58524071300053,
+          "after_seconds": 17.528662792989053,
+          "encoded_mp4_identical": true
+        }
+      },
+      "full_package_verified": false
+    }
+  },
+  "current_binary_sha256": "fb35020f3201accce67bb678e39cbaaa3c650861ee4f991d474404a81e9558cf",
+  "limits": [
+    "The latest optimization set passed short Inova comparisons. The release rebuild has no full-package timing.",
+    "Short-window speedups must not be multiplied into a full-package claim.",
+    "The 3x full-package objective is unverified."
+  ],
+  "current_binary_version": "0.1.4",
+  "release_rebuild_validation": {
+    "environment": "Same Vulkan VM as the diagnostic comparisons",
+    "format": "passed",
+    "clippy": "sr-gpu and sr-deliver, all targets, warnings denied",
+    "dof_original_shader_oracle": "passed",
+    "accessibility_regressions_passed": 4,
+    "equivalence": {
+      "baseline_revision": "b08cb2b0911863db9fe07261b737901a9fe7705d",
+      "baseline_binary_sha256": "fcea485c21fc435522d8cd594a05b9331bbb36e42a58f5adbe5f6191488b8596",
+      "candidate_binary_sha256": "fb35020f3201accce67bb678e39cbaaa3c650861ee4f991d474404a81e9558cf",
+      "fixtures": [
+        "perf_layers",
+        "perf_vector",
+        "perf_text",
+        "perf_effects",
+        "perf_3d",
+        "perf_physics",
+        "perf_video"
+      ],
+      "frames_per_fixture": 12,
+      "image_format": "1920x1080 RGBA,16-bit",
+      "decoded_frames_identical": true,
+      "video_audio_mix_identical": true,
+      "audio_data_bytes": 17280000
+    }
+  }
+}

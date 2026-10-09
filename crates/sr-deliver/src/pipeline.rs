@@ -246,6 +246,7 @@ struct Video<'a> {
     origin: f64,
     /// Output-sized working textures: the two placed sides of a join, and their combination.
     join_tex: Option<[std::sync::Arc<sr_gpu::resources::Tex>; 3]>,
+    contrasts: ContrastPrefetch,
 }
 
 impl Video<'_> {
@@ -283,7 +284,14 @@ impl Video<'_> {
             Some((tm, f)) if (st - t).abs() < 1.0 / fps => ev.evaluate(tm.sample(&f, st - t)),
             _ => ev.evaluate(st),
         };
-        let frame = self.renderer.render_with(g, p, Some(&mut sub));
+        let frame = match self.contrasts.planned.remove(&t.to_bits()) {
+            Some(targets) if seg.is_none() => {
+                let (frame, ratios) = self.renderer.render_with_deferred_contrasts(g, p, &targets, &mut sub);
+                self.contrasts.measured.extend(ratios.into_iter().map(|(id, ratio)| ((t.to_bits(), id), ratio)));
+                frame
+            }
+            _ => self.renderer.render_with(g, p, Some(&mut sub)),
+        };
         if !frame.stats.errors.is_empty() {
             return Err(DeliverError::Render { time: t, message: crate::overlay::failure_message(&frame.stats) });
         }
@@ -329,6 +337,23 @@ impl Video<'_> {
 }
 
 impl Video<'_> {
+    /// Predict likely deferred checks without advancing simulation. Rendered observations
+    /// remain authoritative; predictions can only avoid a later original-frame render.
+    fn prepare_contrasts(&mut self, times: &[f64]) {
+        self.contrasts = ContrastPrefetch::default();
+        if self.segments.is_some() || !Checks::of(self.ev.program()).contrast_on() {
+            return;
+        }
+        let mut predicted = std::collections::BTreeMap::<_, Vec<_>>::new();
+        for (k, &t) in times.iter().enumerate() {
+            let g = self.ev.evaluate_layout(t);
+            for (id, opacity) in self.renderer.contrast_candidates(&g, self.ev.program()) {
+                predicted.entry(id).or_default().push((k, opacity));
+            }
+        }
+        self.contrasts.prepare(times, predicted);
+    }
+
     /// Renders `times` and hands each converted frame to `sink` and what the accessibility checks
     /// take from it to `seen`; adds stage timings to `report`. The checks' verdicts come from
     /// [`Video::judge`], once every frame of the output has been observed.
@@ -457,17 +482,25 @@ impl Video<'_> {
         let checks = Checks::of(p);
         // Probe over the whole span of maximum visibility. A middle-frame sample can miss low
         // contrast at either end, or a change in the text's backdrop.
-        for (id, seen) in std::mem::take(&mut judge.unprobed) {
-            for (k, opacity) in probe_frames(&seen) {
-                let t = times[k];
-                let g = self.ev.evaluate(t);
-                let ev = &self.ev;
+        // Keep time moving forward and share each original frame among the texts
+        // measured there, instead of replaying the timeline separately for every label.
+        for (k, targets) in contrast_schedule(std::mem::take(&mut judge.unprobed)) {
+            let t = times[k];
+            let ev = self.ev;
+            let renderer = &mut self.renderer;
+            let ids: Vec<_> = targets.iter().map(|(id, _)| id.clone()).collect();
+            let ratios = self.contrasts.resolve(t, &ids, |missing| {
+                let g = ev.evaluate(t);
                 let mut sub = |st: f64| ev.evaluate(st);
-                if let Some(ratio) = self.renderer.contrast_with_without(&g, p, &id, &mut sub) {
+                renderer.contrasts_with_without(&g, p, missing, &mut sub)
+            });
+            for ((id, opacity), ratio) in targets.into_iter().zip(ratios) {
+                if let Some(ratio) = ratio {
                     judge.contrast(&id, opacity, ratio, t);
                 }
             }
         }
+        self.contrasts = ContrastPrefetch::default();
         // accessibility verdicts
         let fail = |mode: &str, msg: String, report: &mut Report| {
             if mode == "error" && report.accessibility_error.is_none() {
@@ -951,6 +984,7 @@ pub fn deliver(
             overlay,
             origin: if segments.is_some() { 0.0 } else { output.start },
             join_tex: None,
+            contrasts: ContrastPrefetch::default(),
         };
         if let Some(overlay) = &video.overlay {
             for warning in overlay.warnings() {
@@ -1010,6 +1044,7 @@ pub fn deliver(
             let mut done = 0;
             let mut judge = Judge::new(checks.flash_on());
             video.stage.seek(spec.start_number as u32);
+            video.prepare_contrasts(&times);
             video.run(&times, &mut report, &mut judge, |b| {
                 done += 1;
                 progress(done, n);
@@ -1150,6 +1185,7 @@ pub fn deliver(
                                 overlay,
                                 origin: if map.is_some() { 0.0 } else { output.start },
                                 join_tex: None,
+                                contrasts: ContrastPrefetch::default(),
                             };
                             let (mut part, mut encoder) = (Report::default(), String::new());
                             let mut seen = Streaming::new(tx, observe);
@@ -1240,6 +1276,7 @@ pub fn deliver(
             let mut done = 0;
             let mut judge = Judge::new(checks.flash_on());
             video.stage.seek(spec.start_number as u32);
+            video.prepare_contrasts(&times);
             video.run(&times, &mut report, &mut judge, |b| {
                 done += 1;
                 progress(done, n);
@@ -1665,6 +1702,50 @@ fn write_sidecars(
 /// Most with/without renders spent measuring one text's contrast.
 const CONTRAST_PROBES: usize = 32;
 
+/// Predictions only save work: the final schedule still comes from rendered observations.
+#[derive(Default)]
+struct ContrastPrefetch {
+    planned: std::collections::BTreeMap<u64, Vec<sr_gpu::ContrastTarget>>,
+    measured: std::collections::BTreeMap<(u64, sr_gpu::ContrastTarget), Option<f64>>,
+}
+
+impl ContrastPrefetch {
+    fn prepare(
+        &mut self,
+        times: &[f64],
+        predicted: std::collections::BTreeMap<sr_gpu::ContrastTarget, Vec<(usize, f64)>>,
+    ) {
+        self.planned.clear();
+        self.measured.clear();
+        for (k, targets) in contrast_schedule(predicted) {
+            self.planned.entry(times[k].to_bits()).or_default().extend(targets.into_iter().map(|(id, _)| id));
+        }
+    }
+
+    fn resolve(
+        &mut self,
+        time: f64,
+        targets: &[sr_gpu::ContrastTarget],
+        mut fallback: impl FnMut(&[sr_gpu::ContrastTarget]) -> Vec<Option<f64>>,
+    ) -> Vec<Option<f64>> {
+        let missing: Vec<_> = targets
+            .iter()
+            .filter(|id| !self.measured.contains_key(&(time.to_bits(), (*id).clone())))
+            .cloned()
+            .collect();
+        let mut found = if missing.is_empty() { Vec::new() } else { fallback(&missing) }.into_iter();
+        targets
+            .iter()
+            .map(|id| {
+                self.measured
+                    .get(&(time.to_bits(), id.clone()))
+                    .copied()
+                    .unwrap_or_else(|| found.next().expect("one contrast result per missing target"))
+            })
+            .collect()
+    }
+}
+
 /// The frames to measure a text's contrast at, of the (frame, opacity) it was seen in: those where it is at
 /// its most visible, all of them up to [`CONTRAST_PROBES`], else that many spread evenly from the first to
 /// the last, so a title held for minutes does not render every one of its frames twice more.
@@ -1677,9 +1758,103 @@ fn probe_frames(seen: &[(usize, f64)]) -> Vec<(usize, f64)> {
     (0..CONTRAST_PROBES).map(|i| at_top[i * (at_top.len() - 1) / (CONTRAST_PROBES - 1)]).collect()
 }
 
+/// The same selected observations, grouped in time order without dropping any target.
+fn contrast_schedule(
+    unprobed: std::collections::BTreeMap<sr_gpu::ContrastTarget, Vec<(usize, f64)>>,
+) -> std::collections::BTreeMap<usize, Vec<(sr_gpu::ContrastTarget, f64)>> {
+    let mut schedule = std::collections::BTreeMap::<_, Vec<_>>::new();
+    for (id, seen) in unprobed {
+        for (frame, opacity) in probe_frames(&seen) {
+            schedule.entry(frame).or_default().push((id.clone(), opacity));
+        }
+    }
+    schedule
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prefetched_contrast_only_reuses_exact_selected_samples() {
+        use sr_gpu::ContrastTarget::Node;
+        let (a, b, hidden, extra) = (Node("a".into()), Node("b".into()), Node("hidden".into()), Node("extra".into()));
+        let time = 0.5_f64;
+        let mut cache = ContrastPrefetch::default();
+        cache.measured.insert((time.to_bits(), a.clone()), Some(3.0));
+        cache.measured.insert((time.to_bits(), hidden.clone()), None);
+        cache.measured.insert((time.to_bits(), extra), Some(1.0));
+        cache.measured.insert(((time + 0.01).to_bits(), b.clone()), Some(9.0));
+        let mut requested = Vec::new();
+        let ratios = cache.resolve(time, &[b.clone(), hidden, a], |missing| {
+            requested = missing.to_vec();
+            vec![Some(5.0); missing.len()]
+        });
+        assert_eq!(requested, vec![b], "only an absent exact sample needs a fallback");
+        assert_eq!(ratios, vec![Some(5.0), None, Some(3.0)]);
+        assert!(cache.resolve(time, &[], |_| panic!("no selected targets")).is_empty());
+    }
+
+    #[test]
+    fn contrast_predictions_reset_between_outputs_and_never_replace_actual_selection() {
+        use sr_gpu::ContrastTarget::Node;
+        let id = Node("title".into());
+        let times: Vec<_> = (0..100).map(|k| k as f64 / 30.0).collect();
+        let predicted: Vec<_> = (0..100).map(|k| (k, if k < 10 { 0.5 } else { 1.0 })).collect();
+        let mut cache = ContrastPrefetch::default();
+        cache.prepare(&times, std::collections::BTreeMap::from([(id.clone(), predicted.clone())]));
+        let planned: Vec<_> = times
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| cache.planned.contains_key(&t.to_bits()))
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(planned, probe_frames(&predicted).iter().map(|&(k, _)| k).collect::<Vec<_>>());
+        for &k in &planned {
+            cache.measured.insert((times[k].to_bits(), id.clone()), Some(2.0));
+        }
+        // Actual visibility peaks on a different frame: predictions cannot suppress it.
+        let actual = contrast_schedule(std::collections::BTreeMap::from([(id.clone(), vec![(0, 1.0), (10, 0.5)])]));
+        let mut calls = 0;
+        for (k, targets) in actual {
+            let ids: Vec<_> = targets.into_iter().map(|(id, _)| id).collect();
+            assert_eq!(
+                cache.resolve(times[k], &ids, |_| {
+                    calls += 1;
+                    vec![Some(1.0)]
+                }),
+                vec![Some(1.0)]
+            );
+        }
+        assert_eq!(calls, 1);
+        cache.prepare(&times, Default::default());
+        assert!(cache.planned.is_empty() && cache.measured.is_empty());
+        assert_eq!(cache.resolve(times[10], &[id], |_| vec![Some(7.0)]), vec![Some(7.0)]);
+    }
+
+    #[test]
+    fn contrast_schedule_preserves_every_selected_observation_in_time_order() {
+        use sr_gpu::ContrastTarget;
+        let observations = std::collections::BTreeMap::from([
+            (ContrastTarget::Node("late".into()), (100..300).map(|k| (k, 1.0)).collect()),
+            (ContrastTarget::Node("early".into()), (0..160).map(|k| (k, (k as f64 / 20.0).min(1.0))).collect()),
+            (ContrastTarget::Captions, vec![(0, 1.0), (100, 1.0), (299, 1.0)]),
+        ]);
+        let schedule = contrast_schedule(observations.clone());
+        let frames: Vec<_> = schedule.keys().copied().collect();
+        assert!(frames.windows(2).all(|w| w[0] < w[1]));
+        assert!(schedule[&100].contains(&(ContrastTarget::Node("late".into()), 1.0)));
+        assert!(schedule[&100].contains(&(ContrastTarget::Captions, 1.0)));
+        for (id, seen) in observations {
+            let actual: Vec<_> = schedule
+                .iter()
+                .flat_map(|(&k, targets)| {
+                    targets.iter().filter(|(target, _)| *target == id).map(move |(_, opacity)| (k, *opacity))
+                })
+                .collect();
+            assert_eq!(actual, probe_frames(&seen));
+        }
+    }
 
     #[test]
     fn a_held_title_is_probed_a_bounded_number_of_times() {

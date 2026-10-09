@@ -23,7 +23,7 @@ struct Frame {
     post: vec4<f32>,
     // focal length (px), encode sRGB, ambient occlusion on, unused
     lens: vec4<f32>,
-    // ambient-occlusion radius (scene units), intensity, screen-space reflections on, unused
+    // ambient-occlusion radius (scene units), intensity, screen-space reflections on, precomputed circle of confusion
     fx: vec4<f32>,
     sh: array<vec4<f32>, 9>,
     // world → environment rotation of the dome

@@ -80,6 +80,16 @@ const TURNING: &[&str] = &[
 /// sharp rather than failing to allocate.
 const MOTION_BLUR_BUDGET: u64 = 8 << 30;
 
+/// Retained accumulations are separate from the transient budget of a frame.
+pub(super) const MOTION_BLUR_CACHE_BUDGET: u64 = 256 << 20;
+
+pub(super) struct MotionBlurCache {
+    hash: u64,
+    pub(super) texture: Arc<Tex>,
+    charge: u64,
+    pub(super) used: u64,
+}
+
 /// Effects whose reach is the whole frame (they draw light or pull pixels from far away).
 const UNBOUNDED: &[&str] = &[
     "lens-flare",
@@ -1428,14 +1438,92 @@ impl Renderer {
         // or the accumulator, one sample and each sample's vector raster. Past the budget a frame of many blurred
         // full-frame nodes would exhaust video memory, so the rest draw sharp
         let texture = size[0] as u64 * size[1] as u64 * 8;
+        // Plain shapes have no external image state or effect history. Key every
+        // shutter sample, including inherited opacity and referenced paints. A
+        // contrast counterfactual elsewhere in the frame then leaves this work reusable.
+        let cache_hash = (self.fx_cache && Self::cacheable_blur_shape(ctx, i))
+            .then(|| {
+                let mut words = vec![
+                    Self::node_hash(ctx, n, &space.xform.then(&n.world)),
+                    hf(n.world_opacity),
+                    hf(iso_op),
+                    hf(space.unit),
+                    h(&rect.map(hf)),
+                    space.size[0] as u64,
+                    space.size[1] as u64,
+                ];
+                for &t in &times {
+                    let sg = sub.at(t);
+                    let &j = sg.index.get(&n.id)?;
+                    let sc = ctx.at(&sg);
+                    if !Self::cacheable_blur_shape(&sc, j) {
+                        return None;
+                    }
+                    let sn = &sg.g.nodes[j];
+                    words.extend([
+                        Self::node_hash(&sc, sn, &space.xform.then(&sn.world)),
+                        hf(sn.world_opacity),
+                        Self::used_hash(&sc, j, &space.xform),
+                    ]);
+                }
+                Some(h(&words))
+            })
+            .flatten();
+        // The root prefix also needs the shutter's content identity. The main
+        // frame time alone is unchanged during contrast counterfactual renders.
+        let root_hash = cache_hash.map(|hash| h(&[root_hash, hash])).unwrap_or(root_hash);
+        if let Some(hash) = cache_hash {
+            if let Some(cached) = self.motion_cache.get_mut(&n.id).filter(|c| c.hash == hash) {
+                if !Self::blur_budget(plan, cached.charge) {
+                    return false;
+                }
+                cached.used = self.cache_frame;
+                plan.blur_bytes += cached.charge;
+                plan.stats.cache_hits += 1;
+                let acc = cached.texture.clone();
+                self.draw_accumulated(plan, ctx, i, space, rect, acc, cmds, root_hash);
+                return true;
+            }
+        }
         if !Self::blur_budget(plan, 2 * texture) {
             return false;
+        }
+        // Unsized, childless controllers have no own ink. Prove that this stays
+        // true at every shutter sample before omitting their transparent passes.
+        // Preserve the original transient budget charge so later nodes keep the
+        // same blur admission and diagnostics.
+        let empty_control = |c: &Ctx, k: usize| {
+            let node = &c.g.nodes[k];
+            matches!(node.kind, "group" | "camera")
+                && node.size.is_none()
+                && c.kids[k].is_empty()
+                && node.matte.is_none()
+                && !node.is_matte
+                && !node.clip
+                && self.blend_of(node) == 0
+                && effect_ids(&*node.elem).is_empty()
+                && sr_model::element::children(&*node.elem).iter().all(|child| {
+                    matches!(child.element_name(), "animate" | "expression" | "motionPath" | "transformConstraint")
+                })
+        };
+        if empty_control(ctx, i)
+            && times.iter().all(|&t| {
+                let sample = sub.at(t);
+                sample.index.get(&n.id).is_some_and(|&k| empty_control(&ctx.at(&sample), k))
+            })
+        {
+            if !Self::blur_budget(plan, (count as u64 + 2) * texture) {
+                return false;
+            }
+            plan.blur_bytes += (count as u64 + 2) * texture;
+            return true;
         }
         let inner = Space {
             xform: Affine([1.0, 0.0, 0.0, 1.0, -rect[0], -rect[1]]).then(&space.xform),
             size,
             unit: space.unit,
         };
+        let diagnostics = (plan.stats.errors.len(), plan.stats.unsupported.len());
         let acc = self.temp(plan, size);
         if let Some((reference, origin, w_ref)) = self.rigid_reference(plan, ctx, i, space, iso_op, &times) {
             // one drawing, moved to where each sample has the node: render once, accumulate moved copies
@@ -1455,6 +1543,7 @@ impl Renderer {
                 (std::mem::take(&mut b.passes), std::mem::take(&mut b.temps), std::mem::take(&mut b.problems));
             Self::finish_builder(plan, passes, temps, problems, &n.id);
             plan.blur_bytes += 2 * texture;
+            self.cache_motion_blur(plan, n, cache_hash, &acc, 2 * texture, diagnostics);
             self.draw_accumulated(plan, ctx, i, space, rect, acc, cmds, root_hash);
             return true;
         }
@@ -1486,8 +1575,63 @@ impl Renderer {
             Self::finish_builder(plan, passes, temps, problems, &n.id);
             first_pass = false;
         }
+        self.cache_motion_blur(plan, n, cache_hash, &acc, (count as u64 + 2) * texture, diagnostics);
         self.draw_accumulated(plan, ctx, i, space, rect, acc, cmds, root_hash);
         true
+    }
+
+    /// Keep one accumulation per node, subject to a total byte limit. Do not hide
+    /// diagnostics that would otherwise be emitted when the node is rendered again.
+    fn cache_motion_blur(
+        &mut self,
+        plan: &Plan,
+        n: &FrameNode,
+        hash: Option<u64>,
+        texture: &Arc<Tex>,
+        charge: u64,
+        diagnostics: (usize, usize),
+    ) {
+        let Some(hash) = hash else { return };
+        if diagnostics != (plan.stats.errors.len(), plan.stats.unsupported.len()) {
+            return;
+        }
+        if let Some(old) = self.motion_cache.remove(&n.id) {
+            self.pool.put(old.texture);
+        }
+        let bytes = |t: &Tex| t.size[0] as u64 * t.size[1] as u64 * 8;
+        let requested = bytes(texture);
+        if requested > self.motion_cache_budget {
+            return;
+        }
+        let mut held: u64 = self.motion_cache.values().map(|c| bytes(&c.texture)).sum();
+        while held + requested > self.motion_cache_budget {
+            let Some(id) = self
+                .motion_cache
+                .iter()
+                .min_by(|(aid, a), (bid, b)| (a.used, aid.as_ref()).cmp(&(b.used, bid.as_ref())))
+                .map(|(id, _)| id.clone())
+            else {
+                break;
+            };
+            let old = self.motion_cache.remove(&id).unwrap();
+            held -= bytes(&old.texture);
+            self.pool.put(old.texture);
+        }
+        self.motion_cache
+            .insert(n.id.clone(), MotionBlurCache { hash, texture: texture.clone(), charge, used: self.cache_frame });
+    }
+
+    fn cacheable_blur_shape(ctx: &Ctx, i: usize) -> bool {
+        let n = &ctx.g.nodes[i];
+        n.kind == "shape"
+            && ctx.kids[i].is_empty()
+            && n.three_d.is_none()
+            && n.matte.is_none()
+            && !n.is_matte
+            && effect_ids(&*n.elem).is_empty()
+            && sr_model::element::children(&*n.elem)
+                .iter()
+                .all(|c| matches!(c.element_name(), "animate" | "expression" | "motionPath" | "rigidBody"))
     }
 
     /// Whether `bytes` more of motion blur fit in the frame's budget; reports it once when they do not.
@@ -2045,5 +2189,60 @@ impl Renderer {
             plan.post = labelled(fx::fuse_colour(passes), "finishing");
             plan.post_out = Some(cur);
         }
+    }
+}
+
+#[cfg(test)]
+mod motion_cache_tests {
+    use super::*;
+
+    #[test]
+    fn retained_motion_textures_respect_budget_and_recent_use() {
+        let gpu = match crate::gpu::test_gpu() {
+            Ok(gpu) => gpu,
+            Err(error) => {
+                assert!(std::env::var("SR_REQUIRE_GPU").as_deref() != Ok("1"), "{error}");
+                return;
+            }
+        };
+        let document = sr_model::load_str(
+            r##"<scene version="1.1"><project width="32" height="32" fps="10" duration="1"/>
+                <composition><shape id="a" shape="rect" width="8" height="8" fill="#FFFFFF"/>
+                <shape id="b" shape="rect" width="8" height="8" fill="#FFFFFF"/>
+                <shape id="c" shape="rect" width="8" height="8" fill="#FFFFFF"/>
+                <shape id="d" shape="rect" width="8" height="8" fill="#FFFFFF"/></composition></scene>"##,
+            &sr_model::LoadOptions::default(),
+        )
+        .unwrap();
+        let ev = sr_eval::Evaluator::new(&document, &Default::default()).unwrap();
+        let frame = ev.evaluate(0.0);
+        let node = |id: &str| frame.nodes.iter().find(|n| &*n.id == id).unwrap();
+        let mut renderer = Renderer::new(gpu, ev.program());
+        renderer.motion_cache_budget = 2 * 32 * 32 * 8;
+        let mut plan = Plan::default();
+        for (at, id) in ["a", "b", "c"].into_iter().enumerate() {
+            renderer.cache_frame = at as u64;
+            let texture = renderer.pool.get(&renderer.gpu.device, &renderer.bgl1, [32, 32]);
+            renderer.cache_motion_blur(&plan, node(id), Some(at as u64), &texture, 2 * 32 * 32 * 8, (0, 0));
+        }
+        assert_eq!(renderer.motion_cache.len(), 2);
+        assert!(!renderer.motion_cache.contains_key("a"), "oldest entry is evicted");
+        renderer.motion_cache.get_mut("b").unwrap().used = 3;
+        renderer.cache_frame = 4;
+        let texture = renderer.pool.get(&renderer.gpu.device, &renderer.bgl1, [32, 32]);
+        renderer.cache_motion_blur(&plan, node("d"), Some(4), &texture, 2 * 32 * 32 * 8, (0, 0));
+        assert!(renderer.motion_cache.contains_key("b"), "recent hit remains resident");
+        assert!(!renderer.motion_cache.contains_key("c"));
+        assert!(renderer.motion_cache.contains_key("d"));
+        let held: u64 =
+            renderer.motion_cache.values().map(|c| c.texture.size[0] as u64 * c.texture.size[1] as u64 * 8).sum();
+        assert_eq!(held, renderer.motion_cache_budget);
+        let oversized = renderer.pool.get(&renderer.gpu.device, &renderer.bgl1, [64, 64]);
+        renderer.cache_motion_blur(&plan, node("a"), Some(5), &oversized, 2 * 64 * 64 * 8, (0, 0));
+        assert!(!renderer.motion_cache.contains_key("a"), "oversized texture is never retained");
+        assert_eq!(renderer.motion_cache.len(), 2);
+        plan.stats.unsupported.push("diagnostic from rendering this shape".into());
+        renderer.cache_motion_blur(&plan, node("a"), Some(6), &texture, 2 * 32 * 32 * 8, (0, 0));
+        assert!(!renderer.motion_cache.contains_key("a"), "cache must not suppress a render diagnostic");
     }
 }

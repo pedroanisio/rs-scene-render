@@ -6,6 +6,7 @@
 @group(0) @binding(3) var post_smp: sampler;
 // dilated per-tile maximum circle of confusion (depth of field)
 @group(0) @binding(4) var post_tiles: texture_2d<f32>;
+@group(0) @binding(5) var<uniform> aperture: array<vec4<f32>, 128>;
 
 const DOF_TILE: i32 = 16;
 
@@ -36,16 +37,10 @@ fn fs_under(i: PostOut) -> @location(0) vec4<f32> {
     return a + b * (1.0 - a.a);
 }
 
-fn lin_depth(d: f32) -> f32 {
-    // reverse-Z perspective: d = n(f − z)/(z(f − n))  ⇒  z = n f / (d (f − n) + n)
-    let n = pfr.post.z;
-    let f = pfr.post.w;
-    return n * f / (d * (f - n) + n);
-}
-
-fn coc(d: f32) -> f32 {
-    let z = lin_depth(d);
-    return min(pfr.dof.x * abs(1.0 / pfr.dof.y - 1.0 / max(z, 1e-3)), pfr.dof.z);
+// The paired 32-bit depth target retains the original CoC without rounding.
+fn sample_coc(d: vec4<f32>) -> f32 {
+    if (pfr.fx.w > 0.5) { return d.g; }
+    return coc(d.r);
 }
 
 fn srgb_encode(v: vec3<f32>) -> vec3<f32> {
@@ -62,6 +57,11 @@ fn finish(c: vec4<f32>, exposure: f32, encode: bool) -> vec4<f32> {
     return vec4(rgb, c.a);
 }
 
+// The second tile channel holds a proved common radius, or -1 when nonuniform.
+fn uniform_coc(tile: vec4<f32>, center: f32, search: f32) -> bool {
+    return pfr.fx.w > 0.5 && center == search && tile.g == search;
+}
+
 // Depth of field (gather with polygonal blades), lens distortion and exposure.
 @fragment
 fn fs_dof(i: PostOut) -> @location(0) vec4<f32> {
@@ -75,39 +75,42 @@ fn fs_dof(i: PostOut) -> @location(0) vec4<f32> {
     let exposure = pfr.params.x;
     let encode = pfr.lens.y > 0.5;
     let dq = vec2<i32>(clamp(uv * dims, vec2(0.0), dims - 1.0));
-    let d0 = textureLoad(post_depth, dq, 0).r;
-    let r0 = select(0.0, coc(d0), pfr.post.y > 0.5 && d0 > 0.0);
+    let depth0 = textureLoad(post_depth, dq, 0);
+    let d0 = depth0.r;
+    let r0 = select(0.0, sample_coc(depth0), pfr.post.y > 0.5 && d0 > 0.0);
     var center = textureSampleLevel(post_src, post_smp, uv, 0.0);
     // how far any blur around this pixel reaches (the dilated tile maximum)
     let tdims = vec2<i32>(textureDimensions(post_tiles));
-    let search = max(textureLoad(post_tiles, min(dq / DOF_TILE, tdims - 1), 0).r, r0);
+    let tile = textureLoad(post_tiles, min(dq / DOF_TILE, tdims - 1), 0);
+    let search = max(tile.r, r0);
+    let same_reach = uniform_coc(tile, r0, search);
     if (pfr.post.y < 0.5 || search < 0.5) { return finish(center, exposure, encode); }
     // scatter-as-gather: a sample contributes when its own CoC reaches this pixel
     var acc = center;
     var wsum = 1.0;
     let rmax = search;
-    let blades = pfr.dof.w;
     let rings = clamp(i32(ceil(search / 3.0)), 1, 4);
     for (var ring = 1; ring <= rings; ring++) {
         let rr = f32(ring) / f32(rings) * rmax;
         let cnt = ring * 8;
+        let ring_weight = smoothstep(rr - 1.0, rr + 1.0, r0);
         for (var k = 0; k < cnt; k++) {
-            let a = f32(k) / f32(cnt) * 2.0 * PI;
-            var sc = 1.0;
-            if (blades >= 3.0) {
-                let seg = 2.0 * PI / blades;
-                let local = a - seg * floor(a / seg) - seg * 0.5;
-                sc = cos(seg * 0.5) / cos(local);
-            }
-            let o = vec2(cos(a), sin(a)) * rr * sc;
+            let tap = aperture[(ring - 1) * 32 + k];
+            let o = tap.xy * rr * tap.z;
             let suv = uv + o / dims;
-            let q = vec2<i32>(clamp(suv * dims, vec2(0.0), dims - 1.0));
-            let ds = textureLoad(post_depth, q, 0).r;
-            let rs = select(0.0, coc(ds), ds > 0.0);
-            // background samples only spread as far as the centre's own blur
-            let reach = select(min(rs, r0), rs, ds >= d0);
-            let w = smoothstep(rr - 1.0, rr + 1.0, reach);
-            acc += textureSampleLevel(post_src, post_smp, suv, 0.0) * w;
+            var w = ring_weight;
+            if (!same_reach) {
+                let q = vec2<i32>(clamp(suv * dims, vec2(0.0), dims - 1.0));
+                let depth_s = textureLoad(post_depth, q, 0);
+                let ds = depth_s.r;
+                let rs = select(0.0, sample_coc(depth_s), ds > 0.0);
+                // Background samples only spread as far as the centre's own blur.
+                let reach = select(min(rs, r0), rs, ds >= d0);
+                w = smoothstep(rr - 1.0, rr + 1.0, reach);
+            }
+            if (w != 0.0) {
+                acc += textureSampleLevel(post_src, post_smp, suv, 0.0) * w;
+            }
             wsum += w;
         }
     }
@@ -115,34 +118,48 @@ fn fs_dof(i: PostOut) -> @location(0) vec4<f32> {
 }
 
 
-// Maximum circle of confusion of each 16 × 16 tile (one output pixel per tile).
+// Maximum and minimum circle of confusion of each 16 x 16 tile.
 @fragment
 fn fs_tile_max(i: PostOut) -> @location(0) vec4<f32> {
     let t = vec2<i32>(i.pos.xy);
     let dims = vec2<i32>(textureDimensions(post_depth));
     var m = 0.0;
+    var lo = pfr.dof.z;
     for (var y = 0; y < DOF_TILE; y++) {
         for (var x = 0; x < DOF_TILE; x++) {
-            let d = textureLoad(post_depth, min(t * DOF_TILE + vec2(x, y), dims - 1), 0).r;
-            if (d > 0.0) { m = max(m, coc(d)); }
+            let d = textureLoad(post_depth, min(t * DOF_TILE + vec2(x, y), dims - 1), 0);
+            if (d.r > 0.0) {
+                let radius = sample_coc(d);
+                m = max(m, radius);
+                lo = min(lo, radius);
+            } else {
+                lo = 0.0;
+            }
         }
     }
-    return vec4(m, 0.0, 0.0, 1.0);
+    return vec4(m, lo, 0.0, 1.0);
 }
 
-// Spreads each tile's maximum over the tiles its blur can reach.
+// Preserve the original maximum neighborhood. Prove uniformity over a larger
+// region so rounding at aperture and pixel boundaries cannot admit a false match.
 @fragment
 fn fs_tile_dilate(i: PostOut) -> @location(0) vec4<f32> {
     let t = vec2<i32>(i.pos.xy);
     let dims = vec2<i32>(textureDimensions(post_depth));
     let reach = i32(ceil(pfr.dof.z / f32(DOF_TILE)));
+    let min_reach = select(reach, i32(ceil((pfr.dof.z + 2.0) / f32(DOF_TILE))), pfr.fx.w > 0.5);
     var m = 0.0;
-    for (var y = -reach; y <= reach; y++) {
-        for (var x = -reach; x <= reach; x++) {
-            m = max(m, textureLoad(post_depth, clamp(t + vec2(x, y), vec2(0), dims - 1), 0).r);
+    var lo = pfr.dof.z;
+    var hi = 0.0;
+    for (var y = -min_reach; y <= min_reach; y++) {
+        for (var x = -min_reach; x <= min_reach; x++) {
+            let tile = textureLoad(post_depth, clamp(t + vec2(x, y), vec2(0), dims - 1), 0);
+            if (abs(x) <= reach && abs(y) <= reach) { m = max(m, tile.r); }
+            lo = min(lo, tile.g);
+            hi = max(hi, tile.r);
         }
     }
-    return vec4(m, 0.0, 0.0, 1.0);
+    return vec4(m, select(-1.0, lo, lo == hi), 0.0, 1.0);
 }
 
 // ---------------------------------------------------------------- screen-space ambient occlusion

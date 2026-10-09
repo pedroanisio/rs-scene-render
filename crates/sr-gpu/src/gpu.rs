@@ -479,7 +479,7 @@ impl Gpu {
         let renderable = |f: wgpu::TextureFormat| {
             adapter.get_texture_format_features(f).allowed_usages.contains(wgpu::TextureUsages::RENDER_ATTACHMENT)
         };
-        let gbuffer_depth = [wgpu::TextureFormat::Rgba32Float, wgpu::TextureFormat::Rg32Float]
+        let gbuffer_depth = [wgpu::TextureFormat::Rg32Float, wgpu::TextureFormat::Rgba32Float]
             .into_iter()
             .find(|f| renderable(*f))
             .unwrap_or(wgpu::TextureFormat::Rgba16Float);

@@ -20,6 +20,132 @@ fn scene(project: &str, paints: &str, body: &str, effects: &str) -> sr_model::Do
 const WIDE: &str = r##"width="256" height="144" fps="60" duration="2" background="#00000000""##;
 const FRAME: u64 = 256 * 144;
 
+#[test]
+fn unchanged_shape_shutter_samples_reuse_the_accumulation() {
+    let Some(gpu) = gpu() else { return };
+    let d = scene(
+        r#"width="96" height="64" fps="30" duration="2" motionBlur="true" motionBlurSamples="4"
+            shutterPhase="0" shutterAngle="180" adaptiveMotionBlur="false""#,
+        "",
+        r##"<group id="g" opacity="0.7"><shape id="moving" shape="ellipse" x="8" y="8"
+            width="32" height="24" fill="#EE774488">
+            <animate property="x"><key time="0" value="8"/><key time="2" value="60"/></animate>
+        </shape></group>
+        <shape id="other" shape="rect" x="80" y="40" width="10" height="10" fill="#FFFFFF" motionBlur="off"/>"##,
+        "",
+    );
+    let ev = sr_eval::Evaluator::new(&d, &Default::default()).unwrap();
+    let g = ev.evaluate(0.5);
+    let mut renderer = sr_gpu::Renderer::new(gpu.clone(), ev.program());
+    let first = renderer.render_with(&g, ev.program(), Some(&mut |t| ev.evaluate(t)));
+    let pixels = renderer.read(&first.texture);
+    assert!(first.stats.fx_passes > 0);
+    let warm = renderer.render_with(&g, ev.program(), Some(&mut |t| ev.evaluate(t)));
+    assert_eq!(renderer.read(&warm.texture), pixels);
+    assert_eq!(warm.stats.fx_passes, 0, "identical shutter samples need no new accumulation passes");
+
+    // Changing a different shape invalidates the frame prefix but not this accumulation.
+    let mut changed = g.clone();
+    changed.nodes.iter_mut().find(|n| &*n.id == "other").unwrap().draw = false;
+    let warm = renderer.render_with(&changed, ev.program(), Some(&mut |t| ev.evaluate(t)));
+    assert_eq!(warm.stats.fx_passes, 0);
+    let mut fresh = sr_gpu::Renderer::new(gpu.clone(), ev.program());
+    let expected = fresh.render_with(&changed, ev.program(), Some(&mut |t| ev.evaluate(t)));
+    assert_eq!(renderer.read(&warm.texture), fresh.read(&expected.texture));
+
+    // The main frame and the first/last shutter samples are unchanged. An interior
+    // sample alone must invalidate the cache, including its inherited opacity.
+    for offset in [8.0, 0.0] {
+        let mut sample = |t: f64| {
+            let mut graph = ev.evaluate(t);
+            if t > 0.506 && t < 0.511 {
+                let n = graph.nodes.iter_mut().find(|n| &*n.id == "moving").unwrap();
+                n.world.0[4] += offset;
+                n.world_opacity *= if offset == 0.0 { 1.0 } else { 0.5 };
+            }
+            graph
+        };
+        let frame = renderer.render_with(&g, ev.program(), Some(&mut sample));
+        assert!(frame.stats.fx_passes > 0);
+        let mut fresh = sr_gpu::Renderer::new(gpu.clone(), ev.program());
+        let expected = fresh.render_with(&g, ev.program(), Some(&mut sample));
+        assert!(renderer.read(&frame.texture) == fresh.read(&expected.texture), "shutter offset {offset}");
+    }
+}
+
+#[test]
+fn motion_cache_tracks_paints_opacity_and_offscreen_samples() {
+    let Some(gpu) = gpu() else { return };
+    let d = scene(
+        r#"width="96" height="64" fps="30" duration="2" motionBlur="true" motionBlurSamples="4"
+            shutterPhase="0" shutterAngle="180" adaptiveMotionBlur="false""#,
+        GRADIENT,
+        r##"<group id="parent" opacity="0.7"><shape id="moving" shape="ellipse"
+            x="8" y="8" width="32" height="24" fill="url(#g)"/></group>"##,
+        "",
+    );
+    let ev = sr_eval::Evaluator::new(&d, &Default::default()).unwrap();
+    let main = ev.evaluate(0.2);
+    let mut renderer = sr_gpu::Renderer::new(gpu.clone(), ev.program());
+    let mut previous = None;
+    // Main-frame state is fixed. Each change exists only in the shutter samples.
+    // Gradient references stay constant while their resolved stops animate.
+    for (paint_shift, opacity, offset) in
+        [(0.0, 1.0, 0.0), (0.5, 1.0, 0.0), (0.5, 0.5, 0.0), (0.5, 0.5, -20.25), (0.5, 0.5, 42.75), (0.0, 1.0, 0.0)]
+    {
+        let mut sub = |t| {
+            let mut frame = ev.evaluate(t + paint_shift);
+            let node = frame.nodes.iter_mut().find(|n| &*n.id == "moving").unwrap();
+            node.world_opacity *= opacity;
+            node.world.0[4] += offset;
+            frame
+        };
+        let frame = renderer.render_with(&main, ev.program(), Some(&mut sub));
+        let actual = renderer.read(&frame.texture);
+        let mut fresh = sr_gpu::Renderer::new(gpu.clone(), ev.program());
+        let reference = fresh.render_with(&main, ev.program(), Some(&mut sub));
+        let expected = fresh.read(&reference.texture);
+        assert_eq!(actual, expected, "paint={paint_shift}, opacity={opacity}, offset={offset}");
+        assert_eq!(frame.stats.errors, reference.stats.errors);
+        assert_eq!(frame.stats.unsupported, reference.stats.unsupported);
+        if let Some(before) = previous.replace(expected) {
+            assert_ne!(actual, before, "the changed shutter state must affect the oracle");
+        }
+        let reused = renderer.render_with(&main, ev.program(), Some(&mut sub));
+        assert_eq!(renderer.read(&reused.texture), actual);
+        assert_eq!(reused.stats.fx_passes, 0, "repeating the complete shutter state reuses its accumulation");
+    }
+}
+
+#[test]
+fn zero_intensity_glow_keeps_combine_pixels_without_building_a_blur() {
+    let Some(gpu) = gpu() else { return };
+    for working in ["", r#"linearLight="false""#, r#"workingColorSpace="acescg""#] {
+        for kind in ["glow", "bloom", "halation"] {
+            let make = |intensity: &str| {
+                scene(
+                    &format!(r##"width="79" height="43" fps="10" duration="2" background="#00000000" {working}"##),
+                    "",
+                    r##"<group id="g" effects="fx">
+                    <shape id="a" shape="ellipse" x="2.3" y="4.7" width="61" height="29" fill="#CF583580"/>
+                    <shape id="b" shape="rect" x="21.8" y="13.2" width="45" height="25" fill="#FFFDBB"/>
+                </group>"##,
+                    &format!(r#"<effect id="fx" type="{kind}" radius="18" threshold="0.2" intensity="{intensity}"/>"#),
+                )
+            };
+            // A nonzero f64 that rounds to zero in the shader's f32 uniform keeps
+            // the full extraction/blur/combine path as an independent pixel oracle.
+            let reference = render_times_on(gpu.clone(), &make("1e-100"), &[0.0]).unwrap();
+            let zero = render_times_on(gpu.clone(), &make("0"), &[0.0]).unwrap();
+            assert!(reference.stats.fx_passes > 1);
+            assert_eq!(zero.px, reference.px, "{kind}, {working}");
+            assert_eq!(zero.stats.fx_passes, 1, "{kind}: only the original combine pass is needed");
+            assert!(zero.stats.unsupported.is_empty());
+            assert!(zero.stats.errors.is_empty());
+        }
+    }
+}
+
 /// A 32 px white square moving right at 120 px/s from x = 40, with `effects`.
 fn mover(effects_attr: &str) -> String {
     format!(
@@ -375,4 +501,45 @@ fn regression_film_grain_keeps_animating_under_cached_effects() {
     assert!(f[1].px == fresh.px, "effect cache froze the grain");
     assert!(f[2].px == f[1].px, "grain remains deterministic");
     assert_eq!(f[2].stats.fx_passes, 0, "same-time grain still reuses its effects");
+}
+
+#[test]
+fn empty_camera_controls_do_not_accumulate_transparent_frames() {
+    let Some(gpu) = gpu() else { return };
+    for kind in ["group", "camera"] {
+        let make = |motion: &str| {
+            scene(
+                &format!(
+                    r##"width="96" height="64" fps="30" duration="2" background="#234567"
+                motionBlur="{motion}" motionBlurSamples="4" adaptiveMotionBlur="false""##
+                ),
+                "",
+                &format!(
+                    r##"<shape id="mark" shape="ellipse" x="12" y="8" width="45" height="31"
+                fill="#ED634580" motionBlur="off"/>
+                <{kind} id="control" x="5">
+                    <animate property="x"><key time="0" value="5"/><key time="1" value="205"/></animate>
+                </{kind}>"##
+                ),
+                "",
+            )
+        };
+        let draw = |motion: &str| {
+            let document = make(motion);
+            let evaluator = sr_eval::Evaluator::new(&document, &Default::default()).unwrap();
+            let mut renderer = sr_gpu::Renderer::new(gpu.clone(), evaluator.program());
+            let frame = renderer.render_with(
+                &evaluator.evaluate(0.4),
+                evaluator.program(),
+                Some(&mut |time| evaluator.evaluate(time)),
+            );
+            (renderer.read(&frame.texture), frame.stats)
+        };
+        let (actual, stats) = draw("true");
+        let (reference, reference_stats) = draw("false");
+        assert_eq!(actual, reference, "{kind}: the controller has no own ink");
+        assert_eq!(stats.errors, reference_stats.errors);
+        assert_eq!(stats.unsupported, reference_stats.unsupported);
+        assert_eq!(stats.fx_passes, reference_stats.fx_passes, "empty camera controls need no accumulation passes");
+    }
 }
