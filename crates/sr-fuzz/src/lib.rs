@@ -398,28 +398,51 @@ pub struct Crash {
 thread_local! {
     /// Where the last panic on this thread happened, as `file:line:column`, while [`quiet_panics`] is the hook.
     static PANIC_AT: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    /// Whether [`guard`] is running on this thread.
+    static GUARDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// Where the first panic on a thread outside any [`guard`] happened since a guard last started. A
+/// worker thread (rayon's pool, a scoped thread) panics on its own thread, and the payload is
+/// re-raised on the guarding thread without its place; the place is kept here for the guard.
+static FOREIGN_PANIC_AT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 /// Keeps panic messages off the terminal and records where each panic happened, which [`guard`]
-/// adds to the message of its crash (`... at file:line:column`).
+/// adds to the message of its crash (`... at file:line:column`), also when the panic happened on a
+/// worker thread and was re-raised on the guarding one.
 pub fn quiet_panics() {
     std::panic::set_hook(Box::new(|info| {
-        let at = info.location().map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()));
-        PANIC_AT.with(|p| *p.borrow_mut() = at);
+        let Some(at) = info.location().map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column())) else {
+            return;
+        };
+        if GUARDING.with(|g| g.get()) {
+            PANIC_AT.with(|p| *p.borrow_mut() = Some(at));
+        } else {
+            FOREIGN_PANIC_AT.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert(at);
+        }
     }));
 }
 
 /// Runs `f(input)`, turning a panic into a [`Crash`]; under [`quiet_panics`] its message ends with
-/// the place that panicked.
+/// the place that panicked. When the panic came from another thread, the place is the first panic
+/// outside a guard since this guard started: exact for one guard at a time, which is how the
+/// fuzzer runs.
 pub fn guard(target: &'static str, input: &str, f: fn(&str)) -> Option<Crash> {
     PANIC_AT.with(|p| *p.borrow_mut() = None);
-    catch_unwind(AssertUnwindSafe(|| f(input))).err().map(|e| {
+    FOREIGN_PANIC_AT.lock().unwrap_or_else(|e| e.into_inner()).take();
+    GUARDING.with(|g| g.set(true));
+    let result = catch_unwind(AssertUnwindSafe(|| f(input)));
+    GUARDING.with(|g| g.set(false));
+    result.err().map(|e| {
         let mut message = e
             .downcast_ref::<String>()
             .cloned()
             .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
             .unwrap_or_default();
-        if let Some(at) = PANIC_AT.with(|p| p.borrow_mut().take()) {
+        let at = PANIC_AT
+            .with(|p| p.borrow_mut().take())
+            .or_else(|| FOREIGN_PANIC_AT.lock().unwrap_or_else(|e| e.into_inner()).take());
+        if let Some(at) = at {
             message = format!("{message} at {at}");
         }
         Crash { target, input: input.to_string(), message }
