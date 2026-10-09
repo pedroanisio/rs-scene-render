@@ -108,6 +108,7 @@ fn build(p: &Program, n: &FrameNode) -> Result<Runtime, String> {
             _ => sim::Boundary::Closed,
         },
         order: if text(e, "order").as_deref() == Some("2") { sim::Order::Second } else { sim::Order::First },
+        sponge_cells: 16,
         max_bytes: bytes("maxMemoryMiB", 256.)?,
         checkpoint_bytes: bytes("checkpointMemoryMiB", 64.)?,
         max_work: f("maxWork", 100_000_000.) as u64,

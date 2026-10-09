@@ -1,4 +1,4 @@
-use super::{Boundary, Error, Order, Spec, Q};
+use super::{Boundary, Error, Order, Spec, Sponge, Q};
 use rayon::prelude::*;
 
 /// To whom the bed variation of a column belongs: the owner with the largest lift there, and that lift,
@@ -433,6 +433,7 @@ fn drag(spec: &Spec, q: &mut [Q], decay: f64) {
 pub(super) fn step(
     spec: &Spec,
     bed: &[f64],
+    sponge: Option<&Sponge>,
     q: &mut Vec<Q>,
     dt: f64,
     mut sink: Option<&mut Sink<'_>>,
@@ -441,11 +442,17 @@ pub(super) fn step(
     match spec.order {
         Order::First => {
             *q = euler(spec, bed, q, dt, (-spec.damping * dt).exp(), sink.map(|s| (s, 1.0)))?;
+            if let Some(sponge) = sponge {
+                sponge.relax(spec, bed, q, dt);
+            }
         }
         Order::Second => {
-            // Strang splitting of drag around SSP-RK2 (Heun).
+            // Strang splitting of drag and sponge around SSP-RK2 (Heun).
             let half = (-0.5 * spec.damping * dt).exp();
             let mut next = q.clone();
+            if let Some(sponge) = sponge {
+                sponge.relax(spec, bed, &mut next, 0.5 * dt);
+            }
             drag(spec, &mut next, half);
             // the step is the mean of the state and the second stage: each stage's change counts for half
             let stage = {
@@ -465,6 +472,9 @@ pub(super) fn step(
                 q.iter_mut().zip(next.iter().zip(stage.iter())).for_each(combine);
             }
             drag(spec, q, half);
+            if let Some(sponge) = sponge {
+                sponge.relax(spec, bed, q, 0.5 * dt);
+            }
         }
     }
     Ok(())

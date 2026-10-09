@@ -309,7 +309,7 @@ impl Whitewater {
                 continue;
             }
             match self.grid.boundary {
-                Boundary::Open => return Ok(false),
+                Boundary::Open | Boundary::Absorbing => return Ok(false),
                 Boundary::Periodic => p.position[xyz] = self.grid.origin[a] + q.rem_euclid(size),
                 Boundary::Closed => {
                     let r = q.rem_euclid(2. * size);

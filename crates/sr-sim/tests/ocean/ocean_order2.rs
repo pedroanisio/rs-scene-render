@@ -437,3 +437,113 @@ fn the_work_a_seek_is_charged_is_the_documented_work_per_cell_and_substep() {
         assert_eq!(work, substeps * n * per_cell, "{order:?}");
     }
 }
+
+/// Rms surface disturbance over the interior (outside the sponge) after a
+/// positive-mass Gaussian hump, released at the centre of a square domain, has
+/// radiated away, relative to the same rms at time zero. A reference run in a
+/// large closed domain, where waves never leave, would hold the free-space wake;
+/// the point of an absorbing edge is that no lingering level offset or sloshing
+/// is left, which the zero-gradient edge cannot guarantee.
+fn residual(boundary: Boundary, order: Order, times: &[f64]) -> Vec<f64> {
+    let (n, sponge, h, g, a0, sigma) = (96_usize, 16_usize, 2.0, 1.0, 0.05, 4.0);
+    let spec = Spec {
+        cells: [n, n],
+        origin: [-(n as f64) / 2.0, -(n as f64) / 2.0],
+        cell_size: 1.0,
+        dt: 0.25,
+        gravity: g,
+        boundary,
+        order,
+        sponge_cells: sponge,
+        max_work: 1 << 40,
+        ..Default::default()
+    };
+    let cells: Vec<_> = (0..n * n)
+        .map(|i| {
+            let (x, z) = ((i % n) as f64 + 0.5 - 48.0, (i / n) as f64 + 0.5 - 48.0);
+            Cell { depth: h + a0 * (-(x * x + z * z) / (2.0 * sigma * sigma)).exp(), velocity: [0.0; 2] }
+        })
+        .collect();
+    let interior_rms = |cells: &[Cell]| {
+        let mut sum = 0.0;
+        for z in sponge..n - sponge {
+            for x in sponge..n - sponge {
+                sum += (cells[z * n + x].depth - h).powi(2);
+            }
+        }
+        (sum / ((n - 2 * sponge) as f64).powi(2)).sqrt()
+    };
+    let initial = interior_rms(&cells);
+    let mut ocean = Ocean::new(spec, vec![h; n * n], cells, vec![]).unwrap();
+    times.iter().map(|&t| interior_rms(&ocean.at(t).unwrap().cells) / initial).collect()
+}
+
+/// The hump's pulse leaves the 32-cell interior half width in about 23 s at
+/// sqrt(g*h) = 1.41 cells/s. Measured relative rms at 60 s and 120 s:
+/// closed 0.23/0.12, open 0.045/0.016, absorbing 0.014/0.0013 (both orders).
+/// Plane pulses are a poorer test: normally incident ones leave the open edge
+/// almost untouched (about 0% in one dimension, 3-7% against free space for a
+/// finite beam), so the boundaries differ in what they leave behind.
+#[test]
+fn absorbing_boundary_leaves_less_behind_than_the_open_boundary() {
+    let times = [60.0, 120.0];
+    let closed = residual(Boundary::Closed, Order::First, &times);
+    let open = residual(Boundary::Open, Order::First, &times);
+    let first = residual(Boundary::Absorbing, Order::First, &times);
+    let second = residual(Boundary::Absorbing, Order::Second, &times);
+    println!("RESIDUAL closed={closed:.4?} open={open:.4?} absorbing1={first:.4?} absorbing2={second:.4?}");
+    for i in 0..2 {
+        assert!(first[i] < 0.05 && second[i] < 0.05, "t={}: absorbing {first:?} {second:?}", times[i]);
+        assert!(open[i] > 2.0 * first[i].max(second[i]), "t={}: open {open:?}", times[i]);
+        assert!(closed[i] > 0.1, "t={}: closed {closed:?}", times[i]);
+    }
+}
+
+#[test]
+fn absorbing_boundary_leaves_a_uniform_current_untouched() {
+    for order in ORDERS {
+        let mut s = spec([40, 40], order);
+        s.boundary = Boundary::Absorbing;
+        s.sponge_cells = 8;
+        let initial = vec![Cell { depth: 2.0, velocity: [0.3, -0.1] }; 1600];
+        let mut ocean = Ocean::new(s, vec![2.0; 1600], initial.clone(), vec![]).unwrap();
+        for (a, b) in ocean.at(3.0).unwrap().cells.iter().zip(&initial) {
+            assert!((a.depth - b.depth).abs() < 1e-12 && (a.velocity[0] - 0.3).abs() < 1e-12, "{order:?}: {a:?}");
+        }
+    }
+}
+
+#[test]
+fn sponge_state_counts_against_resident_memory_but_not_checkpoints() {
+    let n = 40 * 40;
+    let cells = vec![Cell { depth: 2.0, velocity: [0.0; 2] }; n];
+    let make = |boundary, max_bytes| {
+        let mut s = spec([40, 40], Order::First);
+        s.boundary = boundary;
+        s.sponge_cells = 8;
+        s.max_bytes = max_bytes;
+        Ocean::new(s, vec![2.0; n], cells.clone(), vec![])
+    };
+    let plain = n * 256 + 4096;
+    assert!(make(Boundary::Open, plain).is_ok());
+    assert!(matches!(make(Boundary::Absorbing, plain), Err(Error::Limit(_))));
+    assert!(make(Boundary::Absorbing, plain + 24 * n).is_ok());
+    let held = |boundary| {
+        let mut o = make(boundary, 1 << 28).unwrap();
+        o.at(0.3).unwrap();
+        o.at(0.1).unwrap();
+        o.checkpoint_bytes()
+    };
+    assert_eq!(held(Boundary::Absorbing), held(Boundary::Open));
+}
+
+#[test]
+fn sponge_width_is_validated_instead_of_clamped() {
+    for width in [0, 3, 20, 100] {
+        let mut s = spec([40, 40], Order::First);
+        s.boundary = Boundary::Absorbing;
+        s.sponge_cells = width;
+        let cells = vec![Cell { depth: 2.0, velocity: [0.0; 2] }; 1600];
+        assert!(matches!(Ocean::new(s, vec![2.0; 1600], cells, vec![]), Err(Error::Invalid(_))), "{width}");
+    }
+}
