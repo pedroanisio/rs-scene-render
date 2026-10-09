@@ -22,6 +22,5 @@ pub const CODES: &[(&str, &str)] = &[
     ("E19", "An attribute the schema accepts has no effect, and no inert rule of SREPs 18 and 34 names the case: a link's or key's parameter its follow mode or curve does not read (information; the document renders as if it were absent). The cases the SREPs name are INERT-I1 to INERT-I13."),
     ("E21", "A key takes cubic-bezier from the animation's defaultInterpolation and gives no handles (warning): the engine's default handles (influence 1/3, speed 1) are used."),
     ("E22", "A feature of an accepted SREP that this engine does not implement yet is used (warning, --strict fails): the document is valid and the feature is ignored. The SREP number is in the message."),
-    ("E24", "A fracture with mode=\"stress\" is used and this build does not evaluate it yet (error): the document is valid and is refused by name, and not made as a fracture by impact."),
     ("E16", "A {{placeholder}} names no parameter or repeat variable (warning; the text is left unchanged)."),
 ];

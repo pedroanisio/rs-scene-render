@@ -26,23 +26,6 @@ pub struct Pending {
 pub const PENDING: &[Pending] = &[
 ];
 
-/// What a document with a fracture by stress is refused with (E24).
-pub const STRESS_FRACTURE: &str = "fracture mode stress is not evaluated yet by this build";
-
-/// Refuses a `fracture` whose `mode` is `stress` by name (E24). The schema takes it (1.3: FRX13 to FRX15) and the physics that breaks a body of cells by stress is in the engine
-/// (`World3::with_stress`, `sr_eval::voxels::stress` makes the body it takes), but nothing in the evaluator reads the mode yet: without this a fracture by stress would be made as a
-/// fracture by impact with no source, at the start, and the block would come apart for nothing in the first frame. The wiring of the mode deletes this and its test. `e` is one
-/// element; the caller walks the tree.
-pub fn refuse_stress_fracture(e: &dyn Element, errors: &mut Vec<Diagnostic>) {
-    let raw = e.element_name();
-    if raw.strip_suffix("Type").unwrap_or(raw) != "fracture"
-        || e.get_attr("mode").map(|v| v.to_string()).as_deref() != Some("stress")
-    {
-        return;
-    }
-    errors.push(Diagnostic::error("E24", STRESS_FRACTURE.to_string(), e.loc(), e.element_id().unwrap_or("")));
-}
-
 fn same(value: &AttrValue, default: &str) -> bool {
     match (value, default.parse::<f64>()) {
         (AttrValue::Num(v), Ok(d)) => (*v - d).abs() < 1e-12,
