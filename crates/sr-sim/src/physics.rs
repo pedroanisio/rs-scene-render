@@ -149,6 +149,11 @@ pub trait Driver {
     fn kinematic(&mut self, t: f64, which: &[usize]) -> Vec<PxPose>;
     /// Force fields at `t`.
     fn fields(&mut self, t: f64) -> Vec<Field>;
+    /// Whether body `which` exists at `t`. A body that does not is out of the world: it neither moves nor
+    /// collides, and it enters at its animated pose when it starts to exist. Always, by default.
+    fn enabled(&mut self, _t: f64, _which: usize) -> bool {
+        true
+    }
 }
 
 /// Simulated state at one time.
@@ -474,13 +479,65 @@ impl World {
         s
     }
 
+    /// Takes into the world the bodies that exist at `t` ([`Driver::enabled`]) and out of it those that do not. A body
+    /// that enters takes its animated pose at `t` and its start velocity, so a body of a group that starts after the
+    /// world was built does not touch the world before it exists. Idempotent for one `t`.
+    fn sync_presence(&mut self, t: f64, driver: &mut dyn Driver) {
+        let ppm = self.spec.pixels_per_meter.max(1e-9);
+        let mut entered = false;
+        for k in 0..self.spec.bodies.len() {
+            let on = driver.enabled(t, k);
+            let h = self.state.handles[k];
+            if self.state.bodies[h].is_enabled() == on {
+                continue;
+            }
+            // its colliders too: what reads the solids (particles that hit bodies) asks the colliders
+            let colliders: Vec<ColliderHandle> = self.state.bodies[h].colliders().to_vec();
+            for c in colliders {
+                if let Some(c) = self.state.colliders.get_mut(c) {
+                    c.set_enabled(on);
+                }
+            }
+            if !on {
+                self.state.bodies[h].set_enabled(false);
+                continue;
+            }
+            let pose = driver.kinematic(t, &[k]).first().copied();
+            let b = &self.spec.bodies[k];
+            let body = &mut self.state.bodies[h];
+            body.set_enabled(true);
+            // its colliders were off: their mass counts again from this step
+            body.recompute_mass_properties_from_colliders(&self.state.colliders);
+            if let Some(p) = pose {
+                body.set_translation(v(p.x / ppm, -p.y / ppm), true);
+                body.set_rotation(Rotation::new(-p.angle.to_radians()), true);
+            }
+            if body.is_dynamic() {
+                body.set_linvel(v(b.velocity[0] / ppm, -b.velocity[1] / ppm), true);
+                body.set_angvel(-b.angular_velocity.to_radians(), true);
+            }
+            entered = true;
+        }
+        // a body that entered may overlap a sleeping one, which had no contact to wake it
+        if entered {
+            for &h in &self.state.handles {
+                self.state.bodies[h].wake_up(true);
+            }
+        }
+    }
+
     fn step_once(&mut self, driver: &mut dyn Driver) {
+        let t0 = self.spec.start + self.state.step as f64 * self.spec.step;
+        self.sync_presence(t0, driver);
         let st = &mut self.state;
-        let t = self.spec.start + st.step as f64 * self.spec.step;
+        let t = t0;
         let ppm = self.spec.pixels_per_meter.max(1e-9);
         // activation and animated poses
         let mut follow = Vec::new();
         for (k, b) in self.spec.bodies.iter().enumerate() {
+            if !st.bodies[st.handles[k]].is_enabled() {
+                continue;
+            }
             if b.kind == BodyKind::Dynamic && !st.active[k] && t >= b.activate_at {
                 let body = &mut st.bodies[st.handles[k]];
                 body.set_body_type(RigidBodyType::Dynamic, true);
@@ -505,7 +562,7 @@ impl World {
         for (k, _) in self.spec.bodies.iter().enumerate() {
             let body = &mut st.bodies[st.handles[k]];
             body.reset_forces(false);
-            if !body.is_dynamic() || fields.is_empty() {
+            if !body.is_dynamic() || !body.is_enabled() || fields.is_empty() {
                 continue;
             }
             let p = body.translation();
@@ -619,6 +676,8 @@ impl World {
     /// The simulated state at `t`, replaying from the nearest checkpoint at or before it.
     pub fn frame_at(&mut self, t: f64, driver: &mut dyn Driver) -> Frame {
         self.seek(self.step_index(t), driver);
+        // a body that enters at this step's time is in the frame at its entry pose
+        self.sync_presence(self.spec.start + self.state.step as f64 * self.spec.step, driver);
         self.snapshot()
     }
 

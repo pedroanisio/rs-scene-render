@@ -9,6 +9,7 @@ mod key_parameter_warnings;
 mod kitchen;
 mod link_follow;
 mod motion_path_additive;
+mod physics_late_bodies;
 mod rig;
 mod safe_area;
 mod semantics;
