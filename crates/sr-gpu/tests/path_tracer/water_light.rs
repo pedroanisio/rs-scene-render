@@ -707,10 +707,9 @@ fn the_brute_force_comparisons_run_on_a_gpu_and_on_a_software_adapter_only_when_
     assert_eq!(brute_force_for(true, Some("full")), Some(FULL), "or the full size on request");
 }
 
-/// Diagnostic for CI (to be removed with the fix): which light and which render of the steep sea
-/// leave pixels that are not finite, and where they are.
+/// Steep water stays finite with dome light, direct light, and their shadow combinations.
 #[test]
-fn diagnostic_where_the_steep_sea_is_not_finite() {
+fn steep_sea_pixels_are_finite_across_lighting_variants() {
     let steep = r#"<wave wavelength="10" amplitude="1.2" direction="25" phase="0"/>"#;
     let Some(gpu) = common::gpu() else { return };
     let sun = r##"<light id="sun" type="directional" color="#FFFFFF" yaw="-35" pitch="-50" intensity="3" castShadow="true"/>"##;
@@ -753,13 +752,15 @@ fn diagnostic_where_the_steep_sea_is_not_finite() {
             .map(|(i, p)| (i % 160, i / 160, *p))
             .collect();
         let rows: Vec<usize> = bad.iter().map(|b| b.1).collect();
-        report.push(format!(
-            "{name}: {} pixels not finite (rows {:?}..{:?}); first {:?}",
-            bad.len(),
-            rows.iter().min(),
-            rows.iter().max(),
-            &bad[..bad.len().min(6)]
-        ));
+        if !bad.is_empty() {
+            report.push(format!(
+                "{name}: {} pixels not finite (rows {:?}..{:?}); first {:?}",
+                bad.len(),
+                rows.iter().min(),
+                rows.iter().max(),
+                &bad[..bad.len().min(6)]
+            ));
+        }
     }
-    panic!("diagnostic report:\n{}", report.join("\n"));
+    assert!(report.is_empty(), "nonfinite water regressions:\n{}", report.join("\n"));
 }
