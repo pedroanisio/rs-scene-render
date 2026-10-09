@@ -643,7 +643,7 @@ impl EncodeSpec {
         };
         match encoder.as_str() {
             "libx264" => {
-                s(&mut a, &["-preset", &self.preset]);
+                s(&mut a, &["-preset", &self.preset, "-threads", &SOFTWARE_ENCODER_THREADS.to_string()]);
                 rate_control(&mut a, "-crf", crf);
                 s(&mut a, &["-g", &gop]);
                 if let Some((p, log)) = &self.pass {
@@ -655,6 +655,8 @@ impl EncodeSpec {
                 rate_control(&mut a, "-crf", crf);
                 let mut params = hdr_x265();
                 params.push(format!("keyint={gop}"));
+                // the output depends on the pool and frame threads, which x265 sizes from the host otherwise
+                params.push(format!("pools={SOFTWARE_ENCODER_THREADS}:frame-threads={X265_FRAME_THREADS}"));
                 if let Some((p, log)) = &self.pass {
                     params.push(format!("pass={p}:stats={}", log.display()));
                 }
@@ -946,6 +948,14 @@ impl EncodeSpec {
         }
     }
 }
+
+/// Threads of libx264 (`-threads`) and of x265's pool (`pools`). Their output depends on the thread count, which they
+/// derive from the host's cores when it is not given (libx264: 1.5 times the cores), so the same document encoded
+/// on hosts with different core counts gave different bytes. A fixed count gives the same encode on every host.
+pub const SOFTWARE_ENCODER_THREADS: usize = 8;
+
+/// x265's frame threads, fixed for the same reason as [`SOFTWARE_ENCODER_THREADS`].
+const X265_FRAME_THREADS: usize = 2;
 
 fn staged_output(path: &Path) -> std::io::Result<tempfile::TempPath> {
     let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
