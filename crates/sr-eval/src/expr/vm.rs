@@ -116,6 +116,12 @@ pub enum Var {
     TextTotal,
     Fps,
     Duration,
+    /// SREP 26 names, defined inside a repeat with a `points` child only.
+    PointX,
+    PointY,
+    PointAngle,
+    PointU,
+    PointRandom,
 }
 
 /// `loopIn`/`loopOut` modes (After Effects names).
@@ -230,6 +236,11 @@ pub trait Resolver {
     fn prop(&mut self, path: &str) -> Result<u32, String>;
     /// Resolves `markerTime("id")`.
     fn marker(&mut self, id: &str) -> Option<f64>;
+    /// Whether the expression sits inside a repeat with a `points` child, where `pointX`, `pointY`, `pointAngle`,
+    /// `pointU` and `pointRandom` are defined (SREP 26). Elsewhere they are unknown names.
+    fn point_names(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -639,6 +650,11 @@ impl<'r> Compiler<'r> {
                     "textTotal" => Var::TextTotal,
                     "fps" => Var::Fps,
                     "duration" => Var::Duration,
+                    "pointX" if self.resolver.point_names() => Var::PointX,
+                    "pointY" if self.resolver.point_names() => Var::PointY,
+                    "pointAngle" if self.resolver.point_names() => Var::PointAngle,
+                    "pointU" if self.resolver.point_names() => Var::PointU,
+                    "pointRandom" if self.resolver.point_names() => Var::PointRandom,
                     _ => {
                         let hint = crate::suggest(
                             name,

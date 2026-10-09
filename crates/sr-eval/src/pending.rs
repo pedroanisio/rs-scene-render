@@ -50,7 +50,6 @@ pub const PENDING: &[Pending] = &[
         elements: &[],
         attributes: &[("project", "fontPolicy", Some("system"))],
     },
-    Pending { srep: 26, what: "repeat copies placed on generated points", elements: &["points"], attributes: &[] },
 ];
 
 /// What a document with a fracture by stress is refused with (E24).

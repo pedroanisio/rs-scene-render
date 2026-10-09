@@ -302,6 +302,10 @@ pub struct InstNode {
     pub seed: u64,
     /// Nearest repeat copy: (index, count, variable, item).
     pub repeat: Option<(u32, u32, Arc<str>, V)>,
+    /// Nearest copy of a repeat with a `points` child: (generator in `Program::points`, point index). A copy of
+    /// that repeat is placed on the point; expressions below it read `pointX`, `pointY`, `pointAngle`, `pointU`
+    /// and `pointRandom` from it.
+    pub point: Option<(u32, u32)>,
     /// Fit, crop and flip of a layer.
     pub fit: Option<crate::layout::FitSpec>,
     /// Intrinsic size of a layer's asset.
@@ -545,6 +549,8 @@ pub struct Program {
     pub exprs: Vec<ExprInst>,
     /// Links.
     pub links: Vec<LinkInst>,
+    /// The point generators of repeats with a `points` child (SREP 26).
+    pub points: Vec<crate::points::Generator>,
     /// Element targets.
     pub elements: Vec<ElemTarget>,
     /// Transitions.
@@ -1157,6 +1163,7 @@ struct Ctx {
     scope: Arc<str>,
     doc: u16,
     repeat: Option<(u32, u32, Arc<str>, V)>,
+    point: Option<(u32, u32)>,
     stack: Vec<String>,
 }
 
@@ -1177,6 +1184,7 @@ struct Builder {
     pending_expr: Vec<(Option<u32>, Option<u32>, String, u64, Loc, Arc<str>, u16)>,
     pending_link: Vec<(u32, m::Link, Option<u32>, Arc<str>, u16)>,
     project_seed: u64,
+    points: Vec<crate::points::Generator>,
     params: HashMap<String, V>,
     assets: HashMap<Arc<str>, (u16, String)>,
     analysis_tracks: HashSet<String>,
@@ -1458,6 +1466,7 @@ impl Builder {
                 parts: Vec::new(),
                 seed,
                 repeat: ctx.repeat.clone(),
+                point: ctx.point,
                 fit: None,
                 asset_size: None,
                 asset_kind: None,
@@ -1683,7 +1692,23 @@ impl Builder {
     }
 
     fn repeat(&mut self, idx: u32, r: &m::Repeat, n: &Node, ctx: &Ctx) {
+        // SREP 26: a points child makes one copy per point (C17 forbids @count and @over beside it)
+        let points = r.children.iter().find_map(|c| match c {
+            m::RepeatChild::Points(p) => Some(p),
+            _ => None,
+        });
+        let generator = match points {
+            Some(p) => match self.points_generator(idx, p) {
+                Some(g) => Some(g),
+                None => return,
+            },
+            None => None,
+        };
         let items: Vec<V> = match (&r.count, &r.over) {
+            _ if generator.is_some() => {
+                let n = generator.as_ref().map_or(0, |g| g.n);
+                (0..n).map(|k| V::Num(k as f64)).collect()
+            }
             (Some(c), _) if !self.room(*c, r.loc, r.id.as_str()) => Vec::new(),
             (Some(c), _) => {
                 let at = |k: u64| k.checked_mul(r.step).and_then(|x| x.checked_add(r.from));
@@ -1713,6 +1738,10 @@ impl Builder {
         if !self.room(items.len() as u64, r.loc, r.id.as_str()) {
             return;
         }
+        let gen_ix = generator.map(|g| {
+            self.points.push(g);
+            (self.points.len() - 1) as u32
+        });
         for (k, item) in items.into_iter().enumerate() {
             let k = k as u32;
             let cid: Arc<str> = format!("{rid}[{k}]").into();
@@ -1746,6 +1775,8 @@ impl Builder {
                 Clock::Same
             };
             copy.repeat = Some((k, count, var.clone(), item.clone()));
+            let point = gen_ix.map(|g| (g, k)).or(ctx.point);
+            copy.point = point;
             copy.seed = crate::rng::hash_str(&cid);
             copy.cond = None;
             copy.align = None;
@@ -1757,12 +1788,102 @@ impl Builder {
             copy.clip = false;
             self.nodes.push(copy);
             self.ids.insert(cid.clone(), cidx);
-            let cctx = Ctx { scope: cid.clone(), repeat: Some((k, count, var.clone(), item)), ..ctx.clone() };
+            let cctx = Ctx { scope: cid.clone(), repeat: Some((k, count, var.clone(), item)), point, ..ctx.clone() };
             let c = self.instantiate(&kids, Some(cidx), &cctx);
             self.nodes[cidx as usize].children = c;
             copies.push(cidx);
         }
         self.nodes[idx as usize].children = copies;
+    }
+
+    /// The points of a repeat's `points` child (SREP 26), or None after reporting path data that cannot be read.
+    /// The slots of animated sizes are attached once the repeat's parts exist (see `point_slots`).
+    fn points_generator(&mut self, idx: u32, p: &m::Points) -> Option<crate::points::Generator> {
+        use crate::points::{self as pt, FlatPath, Layout};
+        let who = self.nodes[idx as usize].id.clone();
+        let path = |b: &mut Self| -> Option<FlatPath> {
+            let d = p.path.as_deref().unwrap_or("");
+            match FlatPath::parse(d) {
+                Ok(f) => Some(f),
+                Err(e) => {
+                    b.diags.push(err(
+                        "E15",
+                        format!("points on {who:?}: {} at offset {}", e.message, e.offset),
+                        p.loc,
+                        &*who,
+                    ));
+                    None
+                }
+            }
+        };
+        let seed = p.seed.unwrap_or(self.project_seed);
+        let count = p.count.unwrap_or(0);
+        // along-path and scatter make at most @count points: refuse a count past the node budget before
+        // generating any (grid is checked on columns x rows below, vertices and list are bounded by their data)
+        let counted = matches!(p.r#type, m::PointsKind::AlongPath | m::PointsKind::Scatter);
+        if counted && !self.room(count, p.loc, &who) {
+            return None;
+        }
+        let layout = match p.r#type {
+            m::PointsKind::Grid => Layout::Grid { columns: p.columns, rows: p.rows },
+            m::PointsKind::AlongPath => Layout::Fixed(pt::along_path(&path(self)?, count, p.orient)),
+            m::PointsKind::Scatter if p.path.is_some() => {
+                Layout::Fixed(pt::scatter_path(&path(self)?, seed, count, p.fill_rule == m::FillRule::Evenodd).0)
+            }
+            m::PointsKind::Scatter => Layout::Rect,
+            m::PointsKind::Vertices => Layout::Fixed(pt::vertices(&path(self)?)),
+            m::PointsKind::List => {
+                let at: Vec<[f64; 2]> = p.at.iter().flatten().map(|q| [q.x, q.y]).collect();
+                Layout::Fixed(pt::list(&at))
+            }
+        };
+        let n: u64 = match &layout {
+            Layout::Grid { columns, rows } => columns.saturating_mul(*rows),
+            Layout::Rect => count,
+            Layout::Fixed(v) => v.len() as u64,
+        };
+        if !self.room(n, p.loc, &who) {
+            return None;
+        }
+        let size = |v: Option<f64>| v.unwrap_or(0.0);
+        Some(pt::Generator {
+            node: idx,
+            layout,
+            seed,
+            n: n as u32,
+            base: [p.spacing_x, p.spacing_y, size(p.width.map(|w| w.get())), size(p.height.map(|h| h.get()))],
+            slots: [None; 4],
+        })
+    }
+
+    /// Compiles the `animate` children of every repeat's `points` (SREP 26) onto an element target of the repeat,
+    /// read at the repeat's own time, and attaches the slots of `spacingX`, `spacingY`, `width` and `height` to its
+    /// generator. (The animates of `points` are a sequence, so the generic walk over parts does not see them.)
+    fn point_slots(&mut self) {
+        for g in 0..self.points.len() {
+            let node = self.points[g].node;
+            let (elem, doc) = (self.nodes[node as usize].elem.clone(), self.nodes[node as usize].doc);
+            let Node::Repeat(r) = &*elem else { continue };
+            let Some(p) = r.children.iter().find_map(|c| match c {
+                m::RepeatChild::Points(p) => Some(p),
+                _ => None,
+            }) else {
+                continue;
+            };
+            if p.animates.is_empty() {
+                continue;
+            }
+            let key: Arc<str> = format!("{}/points", self.nodes[node as usize].id).into();
+            let t = self.add_element(key.clone(), p, Some(node), doc);
+            self.nodes[node as usize].parts.push(t);
+            for a in &p.animates {
+                self.animate_one(Owner::Element(t), a, doc, &key);
+            }
+            for (k, prop) in crate::points::ANIMATED.iter().enumerate() {
+                self.points[g].slots[k] =
+                    self.elements[t as usize].slots.iter().copied().find(|&s| &*self.slots[s as usize].prop == *prop);
+            }
+        }
     }
 
     fn apply_scoped_overrides(&mut self, nodes: &mut [Node], overrides: &[m::Override], owner: &str) {
@@ -1966,7 +2087,7 @@ impl Builder {
         self.nodes[idx as usize].box_size = Some([Length::px(size[0]), Length::px(size[1])]);
         let mut stack = ctx.stack.clone();
         stack.push(key);
-        let cctx = Ctx { scope: ns, doc: doc_ix, stack, repeat: ctx.repeat.clone() };
+        let cctx = Ctx { scope: ns, doc: doc_ix, stack, repeat: ctx.repeat.clone(), point: ctx.point };
         let c = self.instantiate(&kids, Some(idx), &cctx);
         self.nodes[idx as usize].children = c;
     }
@@ -2221,42 +2342,42 @@ impl Builder {
         i
     }
 
+    /// Compiles one `animate` onto `owner`: its keys become a channel of the property's slot.
+    fn animate_one(&mut self, owner: Owner, a: &m::Animate, doc: u16, who: &str) {
+        let slot = match self.slot(owner, &a.property) {
+            Ok(s) => s,
+            Err(msg) => {
+                self.diags.push(err("E02", format!("animate on {who:?}: {msg}"), a.loc, who));
+                return;
+            }
+        };
+        ignored_key_parameters(&a.keys, a.default_interpolation, who, &mut self.warnings);
+        let spec = ChannelSpec {
+            keys: &a.keys,
+            default: a.default_interpolation,
+            before: a.extrapolate_before,
+            after: a.extrapolate_after,
+            additive: a.additive,
+            time_base: a.time_base,
+            kind: self.slots[slot as usize].kind,
+        };
+        match Channel::compile(&spec, &DocLookup { b: self, doc }) {
+            Ok(ch) => {
+                self.channels.push(ch);
+                let ci = (self.channels.len() - 1) as u32;
+                self.slots[slot as usize].channels.push(ci);
+            }
+            Err(msg) => self.diags.push(err("E04", format!("animate {:?} on {who:?}: {msg}", a.property), a.loc, who)),
+        }
+    }
+
     /// Compiles the animation children of `e` onto `owner`.
     fn animate(&mut self, owner: Owner, e: &dyn Element, node: Option<u32>, doc: u16, scope: &Arc<str>, who: &str) {
         for c in children(e) {
             match c.element_name() {
                 "animate" => {
                     let a = c.as_any().downcast_ref::<m::Animate>().expect("animate");
-                    let slot = match self.slot(owner, &a.property) {
-                        Ok(s) => s,
-                        Err(msg) => {
-                            self.diags.push(err("E02", format!("animate on {who:?}: {msg}"), a.loc, who));
-                            continue;
-                        }
-                    };
-                    ignored_key_parameters(&a.keys, a.default_interpolation, who, &mut self.warnings);
-                    let spec = ChannelSpec {
-                        keys: &a.keys,
-                        default: a.default_interpolation,
-                        before: a.extrapolate_before,
-                        after: a.extrapolate_after,
-                        additive: a.additive,
-                        time_base: a.time_base,
-                        kind: self.slots[slot as usize].kind,
-                    };
-                    match Channel::compile(&spec, &DocLookup { b: self, doc }) {
-                        Ok(ch) => {
-                            self.channels.push(ch);
-                            let ci = (self.channels.len() - 1) as u32;
-                            self.slots[slot as usize].channels.push(ci);
-                        }
-                        Err(msg) => self.diags.push(err(
-                            "E04",
-                            format!("animate {:?} on {who:?}: {msg}", a.property),
-                            a.loc,
-                            who,
-                        )),
-                    }
+                    self.animate_one(owner, a, doc, who);
                 }
                 "expression" => {
                     let x = c.as_any().downcast_ref::<m::Expression>().expect("expression");
@@ -2730,7 +2851,8 @@ impl Builder {
                 (None, Some(n)) => format!("{}@condition", self.nodes[n as usize].id),
                 _ => "expression".into(),
             };
-            let mut res = ExprResolver { b: self, scope, doc };
+            let points = node.is_some_and(|n| self.nodes[n as usize].point.is_some());
+            let mut res = ExprResolver { b: self, scope, doc, points };
             match vm::compile(&src, &mut res) {
                 Ok(code) => {
                     self.exprs.push(ExprInst { code, slot, node, seed });
@@ -2795,7 +2917,7 @@ impl Builder {
                     }
                 }
             } else {
-                let mut res = ExprResolver { b: self, scope, doc };
+                let mut res = ExprResolver { b: self, scope, doc, points: false };
                 match res.prop(&l.source) {
                     Ok(s) => Some(LinkSource::Prop(s)),
                     Err(e) => {
@@ -3008,9 +3130,15 @@ struct ExprResolver<'b> {
     b: &'b mut Builder,
     scope: Arc<str>,
     doc: u16,
+    /// The expression sits inside a repeat with a `points` child.
+    points: bool,
 }
 
 impl Resolver for ExprResolver<'_> {
+    fn point_names(&self) -> bool {
+        self.points
+    }
+
     fn prop(&mut self, path: &str) -> Result<u32, String> {
         let (id, prop) = path.rsplit_once('.').ok_or_else(|| format!("prop({path:?}) needs \"id.property\""))?;
         if let Some(n) = self.b.resolve(&self.scope, id) {
@@ -3093,11 +3221,12 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
         pending_expr: Vec::new(),
         pending_link: Vec::new(),
         project_seed: scene.project.seed,
+        points: Vec::new(),
         params: t.params,
         assets: HashMap::new(),
         analysis_tracks: HashSet::new(),
     };
-    let root = Ctx { scope: "".into(), doc: 0, repeat: None, stack: Vec::new() };
+    let root = Ctx { scope: "".into(), doc: 0, repeat: None, point: None, stack: Vec::new() };
     let roots = b.instantiate(&scene.composition.children, None, &root);
     b.transitions();
     b.resolve_links();
@@ -3108,6 +3237,7 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
             b.parts(n);
         }
     }
+    b.point_slots();
     for n in 0..b.nodes.len() as u32 {
         let node = &b.nodes[n as usize];
         if node.name == "copy" {
@@ -3245,6 +3375,7 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
         channels: b.channels,
         exprs: b.exprs,
         links: b.links,
+        points: b.points,
         elements: b.elements,
         transitions: b.transitions,
         markers,

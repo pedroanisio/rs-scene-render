@@ -71,6 +71,8 @@ MESH_SEQUENCE = '<scene version="1.3"><project width="64" height="64" fps="24" d
 
 FRACTURE = '<scene version="1.3"><project width="64" height="64" fps="24" duration="3"/><materials><material id="interior" baseColor="#A06030"/></materials><composition><object3D id="rock" primitive="box" width="4" height="4" depth="4"><rigidBody mass="8"/><fracture at="1" pieces="8" seed="18446744073709551615" interiorMaterial="interior" radialImpulse="4"/></object3D></composition></scene>\n'
 
+POINTS = '<scene version="1.2"><project width="64" height="64" fps="24" duration="2"/><composition><repeat id="r" x="32" y="32"><points type="grid" columns="3" rows="2" spacingX="10" spacingY="10"><animate property="spacingX"><key time="0" value="5"/><key time="1" value="10"/></animate></points><shape id="s" shape="rect" width="4" height="4" fill="#FFFFFF"/></repeat></composition></scene>\n'
+
 CRATER = '<scene version="1.3"><project width="64" height="64" fps="24" duration="3"/><composition><object3D id="ground" primitive="plane" width="20" height="20" segments="40"><crater radius="4" depth="3" rimWidth="1" rimHeight="0.5" start="1" end="2"/><rigidBody type="static"/></object3D></composition></scene>\n'
 
 CRATER_IMPACT = '<scene version="1.3"><project width="64" height="64" fps="24" duration="3"/><composition><object3D id="rock" primitive="sphere" radius="1" y="-8"><rigidBody mass="5"/></object3D><object3D id="ground" primitive="plane" width="20" height="20" segments="40" y="2"><crater id="pit" source="rock" targetMaterial="softRock"/><rigidBody type="static"/></object3D></composition><physics pixelsPerMeter="1"/></scene>\n'
@@ -200,6 +202,15 @@ CASES = [
     ("crt12-repose-range", ["S06"], lambda _: CRATER_IMPACT.replace('targetMaterial="softRock"', 'targetMaterial="softRock" repose="75"')),
     ("crt11-bulking-range", ["S06"], lambda _: CRATER_IMPACT.replace('targetMaterial="softRock"', 'targetMaterial="softRock" mantle="true" bulking="1.5"')),
     ("crt8-self", ["CRT8"], lambda _: CRATER_IMPACT.replace('source="rock"', 'source="ground"')),
+    ("v10", ["V10"], lambda _: POINTS.replace('version="1.2"', 'version="1.1"')),
+    ("c17-points-count", ["C17"], lambda _: POINTS.replace('<repeat id="r"', '<repeat id="r" count="3"')),
+    ("c74", ["C74"], lambda _: POINTS.replace('<shape ', '<points type="list" at="0,0"/><shape ')),
+    ("c75", ["C75"], lambda _: POINTS.replace('<points type="grid" columns="3" rows="2"', '<points type="along-path" path="M0,0 L10,0"')),
+    ("c76", ["C76"], lambda _: POINTS.replace('<points type="grid" columns="3" rows="2"', '<points type="scatter" count="3" width="10"')),
+    ("c77", ["C77"], lambda _: POINTS.replace('<points type="grid" columns="3" rows="2"', '<points type="vertices"')),
+    ("c78", ["C78"], lambda _: POINTS.replace('<points type="grid" columns="3" rows="2"', '<points type="list"')),
+    ("c79", ["C79"], lambda _: POINTS.replace('<animate property="spacingX">', '<animate property="rows">')),
+    ("c80", ["C80"], lambda _: POINTS.replace('<repeat id="r"', '<repeat id="r" from="1"')),
     ("v5-joint", ["V5"], lambda _: JOINT.replace('version="1.2"', 'version="1.1"')),
     ("v5-morph", ["V5"], lambda _: MORPH.replace('version="1.2"', 'version="1.1"')),
     ("pen1", ["PEN1"], lambda _: STROKE_TEXT.replace(' strokeFont="hand"', '')),
@@ -509,6 +520,8 @@ VALID = {
     "ocean-hydrostatic": OCEAN_COUPLED.replace('<ocean ', '<ocean bedResponse="hydrostatic" '),
     "ocean-depth-filtered-drag": OCEAN_COUPLED.replace('<ocean ', '<ocean bedResponse="depthFiltered" bodyDrag="2" '),
     "model-select": MODEL_SELECT,
+    "repeat-points": POINTS,
+    "repeat-points-neutral-steps": POINTS.replace('<repeat id="r"', '<repeat id="r" from="0" step="1"'),
     "stroke-text": STROKE_TEXT,
     "morph": MORPH,
     "joint": JOINT,

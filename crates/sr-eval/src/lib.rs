@@ -36,6 +36,7 @@ pub mod particles3d;
 pub mod path;
 pub mod pending;
 mod physcache;
+pub mod points;
 pub mod program;
 pub mod pyro;
 pub mod rig;

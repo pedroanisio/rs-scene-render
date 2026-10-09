@@ -52,8 +52,7 @@ fn corpus_covers_every_rule_and_structural_code() {
         "C60", "C61", "C62", "C63", "C64", "R48-from", "R48-to", "R49", "R50", "V11",
         // SREP 17, PDF pages and regions
         "C66", "C67", "C68", "C69", "R51", "R52", "V9", // SREP 21, the pinned-font policy
-        "C70", "C71", "C72", "C73", // SREP 26, repeat points
-        "C74", "C75", "C76", "C77", "C78", "C79", "C80", "V10",
+        "C70", "C71", "C72", "C73",
     ];
     let mut missing: Vec<&str> = codes::SCH_ASSERTS
         .iter()

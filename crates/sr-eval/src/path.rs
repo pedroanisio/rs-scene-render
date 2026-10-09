@@ -4,14 +4,15 @@
 /// A 2D point.
 pub type P = [f64; 2];
 
+/// A segment of a motion path: arcs become cubics of at most 90° and quadratics cubics.
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Seg {
+pub(crate) enum Seg {
     Line(P, P),
     Cubic(P, P, P, P),
 }
 
 impl Seg {
-    fn at(&self, s: f64) -> P {
+    pub(crate) fn at(&self, s: f64) -> P {
         match *self {
             Seg::Line(a, b) => [a[0] + (b[0] - a[0]) * s, a[1] + (b[1] - a[1]) * s],
             Seg::Cubic(a, b, c, d) => {
@@ -22,7 +23,7 @@ impl Seg {
         }
     }
 
-    fn tangent(&self, s: f64) -> P {
+    pub(crate) fn tangent(&self, s: f64) -> P {
         match *self {
             Seg::Line(a, b) => [b[0] - a[0], b[1] - a[1]],
             Seg::Cubic(a, b, c, d) => {
@@ -52,7 +53,8 @@ pub struct MotionPath {
     length: f64,
 }
 
-const SAMPLES: usize = 32;
+/// Samples per segment of the arc-length table.
+pub(crate) const SAMPLES: usize = 32;
 
 /// Parses path data into polylines (see [`MotionPath::polylines`]).
 pub fn flatten(d: &str, tolerance: f64) -> Result<Vec<Vec<P>>, PathError> {
@@ -132,16 +134,57 @@ impl Scan<'_> {
     }
 }
 
+/// An elliptical arc in centre form (SVG 1.1 implementation notes F.6.5 and F.6.6).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ArcGeom {
+    /// Centre.
+    pub c: P,
+    /// Radii after the out-of-range correction.
+    pub rx: f64,
+    /// Radii after the out-of-range correction.
+    pub ry: f64,
+    /// sin and cos of the x-axis rotation.
+    pub sin: f64,
+    pub cos: f64,
+    /// Start angle and sweep, in radians.
+    pub th1: f64,
+    pub dth: f64,
+}
+
+impl ArcGeom {
+    /// The point at angle `t`.
+    pub fn at(&self, t: f64) -> P {
+        let (ct, st) = (libm::cos(t), libm::sin(t));
+        [
+            self.c[0] + self.rx * ct * self.cos - self.ry * st * self.sin,
+            self.c[1] + self.rx * ct * self.sin + self.ry * st * self.cos,
+        ]
+    }
+
+    /// The derivative of [`ArcGeom::at`] at angle `t`.
+    fn d(&self, t: f64) -> P {
+        let (ct, st) = (libm::cos(t), libm::sin(t));
+        [-self.rx * st * self.cos - self.ry * ct * self.sin, -self.rx * st * self.sin + self.ry * ct * self.cos]
+    }
+}
+
+/// How an arc command is drawn: not at all (equal end points), as a line (a zero radius), or as an ellipse arc.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum ArcShape {
+    Nothing,
+    Line,
+    Ellipse(ArcGeom),
+}
+
+/// The centre form of the arc from `p0` to `p1` (SVG 1.1 implementation notes F.6.5 and F.6.6).
 #[allow(clippy::too_many_arguments)]
-fn arc(p0: P, rx: f64, ry: f64, phi_deg: f64, large: bool, sweep: bool, p1: P, out: &mut Vec<Seg>) {
-    // SVG 1.1 implementation notes F.6.5 / F.6.6
+pub(crate) fn arc_shape(p0: P, rx: f64, ry: f64, phi_deg: f64, large: bool, sweep: bool, p1: P) -> ArcShape {
     if p0 == p1 {
-        return;
+        return ArcShape::Nothing;
     }
     let (mut rx, mut ry) = (rx.abs(), ry.abs());
     if rx == 0.0 || ry == 0.0 {
-        out.push(Seg::Line(p0, p1));
-        return;
+        return ArcShape::Line;
     }
     let phi = phi_deg.to_radians();
     let (sin, cos) = (libm::sin(phi), libm::cos(phi));
@@ -173,22 +216,27 @@ fn arc(p0: P, rx: f64, ry: f64, phi_deg: f64, large: bool, sweep: bool, p1: P, o
     } else if sweep && dth < 0.0 {
         dth += 2.0 * std::f64::consts::PI;
     }
-    let n = libm::ceil(dth.abs() / (std::f64::consts::FRAC_PI_2) - 1e-9).max(1.0) as usize;
-    let step = dth / n as f64;
+    ArcShape::Ellipse(ArcGeom { c: [cx, cy], rx, ry, sin, cos, th1, dth })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn arc(p0: P, rx: f64, ry: f64, phi_deg: f64, large: bool, sweep: bool, p1: P, out: &mut Vec<Seg>) {
+    let g = match arc_shape(p0, rx, ry, phi_deg, large, sweep, p1) {
+        ArcShape::Nothing => return,
+        ArcShape::Line => {
+            out.push(Seg::Line(p0, p1));
+            return;
+        }
+        ArcShape::Ellipse(g) => g,
+    };
+    let n = libm::ceil(g.dth.abs() / (std::f64::consts::FRAC_PI_2) - 1e-9).max(1.0) as usize;
+    let step = g.dth / n as f64;
     let k = 4.0 / 3.0 * libm::tan(step / 4.0);
-    let pt = |t: f64| {
-        let (ct, st) = (libm::cos(t), libm::sin(t));
-        [cx + rx * ct * cos - ry * st * sin, cy + rx * ct * sin + ry * st * cos]
-    };
-    let dpt = |t: f64| {
-        let (ct, st) = (libm::cos(t), libm::sin(t));
-        [-rx * st * cos - ry * ct * sin, -rx * st * sin + ry * ct * cos]
-    };
     let mut start = p0;
     for i in 0..n {
-        let (t0, t1) = (th1 + step * i as f64, th1 + step * (i + 1) as f64);
-        let end = if i + 1 == n { p1 } else { pt(t1) };
-        let (d0, d1) = (dpt(t0), dpt(t1));
+        let (t0, t1) = (g.th1 + step * i as f64, g.th1 + step * (i + 1) as f64);
+        let end = if i + 1 == n { p1 } else { g.at(t1) };
+        let (d0, d1) = (g.d(t0), g.d(t1));
         out.push(Seg::Cubic(
             start,
             [start[0] + k * d0[0], start[1] + k * d0[1]],
@@ -199,134 +247,249 @@ fn arc(p0: P, rx: f64, ry: f64, phi_deg: f64, large: bool, sweep: bool, p1: P, o
     }
 }
 
+/// One drawing command of SVG path data, in absolute coordinates, with the point it starts from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PathCmd {
+    /// A moveto (also each moveto of an `M` with several pairs is one; the pairs after the first are lines).
+    Move(P),
+    /// A line (`L`, `H`, `V`, or the implicit lines of a moveto): from, to.
+    Line(P, P),
+    /// A quadratic curve (`Q`, `T`): from, control, to.
+    Quad(P, P, P),
+    /// A cubic curve (`C`, `S`): from, control 1, control 2, to.
+    Cubic(P, P, P, P),
+    /// An elliptical arc (`A`).
+    Arc {
+        /// Start point.
+        from: P,
+        /// Radii as written (signs ignored when drawn).
+        rx: f64,
+        /// Radii as written (signs ignored when drawn).
+        ry: f64,
+        /// x-axis rotation in degrees.
+        rotation: f64,
+        /// Large-arc flag.
+        large: bool,
+        /// Sweep flag.
+        sweep: bool,
+        /// End point.
+        to: P,
+    },
+    /// A closepath: from the current point back to the subpath's start.
+    Close(P, P),
+}
+
+impl PathCmd {
+    /// The point the command ends at.
+    pub fn end(&self) -> P {
+        match *self {
+            PathCmd::Move(p) | PathCmd::Line(_, p) | PathCmd::Quad(_, _, p) | PathCmd::Cubic(_, _, _, p) => p,
+            PathCmd::Arc { to, .. } => to,
+            PathCmd::Close(_, s) => s,
+        }
+    }
+}
+
+/// Parses SVG path data (all commands, absolute and relative) into drawing commands in document order.
+pub fn commands(d: &str) -> Result<Vec<PathCmd>, PathError> {
+    let mut sc = Scan { s: d.as_bytes(), i: 0 };
+    let mut out = Vec::new();
+    let (mut cur, mut start): (P, P) = ([0.0, 0.0], [0.0, 0.0]);
+    let mut last_ctrl: Option<(u8, P)> = None;
+    let mut cmd: Option<u8> = None;
+    loop {
+        sc.ws();
+        if sc.i >= sc.s.len() {
+            break;
+        }
+        let c = sc.s[sc.i];
+        if c.is_ascii_alphabetic() {
+            sc.i += 1;
+            cmd = Some(c);
+        } else if cmd.is_none() {
+            return Err(PathError { message: "path data must start with a command".into(), offset: sc.i });
+        } else if matches!(cmd, Some(b'Z' | b'z')) {
+            return Err(PathError { message: "numbers after Z".into(), offset: sc.i });
+        }
+        let c = cmd.unwrap();
+        let rel = c.is_ascii_lowercase();
+        let off = |p: P, cur: P| if rel { [p[0] + cur[0], p[1] + cur[1]] } else { p };
+        let upper = c.to_ascii_uppercase();
+        let mut ctrl = None;
+        match upper {
+            b'M' => {
+                let p = off([sc.num()?, sc.num()?], cur);
+                out.push(PathCmd::Move(p));
+                cur = p;
+                start = p;
+                cmd = Some(if rel { b'l' } else { b'L' });
+            }
+            b'L' => {
+                let p = off([sc.num()?, sc.num()?], cur);
+                out.push(PathCmd::Line(cur, p));
+                cur = p;
+            }
+            b'H' => {
+                let x = sc.num()?;
+                let p = [if rel { cur[0] + x } else { x }, cur[1]];
+                out.push(PathCmd::Line(cur, p));
+                cur = p;
+            }
+            b'V' => {
+                let y = sc.num()?;
+                let p = [cur[0], if rel { cur[1] + y } else { y }];
+                out.push(PathCmd::Line(cur, p));
+                cur = p;
+            }
+            b'C' | b'S' => {
+                let c1 = if upper == b'C' {
+                    off([sc.num()?, sc.num()?], cur)
+                } else {
+                    match last_ctrl {
+                        Some((b'C', q)) => [2.0 * cur[0] - q[0], 2.0 * cur[1] - q[1]],
+                        _ => cur,
+                    }
+                };
+                let c2 = off([sc.num()?, sc.num()?], cur);
+                let p = off([sc.num()?, sc.num()?], cur);
+                out.push(PathCmd::Cubic(cur, c1, c2, p));
+                ctrl = Some((b'C', c2));
+                cur = p;
+            }
+            b'Q' | b'T' => {
+                let q = if upper == b'Q' {
+                    off([sc.num()?, sc.num()?], cur)
+                } else {
+                    match last_ctrl {
+                        Some((b'Q', q)) => [2.0 * cur[0] - q[0], 2.0 * cur[1] - q[1]],
+                        _ => cur,
+                    }
+                };
+                let p = off([sc.num()?, sc.num()?], cur);
+                out.push(PathCmd::Quad(cur, q, p));
+                ctrl = Some((b'Q', q));
+                cur = p;
+            }
+            b'A' => {
+                let (rx, ry, rotation) = (sc.num()?, sc.num()?, sc.num()?);
+                let (large, sweep) = (sc.flag()?, sc.flag()?);
+                let p = off([sc.num()?, sc.num()?], cur);
+                out.push(PathCmd::Arc { from: cur, rx, ry, rotation, large, sweep, to: p });
+                cur = p;
+            }
+            b'Z' => {
+                out.push(PathCmd::Close(cur, start));
+                cur = start;
+            }
+            other => {
+                return Err(PathError {
+                    message: format!("unknown path command '{}'", other as char),
+                    offset: sc.i - 1,
+                });
+            }
+        }
+        last_ctrl = ctrl;
+        if upper != b'Z' && !sc.more_numbers() && sc.i < sc.s.len() && !sc.s[sc.i].is_ascii_alphabetic() {
+            return Err(PathError { message: "unexpected character in path data".into(), offset: sc.i });
+        }
+    }
+    Ok(out)
+}
+
+/// The segments of path data, as motion paths measure them: lines, cubics (quadratics raised to cubics, arcs as
+/// cubics of at most 90°; a closepath back to a different point is a line). Returns the segments, the index of the
+/// first segment of each subpath (a new one at every moveto that follows segments) and, for each segment, the index
+/// of the command it comes from.
+pub(crate) fn segments_of(cmds: &[PathCmd]) -> (Vec<Seg>, Vec<usize>, Vec<usize>) {
+    let mut segs = Vec::new();
+    let mut starts = vec![0usize];
+    let mut from_cmd = Vec::new();
+    for (ci, c) in cmds.iter().enumerate() {
+        match *c {
+            PathCmd::Move(_) => {
+                if starts.last() != Some(&segs.len()) {
+                    starts.push(segs.len());
+                }
+            }
+            PathCmd::Line(a, b) => segs.push(Seg::Line(a, b)),
+            PathCmd::Cubic(a, b, c, d) => segs.push(Seg::Cubic(a, b, c, d)),
+            PathCmd::Quad(a, q, p) => {
+                let c1 = [a[0] + 2.0 / 3.0 * (q[0] - a[0]), a[1] + 2.0 / 3.0 * (q[1] - a[1])];
+                let c2 = [p[0] + 2.0 / 3.0 * (q[0] - p[0]), p[1] + 2.0 / 3.0 * (q[1] - p[1])];
+                segs.push(Seg::Cubic(a, c1, c2, p));
+            }
+            PathCmd::Arc { from, rx, ry, rotation, large, sweep, to } => {
+                arc(from, rx, ry, rotation, large, sweep, to, &mut segs)
+            }
+            PathCmd::Close(a, s) => {
+                if a != s {
+                    segs.push(Seg::Line(a, s));
+                }
+            }
+        }
+        from_cmd.resize(segs.len(), ci);
+    }
+    (segs, starts, from_cmd)
+}
+
+/// The arc-length table of `segs`: [`SAMPLES`] points per segment on the true curve, as (drawn length, segment,
+/// parameter). The length runs on from one segment to the next; at the segments listed in `restart` it restarts
+/// from the segment's own first point, so a jump there adds no length. Returns the table and the total length.
+///
+/// Motion paths and the points of a repeat (SREP 26) share this measure, and differ in two places where the
+/// written rule for motion paths says otherwise than [`MotionPath`] does:
+///
+/// * a motion path passes no `restart`, so the jump from one subpath to the next counts as drawn length; the rule
+///   says jumps take none, and `along-path` restarts the table at every subpath, as SREP 26 says;
+/// * at an exact vertex [`MotionPath::sample`] takes the incoming segment's direction; the rule says the
+///   outgoing one, which `along-path` takes (and it gives zero-length segments no direction).
+///
+/// Which side moves is for the amendment of the motion-path rule; until then each follows its own contract.
+pub(crate) fn arc_table(segs: &[Seg], restart: &[usize]) -> (Vec<(f64, usize, f64)>, f64) {
+    let mut table = Vec::with_capacity(segs.len() * SAMPLES + 1);
+    let mut acc = 0.0;
+    let mut prev = segs[0].at(0.0);
+    table.push((0.0, 0, 0.0));
+    for (i, s) in segs.iter().enumerate() {
+        if restart.contains(&i) {
+            prev = s.at(0.0);
+        }
+        for k in 1..=SAMPLES {
+            let t = k as f64 / SAMPLES as f64;
+            let p = s.at(t);
+            acc += libm::hypot(p[0] - prev[0], p[1] - prev[1]);
+            table.push((acc, i, t));
+            prev = p;
+        }
+    }
+    (table, acc)
+}
+
+/// The segment and its parameter at drawn length `target` along an [`arc_table`].
+pub(crate) fn locate(table: &[(f64, usize, f64)], target: f64) -> (usize, f64) {
+    let k = table.partition_point(|e| e.0 < target).clamp(1, table.len() - 1);
+    let (l0, i0, t0) = table[k - 1];
+    let (l1, i1, t1) = table[k];
+    let f = if l1 > l0 { (target - l0) / (l1 - l0) } else { 0.0 };
+    if i0 == i1 || t0 == 1.0 {
+        let t0 = if i0 != i1 { 0.0 } else { t0 };
+        (i1, t0 + (t1 - t0) * f)
+    } else {
+        (i1, t1 * f)
+    }
+}
+
 impl MotionPath {
     /// Parses SVG path data (all commands, absolute and relative).
     pub fn parse(d: &str) -> Result<MotionPath, PathError> {
-        let mut sc = Scan { s: d.as_bytes(), i: 0 };
-        let mut segs = Vec::new();
-        let mut starts = vec![0usize];
-        let (mut cur, mut start): (P, P) = ([0.0, 0.0], [0.0, 0.0]);
-        let mut last_ctrl: Option<(u8, P)> = None;
-        let mut cmd: Option<u8> = None;
-        loop {
-            sc.ws();
-            if sc.i >= sc.s.len() {
-                break;
-            }
-            let c = sc.s[sc.i];
-            if c.is_ascii_alphabetic() {
-                sc.i += 1;
-                cmd = Some(c);
-            } else if cmd.is_none() {
-                return Err(PathError { message: "path data must start with a command".into(), offset: sc.i });
-            } else if matches!(cmd, Some(b'Z' | b'z')) {
-                return Err(PathError { message: "numbers after Z".into(), offset: sc.i });
-            }
-            let c = cmd.unwrap();
-            let rel = c.is_ascii_lowercase();
-            let off = |p: P, cur: P| if rel { [p[0] + cur[0], p[1] + cur[1]] } else { p };
-            let upper = c.to_ascii_uppercase();
-            let mut ctrl = None;
-            match upper {
-                b'M' => {
-                    if starts.last() != Some(&segs.len()) {
-                        starts.push(segs.len());
-                    }
-                    let p = off([sc.num()?, sc.num()?], cur);
-                    cur = p;
-                    start = p;
-                    cmd = Some(if rel { b'l' } else { b'L' });
-                }
-                b'L' => {
-                    let p = off([sc.num()?, sc.num()?], cur);
-                    segs.push(Seg::Line(cur, p));
-                    cur = p;
-                }
-                b'H' => {
-                    let x = sc.num()?;
-                    let p = [if rel { cur[0] + x } else { x }, cur[1]];
-                    segs.push(Seg::Line(cur, p));
-                    cur = p;
-                }
-                b'V' => {
-                    let y = sc.num()?;
-                    let p = [cur[0], if rel { cur[1] + y } else { y }];
-                    segs.push(Seg::Line(cur, p));
-                    cur = p;
-                }
-                b'C' | b'S' => {
-                    let c1 = if upper == b'C' {
-                        off([sc.num()?, sc.num()?], cur)
-                    } else {
-                        match last_ctrl {
-                            Some((b'C', q)) => [2.0 * cur[0] - q[0], 2.0 * cur[1] - q[1]],
-                            _ => cur,
-                        }
-                    };
-                    let c2 = off([sc.num()?, sc.num()?], cur);
-                    let p = off([sc.num()?, sc.num()?], cur);
-                    segs.push(Seg::Cubic(cur, c1, c2, p));
-                    ctrl = Some((b'C', c2));
-                    cur = p;
-                }
-                b'Q' | b'T' => {
-                    let q = if upper == b'Q' {
-                        off([sc.num()?, sc.num()?], cur)
-                    } else {
-                        match last_ctrl {
-                            Some((b'Q', q)) => [2.0 * cur[0] - q[0], 2.0 * cur[1] - q[1]],
-                            _ => cur,
-                        }
-                    };
-                    let p = off([sc.num()?, sc.num()?], cur);
-                    let c1 = [cur[0] + 2.0 / 3.0 * (q[0] - cur[0]), cur[1] + 2.0 / 3.0 * (q[1] - cur[1])];
-                    let c2 = [p[0] + 2.0 / 3.0 * (q[0] - p[0]), p[1] + 2.0 / 3.0 * (q[1] - p[1])];
-                    segs.push(Seg::Cubic(cur, c1, c2, p));
-                    ctrl = Some((b'Q', q));
-                    cur = p;
-                }
-                b'A' => {
-                    let (rx, ry, rot) = (sc.num()?, sc.num()?, sc.num()?);
-                    let (large, sweep) = (sc.flag()?, sc.flag()?);
-                    let p = off([sc.num()?, sc.num()?], cur);
-                    arc(cur, rx, ry, rot, large, sweep, p, &mut segs);
-                    cur = p;
-                }
-                b'Z' => {
-                    if cur != start {
-                        segs.push(Seg::Line(cur, start));
-                    }
-                    cur = start;
-                }
-                other => {
-                    return Err(PathError {
-                        message: format!("unknown path command '{}'", other as char),
-                        offset: sc.i - 1,
-                    });
-                }
-            }
-            last_ctrl = ctrl;
-            if upper != b'Z' && !sc.more_numbers() && sc.i < sc.s.len() && !sc.s[sc.i].is_ascii_alphabetic() {
-                return Err(PathError { message: "unexpected character in path data".into(), offset: sc.i });
-            }
-        }
+        let cmds = commands(d)?;
+        let (mut segs, starts, _) = segments_of(&cmds);
         if segs.is_empty() {
+            let cur = cmds.last().map_or([0.0, 0.0], PathCmd::end);
             segs.push(Seg::Line(cur, cur));
         }
-        let mut table = Vec::with_capacity(segs.len() * SAMPLES + 1);
-        let mut acc = 0.0;
-        let mut prev = segs[0].at(0.0);
-        table.push((0.0, 0, 0.0));
-        for (i, s) in segs.iter().enumerate() {
-            for k in 1..=SAMPLES {
-                let t = k as f64 / SAMPLES as f64;
-                let p = s.at(t);
-                acc += libm::hypot(p[0] - prev[0], p[1] - prev[1]);
-                table.push((acc, i, t));
-                prev = p;
-            }
-        }
-        Ok(MotionPath { segs, starts, table, length: acc })
+        let (table, length) = arc_table(&segs, &[]);
+        Ok(MotionPath { segs, starts, table, length })
     }
 
     /// Subpaths as polylines, curves subdivided until the chord deviates by
@@ -371,17 +534,7 @@ impl MotionPath {
     pub fn sample(&self, p: f64, constant_speed: bool) -> (P, f64) {
         let p = p.clamp(0.0, 1.0);
         let (seg, s) = if constant_speed && self.length > 0.0 {
-            let target = p * self.length;
-            let k = self.table.partition_point(|e| e.0 < target).clamp(1, self.table.len() - 1);
-            let (l0, i0, t0) = self.table[k - 1];
-            let (l1, i1, t1) = self.table[k];
-            let f = if l1 > l0 { (target - l0) / (l1 - l0) } else { 0.0 };
-            if i0 == i1 || t0 == 1.0 {
-                let t0 = if i0 != i1 { 0.0 } else { t0 };
-                (i1, t0 + (t1 - t0) * f)
-            } else {
-                (i1, t1 * f)
-            }
+            locate(&self.table, p * self.length)
         } else {
             let n = self.segs.len() as f64;
             let x = p * n;

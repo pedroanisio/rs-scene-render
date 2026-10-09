@@ -78,6 +78,9 @@
     "c16.scene.xml": [
       "C16"
     ],
+    "c17-points-count.scene.xml": [
+      "C17"
+    ],
     "c17.scene.xml": [
       "C17"
     ],
@@ -231,8 +234,29 @@
     "c7.scene.xml": [
       "C7"
     ],
+    "c74.scene.xml": [
+      "C74"
+    ],
+    "c75.scene.xml": [
+      "C75"
+    ],
+    "c76.scene.xml": [
+      "C76"
+    ],
+    "c77.scene.xml": [
+      "C77"
+    ],
+    "c78.scene.xml": [
+      "C78"
+    ],
+    "c79.scene.xml": [
+      "C79"
+    ],
     "c8.scene.xml": [
       "C8"
+    ],
+    "c80.scene.xml": [
+      "C80"
     ],
     "c9.scene.xml": [
       "C9"
@@ -911,6 +935,9 @@
     "v1-sections.scene.xml": [
       "V1"
     ],
+    "v10.scene.xml": [
+      "V10"
+    ],
     "v2-outputs.scene.xml": [
       "V2"
     ],
@@ -1124,6 +1151,8 @@
     "pyro-mesh.scene.xml": [],
     "pyro-multigrid.scene.xml": [],
     "pyro.scene.xml": [],
+    "repeat-points-neutral-steps.scene.xml": [],
+    "repeat-points.scene.xml": [],
     "solid-colliders.scene.xml": [],
     "stroke-text.scene.xml": [],
     "text3d-tracking.scene.xml": [],

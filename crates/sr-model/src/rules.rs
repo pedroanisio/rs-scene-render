@@ -981,6 +981,10 @@ impl<'a> Eval<'a> {
                     "documents before version=\"1.2\" cannot use 1.2 elements or asset kinds; set version=\"1.2\"."
                         .into()
                 });
+                // p75 (SREP 26)
+                let v10 =
+                    n.descendants().any(|d| is(d, "points") && d.parent_element().is_some_and(|p| is(p, "repeat")));
+                self.check(!v10, n, "V10", || "points in a repeat needs version=\"1.2\".".into());
             }
             // p2
             "vector" => {
@@ -1824,9 +1828,37 @@ impl<'a> Eval<'a> {
                     "C17",
                     || "repeat needs exactly one of @count, @over or a points child.".into(),
                 );
+                // p76 (SREP 26)
+                let point_children = kids(n, "points").count();
+                self.check(point_children <= 1, n, "C74", || "a repeat takes at most one points child.".into());
+                let off = |k: &str, neutral: f64| a(k).is_some_and(|v| xpath_number(v) != neutral);
+                self.check(point_children == 0 || !(off("from", 0.0) || off("step", 1.0)), n, "C80", || {
+                    "a repeat with a points child takes no @from other than 0 and no @step other than 1.".into()
+                });
                 let c18 =
                     !has("over") || contains(&self.sets.data, a("over")) || contains(&self.sets.list_params, a("over"));
                 self.check(c18, n, "C18", || "repeat/@over must name a data source or a list parameter.".into());
+            }
+            // p76 (SREP 26)
+            "points" if parent_is("repeat") => {
+                let ty = a("type");
+                self.check(ty != Some("along-path") || (has("path") && has("count")), n, "C75", || {
+                    "points type=\"along-path\" needs @path and @count.".into()
+                });
+                let c76 = ty != Some("scatter")
+                    || (has("count")
+                        && ((has("path") && !(has("width") || has("height")))
+                            || (!has("path") && has("width") && has("height"))));
+                self.check(c76, n, "C76", || {
+                    "points type=\"scatter\" needs @count and either @path or both @width and @height.".into()
+                });
+                self.check(ty != Some("vertices") || has("path"), n, "C77", || {
+                    "points type=\"vertices\" needs @path.".into()
+                });
+                self.check(ty != Some("list") || has("at"), n, "C78", || "points type=\"list\" needs @at.".into());
+                let c79 = kids(n, "animate")
+                    .all(|an| matches!(an.attribute("property"), Some("spacingX" | "spacingY" | "width" | "height")));
+                self.check(c79, n, "C79", || "points animates only spacingX, spacingY, width and height.".into());
             }
             // p13
             "transition" => {
