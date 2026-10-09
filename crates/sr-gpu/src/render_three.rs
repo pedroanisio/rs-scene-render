@@ -3177,6 +3177,43 @@ mod scope_tests {
         assert!(!over.contains("renderer=\"pathtrace\""), "the camera already asks for it: {over}");
     }
 
+    /// A `<motionPath>` moves a camera and an object3D like any other node. In v0.1.4 the 3D renderer read their
+    /// position from the `x` and `y` attributes only, so the path was ignored with no error (Inova probe A: the
+    /// eye stayed at x = 0, y = 0).
+    #[test]
+    fn a_motion_path_moves_a_camera_and_an_object() {
+        let xml = r#"<scene version="1.2"><project width="32" height="32" fps="10" duration="4"/><composition>
+          <camera id="cam" z="-500"><motionPath path="M0 0 L100 50" start="0" end="2"/></camera>
+          <object3D id="box" primitive="box" z="10"><motionPath path="M10 20 L30 60" start="0" end="2"/></object3D>
+          <object3D id="offset" primitive="box" x="5" y="7"><motionPath path="M0 0 L10 0" start="0" end="2" additive="true"/></object3D>
+          </composition></scene>"#;
+        let doc = sr_model::load_str(xml, &sr_model::LoadOptions::without_assets()).unwrap();
+        let ev = sr_eval::Evaluator::new(&doc, &Default::default()).unwrap();
+        for (t, cam, abs, add) in [
+            (0.0, [0.0, 0.0], [10.0, 20.0], [5.0, 7.0]),
+            (1.0, [50.0, 25.0], [20.0, 40.0], [10.0, 7.0]),
+            (3.0, [100.0, 50.0], [30.0, 60.0], [15.0, 7.0]),
+        ] {
+            let g = ev.evaluate(t);
+            let at = |id: &str| g.nodes.iter().position(|n| &*n.id == id).unwrap();
+            let eye = Renderer::cam_params(&g, &[], at("cam"), 0).position.unwrap();
+            assert!((eye - Vec3::new(cam[0], cam[1], -500.0)).length() < 1e-3, "camera at {t} s: {eye:?}");
+            for (id, want, z) in [("box", abs, 10.0), ("offset", add, 0.0)] {
+                let p = Renderer::world3(&g, &[], at(id), 0).transform_point3(Vec3::ZERO);
+                assert!((p - Vec3::new(want[0], want[1], z)).length() < 1e-3, "{id} at {t} s: {p:?}");
+            }
+        }
+        // autoOrient turns an object3D to the path's tangent: straight down the frame, its x axis points down
+        let xml = r#"<scene version="1.2"><project width="32" height="32" fps="10" duration="2"/><composition>
+          <object3D id="box" primitive="box"><motionPath path="M0 0 L0 100" autoOrient="true"/></object3D>
+          </composition></scene>"#;
+        let doc = sr_model::load_str(xml, &sr_model::LoadOptions::without_assets()).unwrap();
+        let g = sr_eval::Evaluator::new(&doc, &Default::default()).unwrap().evaluate(1.0);
+        let i = g.nodes.iter().position(|n| &*n.id == "box").unwrap();
+        let axis = Renderer::world3(&g, &[], i, 0).transform_vector3(Vec3::X);
+        assert!((axis - Vec3::Y).length() < 1e-4, "{axis:?}");
+    }
+
     #[test]
     fn instantiated_three_dimensional_parents_resolve_per_instance() {
         for weight in [1.0_f32, 0.5] {

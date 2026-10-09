@@ -49,3 +49,35 @@ fn additive_adds_to_the_nodes_own_animation() {
     let (x, _) = at(&doc("M 0 0 L 100 0", "", keys), 1.0);
     assert!((x - 50.0).abs() < 1e-9, "{x}");
 }
+
+/// The path's point is also the node's `x` and `y` properties: the 3D renderer reads a camera's eye and an object3D's
+/// position from them, and ignored a motion path while it was only in the 2D transform (Inova probe A, v0.1.4).
+#[test]
+fn the_path_point_is_the_nodes_x_and_y_properties() {
+    for (additive, want) in [("", [70.0, 20.0]), (r#"additive="true""#, [150.0, 50.0])] {
+        let d = doc("M 20 20 L 120 20", additive, "");
+        let f = Evaluator::new(&d, &EvalOptions::default()).unwrap_or_else(|r| panic!("{r}")).evaluate(1.0);
+        let n = f.nodes.iter().find(|n| &*n.id == "s").unwrap();
+        let got = ["x", "y"].map(|k| n.props.get(k).and_then(|v| v.as_num()).unwrap_or(f64::NAN));
+        assert!((got[0] - want[0]).abs() < 1e-9 && (got[1] - want[1]).abs() < 1e-9, "{additive}: {got:?}");
+    }
+}
+
+/// A camera turns by yaw, pitch and roll, so `autoOrient` on its motion path has nothing to turn: the document is
+/// refused (and `validate` reports it) instead of the camera silently not turning.
+#[test]
+fn a_camera_that_would_turn_along_its_path_is_refused() {
+    let xml = |orient: &str| {
+        format!(
+            r#"<scene version="1.2"><project width="64" height="64" fps="10" duration="2"/><composition>
+  <camera id="cam" z="-500"><motionPath path="M0 0 L100 0" {orient}/></camera></composition></scene>"#
+        )
+    };
+    let build = |orient: &str| {
+        let d = sr_model::load_str(&xml(orient), &sr_model::LoadOptions::without_assets()).unwrap();
+        Evaluator::new(&d, &EvalOptions::default()).map(|_| ())
+    };
+    assert!(build("").is_ok());
+    let refused = build(r#"autoOrient="true""#).expect_err("a camera does not turn along its path");
+    assert!(refused.to_string().contains("autoOrient"), "{refused}");
+}
