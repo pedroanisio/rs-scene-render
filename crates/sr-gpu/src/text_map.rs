@@ -384,6 +384,7 @@ pub fn map_drawing_as(
                 let lstyle = label_prop.as_ref().map(|_| label_style(cx, ca.str("textStyle").as_deref()));
                 let mut run: Option<(Option<Paint>, f64, Vec<Poly>)> = None;
                 let mut strokes: Vec<(Vec<Poly>, Option<Paint>, f64, f64)> = Vec::new();
+                let (mut kept, mut drawn) = (0usize, 0usize);
                 for f in fs.iter().filter(|f| keep(f, filter.as_deref())) {
                     let over = f.text(&key_by).and_then(|k| styles.get(&k));
                     let mut fpaint = match (&scale, &fill_by) {
@@ -409,6 +410,8 @@ pub fn map_drawing_as(
                         fo *= oo;
                     }
                     let pl = proj.project(&f.geometry);
+                    kept += 1;
+                    drawn += usize::from(feature_shows(&pl, [w, h]));
                     // Neighbours with the same paint fill as one shape, so the borders they share
                     // leave no anti-aliasing seam; strokes follow once the run of fills ends.
                     let rings: Vec<Poly> = pl.polygons.iter().flat_map(|poly| polys_of_rings(poly, true)).collect();
@@ -455,6 +458,15 @@ pub fn map_drawing_as(
                 }
                 for (polys, sp, w, o) in strokes.drain(..) {
                     pt.stroke(&polys, &sp, w, o);
+                }
+                if kept > 0 && drawn == 0 {
+                    let msg = format!(
+                        "{}: geoLayer {geo}: all {kept} features are outside the frame or smaller than a pixel at this view, so nothing is drawn",
+                        mp.id
+                    );
+                    if !cx.unsupported.contains(&msg) {
+                        cx.unsupported.push(msg);
+                    }
                 }
             } else if is(c, "graticule") {
                 let pl = proj.project(&graticule(ca.num("step", 10.0)));
@@ -586,4 +598,11 @@ pub fn map_drawing_as(
     });
     d.scene.cmds.push(Cmd::Pop { opacity: 1.0 });
     Ok(d)
+}
+
+/// Whether a projected feature leaves a mark: it lies in the frame and is at least a pixel across, or is a point.
+fn feature_shows(pl: &sr_geo::project::Planar, size: [f64; 2]) -> bool {
+    let Some(b) = pl.bounds() else { return false };
+    let inside = b[1][0] >= 0.0 && b[0][0] <= size[0] && b[1][1] >= 0.0 && b[0][1] <= size[1];
+    inside && (!pl.points.is_empty() || (b[1][0] - b[0][0]).max(b[1][1] - b[0][1]) >= 1.0)
 }

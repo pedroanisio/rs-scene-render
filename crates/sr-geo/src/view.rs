@@ -102,6 +102,11 @@ pub struct Map {
     pub size: [f64; 2],
     /// Pixels per radian at zoom 0.
     pub base_scale: f64,
+    /// A floor on the effective scale (`base_scale * 2^zoom`), in pixels per radian; 0 for none. A conformal cone
+    /// sends the pole opposite its parallels to infinity, so the fit of the whole sphere has no finite extent and
+    /// `base_scale` collapses to a view that draws nothing; the floor is the scale at which a window of one
+    /// equirectangular world round the centre fills the frame. Views that already drew more keep their meaning.
+    pub min_scale: f64,
     /// Extra room round the frame kept by the planar clip (pixels), for strokes and markers.
     pub margin: f64,
     /// Resampling precision (pixels).
@@ -138,7 +143,8 @@ impl Map {
             }
             b.map(|b| [(b[0][0] + b[1][0]) / 2.0, (b[0][1] + b[1][1]) / 2.0]).unwrap_or([0.0, 0.0])
         });
-        let mut map = Map { kind, parallels, size, base_scale: 150.0, margin: 0.0, precision: 0.5_f64.sqrt() };
+        let mut map =
+            Map { kind, parallels, size, base_scale: 150.0, min_scale: 0.0, margin: 0.0, precision: 0.5_f64.sqrt() };
         if kind == Kind::WebMercator {
             map.base_scale = WEB_MERCATOR_BASE;
             return (map, center);
@@ -157,9 +163,19 @@ impl Map {
             }
         }
         let half = [(size[0] / 2.0 - padding).max(1.0), (size[1] / 2.0 - padding).max(1.0)];
-        let k = (half[0] / reach[0].max(1e-9)).min(half[1] / reach[1].max(1e-9));
+        let fitted = |reach: [f64; 2]| (half[0] / reach[0].max(1e-9)).min(half[1] / reach[1].max(1e-9));
+        let k = fitted(reach);
         if k.is_finite() && k > 0.0 {
             map.base_scale = 150.0 * k;
+        }
+        // Without a `fit`, a conformal cone's whole-sphere fit collapses (a default `lambert-conformal` map drew
+        // nothing): the effective scale is floored at the fit of a window of one equirectangular world.
+        if fit.is_empty() && kind == Kind::LambertConformal {
+            let window = std::f64::consts::PI * 150.0;
+            let floor = 150.0 * fitted([reach[0].min(window), reach[1].min(window)]);
+            if floor.is_finite() && floor > map.base_scale {
+                map.min_scale = floor;
+            }
         }
         (map, center)
     }
@@ -167,7 +183,7 @@ impl Map {
     /// The projection showing `view`.
     pub fn projection(&self, view: &View) -> Projection {
         let mut p = Projection::new(self.kind.raw(self.parallels));
-        p.set_scale(self.base_scale * 2f64.powf(view.zoom))
+        p.set_scale((self.base_scale * 2f64.powf(view.zoom)).max(self.min_scale))
             .set_translate(self.size[0] / 2.0, self.size[1] / 2.0)
             .set_angle(-view.rotation)
             .set_precision(self.precision);
