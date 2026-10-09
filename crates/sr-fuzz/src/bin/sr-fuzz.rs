@@ -12,8 +12,8 @@ fn main() {
     let seed: u64 = get("--seed").and_then(|s| s.parse().ok()).unwrap_or(0x5eed);
     let corpus = get("--corpus").unwrap_or_else(|| concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/corpus").into());
     let out = std::path::PathBuf::from(get("--out").unwrap_or_else(|| "fuzz-crashes".into()));
-    // panics are caught; keep their messages off the terminal
-    std::panic::set_hook(Box::new(|_| {}));
+    // panics are caught; keep their messages off the terminal, and each crash says where it panicked
+    sr_fuzz::quiet_panics();
     if let Some(name) = get("--target") {
         // each place that panics, once
         static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());

@@ -11,6 +11,7 @@ mod crater_impact_ocean;
 mod crater_normal;
 mod crater_smoke;
 mod ejecta_splash;
+mod extent_beyond_the_solver;
 mod impact_block;
 mod impact_scenes;
 mod water_entry;

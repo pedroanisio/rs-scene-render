@@ -188,6 +188,7 @@ jobs:
           path: |
             target/environment/
             /tmp/perf_*/*.scene.xml
+            fuzz-crashes/
           if-no-files-found: warn
   oracle:
     runs-on: ubuntu-24.04

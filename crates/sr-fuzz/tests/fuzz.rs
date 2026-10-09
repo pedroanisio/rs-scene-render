@@ -8,10 +8,25 @@ use sr_fuzz::targets;
 fn quiet<T>(f: impl FnOnce() -> T) -> T {
     static LOCK: Mutex<()> = Mutex::new(());
     let _held = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    std::panic::set_hook(Box::new(|_| {}));
+    sr_fuzz::quiet_panics();
     let out = f();
     let _ = std::panic::take_hook();
     out
+}
+
+/// A crash says where it panicked, not only what the panic said: an index out of bounds found by
+/// a ten-minute run is otherwise a message with no place to start from.
+#[test]
+fn a_crash_names_the_place_that_panicked() {
+    fn boom(input: &str) {
+        panic!("boom on {input}");
+    }
+    let k = quiet(|| sr_fuzz::guard("document", "x", boom)).expect("the panic is a crash");
+    assert!(k.message.starts_with("boom on x at "), "{}", k.message);
+    assert!(k.message.contains("fuzz.rs:"), "{}", k.message);
+    // a crash after it does not carry the place of the one before
+    let quiet_input = quiet(|| sr_fuzz::guard("document", "y", |_| {}));
+    assert!(quiet_input.is_none());
 }
 
 #[test]
