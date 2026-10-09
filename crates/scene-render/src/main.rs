@@ -20,6 +20,7 @@ Examples:
   scene-render inspect promo.scene.xml
   scene-render eval promo.scene.xml --time 2.5 --variant dark --param headline=Hi
   scene-render eval promo.scene.xml --bench
+  scene-render captions promo.scene.xml --at 1.5,3
   scene-render explain C21
 
 Exit status: 0 valid, 1 invalid (or warnings with --deny-warnings; render/encode: anything\nnot rendered as authored with --strict), 2 usage or I/O error.";
@@ -125,6 +126,14 @@ fn parse_parallel(s: &str) -> Result<sr_deliver::Parallel, String> {
     sr_deliver::Parallel::parse(s).ok_or_else(|| format!("expected auto or a positive count, got {s:?}"))
 }
 
+fn parse_time(s: &str) -> Result<f64, String> {
+    s.trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|t| t.is_finite())
+        .ok_or_else(|| format!("expected a time in seconds, got {s:?}"))
+}
+
 fn parse_param(s: &str) -> Result<(String, String), String> {
     s.split_once('=')
         .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -198,6 +207,32 @@ enum Command {
         /// Evaluate every frame and report timing instead of printing a frame.
         #[arg(long)]
         bench: bool,
+        /// Skip file existence and SHA-256 checks.
+        #[arg(long)]
+        no_assets: bool,
+    },
+    /// Print each caption track after paging as JSON: the words of each cue with their times, the pages (lines,
+    /// start and end), and the current word over each page; with --at, the page and current word at those times.
+    ///
+    /// The pages are those the burn-in layout draws (lineBreaks, maxCharsPerLine, maxWordsPerLine, maxLines and the
+    /// preset applied); word indices count the words of a cue. Exit status 1 when a track cannot be read (its entry
+    /// carries the error).
+    Captions {
+        /// Scene document.
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+        /// Composition times (seconds) at which to report the page and current word: repeatable, or comma-separated.
+        #[arg(long, value_name = "SECONDS", value_delimiter = ',', allow_negative_numbers = true, value_parser = parse_time)]
+        at: Vec<f64>,
+        /// Variant to apply.
+        #[arg(long)]
+        variant: Option<String>,
+        /// Layout to render.
+        #[arg(long)]
+        layout: Option<String>,
+        /// Parameter value, repeatable: --param id=value.
+        #[arg(long = "param", value_name = "ID=VALUE", value_parser = parse_param)]
+        params: Vec<(String, String)>,
         /// Skip file existence and SHA-256 checks.
         #[arg(long)]
         no_assets: bool,
@@ -906,6 +941,53 @@ fn explain(code: Option<&str>, out: &mut Out) -> std::io::Result<ExitCode> {
             }
         },
     }
+}
+
+/// `scene-render captions`: the caption dump of `sr_gpu::caption_dump` on standard output, one JSON document.
+fn captions(
+    file: &Path,
+    at: &[f64],
+    opts: sr_eval::EvalOptions,
+    no_assets: bool,
+    out: &mut Out,
+) -> std::io::Result<ExitCode> {
+    let lopts = if no_assets { LoadOptions::without_assets() } else { LoadOptions::default() };
+    let report = |r: &Report| {
+        for d in &r.diagnostics {
+            eprintln!("{}[{}]: {}", d.severity, d.code, d.message);
+        }
+        eprintln!("invalid {}: {} error(s)", file.display(), r.error_count());
+    };
+    let doc = match sr_model::load_file(file, &lopts) {
+        Ok(d) => d,
+        Err(LoadError::Io { path, source }) => {
+            eprintln!("error: cannot read {}: {source}", path.display());
+            return Ok(ExitCode::from(2));
+        }
+        Err(LoadError::Invalid(r)) => {
+            report(&r);
+            return Ok(ExitCode::from(1));
+        }
+    };
+    let ev = match sr_eval::Evaluator::new(&doc, &opts) {
+        Ok(e) => e,
+        Err(r) => {
+            report(&r);
+            return Ok(ExitCode::from(1));
+        }
+    };
+    // JSON owns standard output: warnings and track errors go to standard error, one line each
+    for w in ev.warnings() {
+        eprintln!("{}[{}]: {}", w.severity, w.code, w.message);
+    }
+    let dump = sr_gpu::caption_dump::dump(ev.program(), at);
+    for t in &dump.tracks {
+        if let Some(e) = &t.error {
+            eprintln!("error: caption track {}: {e}", t.id);
+        }
+    }
+    writeln!(out.w, "{}", serde_json::to_string_pretty(&dump).expect("serialisable"))?;
+    Ok(if dump.is_complete() { ExitCode::SUCCESS } else { ExitCode::from(1) })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1755,6 +1837,10 @@ fn main() -> ExitCode {
             let opts =
                 sr_eval::EvalOptions { variant, layout, params, row: row.map(|r| (data, r)), ..Default::default() };
             eval(&file, time, frame, opts, format, bench, no_assets, &mut out)
+        }
+        Command::Captions { file, at, variant, layout, params, no_assets } => {
+            let opts = sr_eval::EvalOptions { variant, layout, params, ..Default::default() };
+            captions(&file, &at, opts, no_assets, &mut out)
         }
         Command::Render {
             file,

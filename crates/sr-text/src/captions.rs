@@ -797,6 +797,61 @@ impl Preset {
             _ => Classic,
         }
     }
+
+    /// The preset's name as the schema writes it (`Preset::parse` of the name gives the preset back).
+    pub fn name(self) -> &'static str {
+        use Preset::*;
+        match self {
+            Classic => "classic",
+            BoxedLine => "boxed-line",
+            BoxedWord => "boxed-word",
+            OneWord => "one-word",
+            Karaoke => "karaoke",
+            Highlight => "highlight",
+            Pop => "pop",
+            Fade => "fade",
+            Bounce => "bounce",
+            Slide => "slide",
+            Typewriter => "typewriter",
+            Enlarge => "enlarge",
+            None => "none",
+        }
+    }
+}
+
+/// The word of `page` the presets treat as current at time `t`, as an index into `page.words()`: the last word that
+/// has started, which stays current through the gap before the next; `None` before the first word starts. A one-word
+/// page's word is current for the whole page. (Highlight, boxed-word, pop and enlarge mark this word; karaoke lights
+/// every word that has started.)
+pub fn active_word(preset: Preset, page: &Page, t: f64) -> Option<usize> {
+    if preset == Preset::OneWord {
+        return Some(0);
+    }
+    page.words().iter().rposition(|w| w.start <= t + 1e-9)
+}
+
+/// The spans of `page` over which [`active_word`] does not change, in order: `(start, end, word)`, covering the
+/// page's time from its start to its end. A page that is never on screen (its end not after its start) has none.
+pub fn active_spans(preset: Preset, page: &Page) -> Vec<(f64, f64, Option<usize>)> {
+    if page.end.partial_cmp(&page.start) != Some(std::cmp::Ordering::Greater) {
+        return Vec::new();
+    }
+    let mut cuts = vec![page.start];
+    if preset != Preset::OneWord {
+        cuts.extend(page.words().iter().map(|w| w.start).filter(|&s| s > page.start && s < page.end));
+    }
+    cuts.sort_by(f64::total_cmp);
+    cuts.dedup();
+    let mut spans: Vec<(f64, f64, Option<usize>)> = Vec::with_capacity(cuts.len());
+    for (i, &a) in cuts.iter().enumerate() {
+        let b = cuts.get(i + 1).copied().unwrap_or(page.end);
+        let word = active_word(preset, page, a);
+        match spans.last_mut() {
+            Some(last) if last.2 == word => last.1 = b,
+            _ => spans.push((a, b, word)),
+        }
+    }
+    spans
 }
 
 /// Page-level motion of the fade and slide presets at time `t`: (opacity, downward offset in em).
@@ -835,7 +890,7 @@ fn bounce_out(x: f64) -> f64 {
 pub fn effects(preset: Preset, lay: &Layout, page: &Page, t: f64, active: &Paint) -> Vec<GlyphFx> {
     let words = page.words();
     let em = lay.styles.first().map(|s| s.size).unwrap_or(40.0);
-    let current = if preset == Preset::OneWord { Some(0) } else { words.iter().rposition(|w| w.start <= t + 1e-9) };
+    let current = active_word(preset, page, t);
     let (alpha, dy) = page_motion(preset, page, t);
     // word boxes on their lines: scale pivots (centre of the box, middle of the line box)
     let mut boxes: std::collections::HashMap<(usize, usize), (f64, f64, f64)> = Default::default();

@@ -56,6 +56,13 @@ pub struct Track {
     pub width: sr_model::values::Length,
 }
 
+impl Track {
+    /// The page on screen at time `t` and its index: a page shows from its start until (not including) its end.
+    pub fn page_at(&self, t: f64) -> Option<(usize, &Page)> {
+        self.pages.iter().enumerate().find(|(_, pg)| t >= pg.start && t < pg.end)
+    }
+}
+
 /// Caption tracks of a compiled document, retaining its identity across reloads.
 type Tracks = Option<(Arc<()>, Arc<Vec<Result<Track, String>>>)>;
 /// Chart data from a file: labels and series.
@@ -1204,7 +1211,7 @@ pub fn caption_scene(
         if !burn {
             continue;
         }
-        let Some(page) = tr.pages.iter().find(|pg| t >= pg.start && t < pg.end) else { continue };
+        let Some((_, page)) = tr.page_at(t) else { continue };
         let width = len_px(&tr.width, frame[0], frame);
         let (cxp, cyp) = (len_px(&tr.x, frame[0], frame), len_px(&tr.y, frame[1], frame));
         let bx = [0.0, 0.0, width, frame[1]];
