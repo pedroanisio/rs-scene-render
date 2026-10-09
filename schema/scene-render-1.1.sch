@@ -234,7 +234,7 @@
   </sch:pattern>
   <sch:pattern id="p37">
     <sch:rule context="*[@startMarker] | *[@endMarker] | key[@marker]">
-      <sch:assert id="R21" test="(not(@startMarker) or /scene/markers/marker[@id=current()/@startMarker]) and (not(@endMarker) or /scene/markers/marker[@id=current()/@endMarker]) and (not(@marker) or /scene/markers/marker[@id=current()/@marker])">marker references must name markers.</sch:assert>
+      <sch:assert id="R21" test="(not(@startMarker) or /scene/markers/marker[@id=current()/@startMarker] or (/scene/markers/beatGrid and ((substring-before(@startMarker,'.')='beat' or substring-before(@startMarker,'.')='bar') and string-length(substring-after(@startMarker,'.')) &gt; 0 and string-length(substring-after(@startMarker,'.')) &lt; 20 and translate(substring-after(@startMarker,'.'),'0123456789','')=''))) and (not(@endMarker) or /scene/markers/marker[@id=current()/@endMarker] or (/scene/markers/beatGrid and ((substring-before(@endMarker,'.')='beat' or substring-before(@endMarker,'.')='bar') and string-length(substring-after(@endMarker,'.')) &gt; 0 and string-length(substring-after(@endMarker,'.')) &lt; 20 and translate(substring-after(@endMarker,'.'),'0123456789','')=''))) and (not(@marker) or /scene/markers/marker[@id=current()/@marker] or (/scene/markers/beatGrid and ((substring-before(@marker,'.')='beat' or substring-before(@marker,'.')='bar') and string-length(substring-after(@marker,'.')) &gt; 0 and string-length(substring-after(@marker,'.')) &lt; 20 and translate(substring-after(@marker,'.'),'0123456789','')='')))">marker references must name a marker, or a beat.N or bar.N id of the scene's beatGrid.</sch:assert>
     </sch:rule>
   </sch:pattern>
   <sch:pattern id="p38">

@@ -466,6 +466,27 @@
     "geo3.scene.xml": [
       "GEO3"
     ],
+    "gm-element-id.scene.xml": [
+      "R21"
+    ],
+    "gm-malformed-dots.scene.xml": [
+      "R21"
+    ],
+    "gm-malformed-empty.scene.xml": [
+      "R21"
+    ],
+    "gm-malformed-kind.scene.xml": [
+      "R21"
+    ],
+    "gm-malformed-letters.scene.xml": [
+      "R21"
+    ],
+    "gm-no-grid.scene.xml": [
+      "R21"
+    ],
+    "gm-too-many-digits.scene.xml": [
+      "R21"
+    ],
     "mov1.scene.xml": [
       "MOV1"
     ],
@@ -1186,6 +1207,14 @@
     "fracture-contact.scene.xml": [],
     "fracture.scene.xml": [],
     "globe-relief.scene.xml": [],
+    "gm-bar.scene.xml": [],
+    "gm-end.scene.xml": [],
+    "gm-explicit.scene.xml": [],
+    "gm-key.scene.xml": [],
+    "gm-leading-zeros.scene.xml": [],
+    "gm-name-without-grid.scene.xml": [],
+    "gm-poster.scene.xml": [],
+    "gm-start.scene.xml": [],
     "joint.scene.xml": [],
     "kitchen-sink.scene.xml": [],
     "mesh-sequence.scene.xml": [],
@@ -1273,10 +1302,22 @@
     "w02-open-face.scene.xml": [
       "W02"
     ],
+    "w03-marker-named-like-generated.scene.xml": [
+      "W03"
+    ],
     "w03-no-lens.scene.xml": [
       "W03"
     ],
     "w04-denoise.scene.xml": [
+      "W04"
+    ],
+    "w04-poster-dangling.scene.xml": [
+      "W04"
+    ],
+    "w04-poster-element-id.scene.xml": [
+      "W04"
+    ],
+    "w04-poster-no-grid.scene.xml": [
       "W04"
     ],
     "w05-lights.scene.xml": [

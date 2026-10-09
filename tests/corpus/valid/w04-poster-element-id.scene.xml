@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- expect: W04 -->
+<scene version="1.1">
+  <project width="480" height="270" fps="24" duration="4" background="#000000" motionBlur="false" seed="1"/>
+
+  <output id="o" path="out/o.mp4" codec="h264"><poster path="out/p.png" marker="n"/></output>
+  <markers><beatGrid bpm="120" offset="0.25"/></markers>
+  <composition>
+    <shape id="n" shape="rect" x="100" y="100" width="60" height="60" fill="#FF0000" ></shape>
+  </composition>
+</scene>

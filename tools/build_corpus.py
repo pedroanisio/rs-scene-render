@@ -628,6 +628,49 @@ VALID = {
 # Table)) and minLength 1 on whitespace-only IDREFS lists.
 ORACLE_BLIND = {"s06-idrefs-empty", "s10-dangling-idref"}
 
+# ---- generated marker ids (beat.N and bar.N of a beatGrid), SREP 57
+def marker_doc(markers='<beatGrid bpm="120" offset="0.25"/>', shape='', anim='', outputs=''):
+    return f"""<scene version="1.1">
+  <project width="480" height="270" fps="24" duration="4" background="#000000" motionBlur="false" seed="1"/>
+{outputs}
+  <markers>{markers}</markers>
+  <composition>
+    <shape id="n" shape="rect" x="100" y="100" width="60" height="60" fill="#FF0000" {shape}>{anim}</shape>
+  </composition>
+</scene>
+"""
+
+KEY_ANIM = '<animate property="x"><key time="0" value="0"/><key time="1.9" value="400" marker="{}"/></animate>'
+POSTER = '\n  <output id="o" path="out/o.mp4" codec="h264"><poster path="out/p.png" marker="{}"/></output>'
+VALID.update({
+    "gm-start": marker_doc(shape='startMarker="beat.3"'),
+    "gm-bar": marker_doc(shape='startMarker="bar.2"'),
+    "gm-end": marker_doc(shape='startMarker="beat.0" endMarker="bar.1"'),
+    "gm-key": marker_doc(anim=KEY_ANIM.format("beat.4")),
+    "gm-poster": marker_doc(outputs=POSTER.format("bar.1")),
+    "gm-leading-zeros": marker_doc(shape='startMarker="beat.007"'),
+    "gm-explicit": marker_doc('<beatGrid bpm="120" offset="0.25"/><marker id="m3" time="1.25"/>', shape='startMarker="m3"'),
+    "gm-name-without-grid": marker_doc('<marker id="beat.3" time="1.5"/>', shape='startMarker="beat.3"'),
+})
+CASES += [
+    ("gm-no-grid", ["R21"], lambda _: marker_doc('<marker id="m3" time="1.25"/>', shape='startMarker="beat.3"')),
+    ("gm-malformed-empty", ["R21"], lambda _: marker_doc(shape='startMarker="beat."')),
+    ("gm-malformed-letters", ["R21"], lambda _: marker_doc(shape='startMarker="beat.x"')),
+    ("gm-malformed-dots", ["R21"], lambda _: marker_doc(shape='startMarker="beat.3.1"')),
+    ("gm-malformed-kind", ["R21"], lambda _: marker_doc(shape='startMarker="beats.3"')),
+    ("gm-too-many-digits", ["R21"], lambda _: marker_doc(shape='startMarker="beat.12345678901234567890"')),
+    ("gm-element-id", ["R21"], lambda _: marker_doc(shape='startMarker="n"')),
+]
+WARN_CASES += [
+    ("w04-poster-no-grid", ["W04"], lambda _: marker_doc('<marker id="m3" time="1.25"/>', outputs=POSTER.format("bar.1"))),
+    ("w04-poster-element-id", ["W04"], lambda _: marker_doc(outputs=POSTER.format("n"))),
+    ("w04-poster-dangling", ["W04"], lambda _: marker_doc(outputs=POSTER.format("nowhere"))),
+]
+WARN_CASES.append(
+    ("w03-marker-named-like-generated", ["W03"],
+     lambda _: marker_doc('<beatGrid bpm="120" offset="0.25"/><marker id="beat.3" time="1.25"/>', shape='startMarker="beat.3"'))
+)
+
 CASES.append(("openvdb-format", ["S06"], lambda _: VALID["openvdb"].replace('format="openvdb"', 'format="guess"')))
 
 def write(path, text, expect):

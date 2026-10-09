@@ -256,6 +256,8 @@ struct Sets<'a> {
     video_with_audio: HashSet<&'a str>,
     materials: HashSet<&'a str>,
     markers: HashSet<&'a str>,
+    /// The scene declares a `beatGrid`, so `beat.N` and `bar.N` name generated markers.
+    beat_grid: bool,
     text_styles: HashSet<&'a str>,
     token_names: HashSet<&'a str>,
     paints: HashSet<&'a str>,
@@ -418,6 +420,7 @@ fn build_sets<'a>(scene: Option<Node<'a, '_>>) -> Sets<'a> {
     };
     collect("materials", "material", &mut s.materials);
     collect("markers", "marker", &mut s.markers);
+    s.beat_grid = kids(scene, "markers").any(|m| m.children().any(|c| is(c, "beatGrid")));
     collect("styles", "textStyle", &mut s.text_styles);
     collect("audioMix", "bus", &mut s.buses);
     collect("audioMix", "audioTrack", &mut s.audio_tracks);
@@ -468,6 +471,12 @@ fn build_sets<'a>(scene: Option<Node<'a, '_>>) -> Sets<'a> {
         }
     }
     s
+}
+
+/// `beat.N` or `bar.N` with N one to nineteen decimal digits: the ids a `beatGrid` generates.
+fn is_generated_marker(id: &str) -> bool {
+    let Some((kind, n)) = id.split_once('.') else { return false };
+    matches!(kind, "beat" | "bar") && (1..20).contains(&n.len()) && n.bytes().all(|b| b.is_ascii_digit())
 }
 
 fn contains(set: &HashSet<&str>, v: Option<&str>) -> bool {
@@ -2292,10 +2301,41 @@ impl<'a> Eval<'a> {
         // p37
         if has("startMarker") || has("endMarker") || (local == "key" && has("marker")) {
             let m = &self.sets.markers;
-            let ok = (!has("startMarker") || contains(m, a("startMarker")))
-                && (!has("endMarker") || contains(m, a("endMarker")))
-                && (!has("marker") || contains(m, a("marker")));
-            self.check(ok, n, "R21", || "marker references must name markers.".into());
+            let names = |v: Option<&str>| contains(m, v) || (self.sets.beat_grid && v.is_some_and(is_generated_marker));
+            let ok = (!has("startMarker") || names(a("startMarker")))
+                && (!has("endMarker") || names(a("endMarker")))
+                && (!has("marker") || names(a("marker")));
+            self.check(ok, n, "R21", || {
+                "marker references must name a marker, or a beat.N or bar.N id of the scene's beatGrid.".into()
+            });
+        }
+        // W03: an explicit marker named like a generated one; the explicit marker wins
+        if local == "marker" && self.sets.beat_grid && a("id").is_some_and(is_generated_marker) {
+            self.warn(
+                n,
+                "W03",
+                format!(
+                    "the marker id {:?} is also an id the beatGrid generates; the explicit marker wins, so the grid's own time is \
+                     unreachable under that name (a later version may make this an error).",
+                    a("id").unwrap_or("")
+                ),
+            );
+        }
+        // W04: a poster or thumbnail marker that names no marker (it was an xs:IDREF to any element before the
+        // generated ids; an error would make a valid document invalid)
+        if matches!(local, "poster" | "thumbnail") && has("marker") {
+            let v = a("marker");
+            if !(contains(&self.sets.markers, v) || (self.sets.beat_grid && v.is_some_and(is_generated_marker))) {
+                self.warn(
+                    n,
+                    "W04",
+                    format!(
+                        "{local}/@marker {:?} does not name a marker, nor a beat.N or bar.N id of a beatGrid (a later version \
+                         may make this an error).",
+                        v.unwrap_or("")
+                    ),
+                );
+            }
         }
         // p38
         if (local == "textStyle" && has("basedOn")) || (has("style") && local != "audiogram") {
