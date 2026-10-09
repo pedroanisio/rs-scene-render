@@ -451,8 +451,9 @@ fn run(xml: &str, base_dir: PathBuf, opts: &LoadOptions, build: bool) -> Outcome
                 return Outcome { report, document: None };
             }
         };
-        let ids = crate::xsd::structure::validate(&doc, &mut report.diagnostics);
+        let (ids, types) = crate::xsd::structure::validate_typed(&doc, &mut report.diagnostics);
         crate::rules::validate(&doc, &mut report.diagnostics);
+        crate::inert::validate(&doc, &types, &mut report.diagnostics);
         if opts.verify_assets {
             crate::assets::verify(&doc, &base_dir, &mut report.diagnostics);
         }

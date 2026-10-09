@@ -197,10 +197,13 @@ fn render_and_encode_surface_image_size_warnings() {
     assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
     assert!(String::from_utf8_lossy(&o.stdout).contains("warning[A07]"));
     let pattern = dir.join("encode_%03d.png");
-    let o = run(&["encode", file, "-o", pattern.to_str().unwrap(), "--end", "0.1", "--json", "--strict"]);
+    let o = run(&["encode", file, "-o", pattern.to_str().unwrap(), "--end", "0.1", "--json"]);
     assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
     let r: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
     assert!(r["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("A07")));
+    // a warning is a finding --strict counts (SREP 18: only information is left out)
+    let o = run(&["encode", file, "-o", pattern.to_str().unwrap(), "--end", "0.1", "--json", "--strict"]);
+    assert_eq!(o.status.code(), Some(1), "{}", String::from_utf8_lossy(&o.stderr));
 }
 
 fn no_gpu(o: &Output) -> bool {
@@ -1569,7 +1572,7 @@ fn validate_warns_about_attributes_this_build_does_not_read() {
     let out = String::from_utf8_lossy(&v.stdout);
     assert_eq!(v.status.code(), Some(0), "{out}");
     // an attribute with no effect is information (SREP 18): shown, and not counted as a warning
-    assert!(out.contains("info[E19]") && out.contains("collapse"), "{out}");
+    assert!(out.contains("info[INERT-I9]") && out.contains("collapse"), "{out}");
     assert!(out.contains("0 warning(s), 1 info"), "{out}");
     assert_eq!(
         run(&["validate", "--deny-warnings", &f]).status.code(),
@@ -1579,7 +1582,7 @@ fn validate_warns_about_attributes_this_build_does_not_read() {
     let j = run(&["validate", "--format", "json", &f]);
     let v: serde_json::Value = serde_json::from_slice(&j.stdout).unwrap();
     let d = &v["files"][0]["diagnostics"][0];
-    assert!(d["code"] == "E19" && d["severity"] == "info", "{v}");
+    assert!(d["code"] == "INERT-I9" && d["severity"] == "info", "{v}");
 }
 
 #[test]
@@ -1592,7 +1595,7 @@ fn a_finding_that_changes_the_result_still_fails_deny_warnings() {
     );
     let v = run(&["validate", &f]);
     let out = String::from_utf8_lossy(&v.stdout);
-    assert!(out.contains("warning[E20]"), "{out}");
+    assert!(out.contains("warning[MASK-MISS]"), "{out}");
     assert_eq!(run(&["validate", "--deny-warnings", &f]).status.code(), Some(1));
 }
 

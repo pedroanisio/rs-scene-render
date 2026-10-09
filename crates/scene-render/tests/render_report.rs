@@ -1,0 +1,470 @@
+//! SREP 18: render reports. The conformance cases `srep-0018-report`, `-failed` and `-deterministic`, run through
+//! `scene-render encode`, and the shape of `scene-render-report/1` as the SREP's field table gives it.
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+use serde_json::Value;
+
+fn run(args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_scene-render")).args(args).env("NO_COLOR", "1").output().expect("binary runs")
+}
+
+fn dir(name: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("sr-report-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// One I2 shape (a stroke width without a stroke paint) and one I8 node (starting after the composition ends).
+const REPORT_SCENE: &str = r##"<scene version="1.2">
+  <project width="64" height="48" fps="10" duration="1" background="#000000"/>
+  <composition>
+    <shape id="chip" shape="rect" width="20" height="10" fill="#FF0000" strokeWidth="2"/>
+    <shape id="late" shape="rect" width="8" height="8" fill="#00FF00" start="5"/>
+  </composition>
+</scene>"##;
+
+fn encode(dir: &Path, scene: &str, report: &str) -> Output {
+    let file = dir.join("case.scene.xml");
+    std::fs::write(&file, scene).unwrap();
+    let frames = dir.join("frames/f_%04d.png");
+    run(&[
+        "encode",
+        file.to_str().unwrap(),
+        "-o",
+        frames.to_str().unwrap(),
+        "--end",
+        "0.2",
+        "--report",
+        dir.join(report).to_str().unwrap(),
+    ])
+}
+
+fn read(path: &Path) -> Value {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    serde_json::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}\n{text}", path.display()))
+}
+
+fn codes(report: &Value) -> Vec<String> {
+    report["findings"].as_array().unwrap().iter().map(|f| f["code"].as_str().unwrap().to_string()).collect()
+}
+
+/// The registry codes (SREP 18 and the SREPs that add to it) and the engine-specific namespace.
+fn known_code(c: &str) -> bool {
+    const FIXED: [&str; 17] = [
+        "XSD",
+        "ASSET-MISSING",
+        "TXT-FIT",
+        "TXT-CUT",
+        "ACC-FLASH",
+        "ACC-CAPTIONS",
+        "LEG-CONTRAST",
+        "LEG-SPEED",
+        "LEG-SHORT",
+        "LEG-SIZE",
+        "SAFE-AREA",
+        "MASK-MISS",
+        "FONT-SUB",
+        "FONT-GLYPH",
+        "SUP-APPROX",
+        "SUP-REPORTED",
+        "INERT-I1",
+    ];
+    let inert = c.strip_prefix("INERT-I").is_some_and(|n| n.parse::<u32>().is_ok_and(|n| (1..=13).contains(&n)));
+    let sch = c.strip_prefix("SCH-").is_some_and(|id| !id.is_empty());
+    let engine = c.strip_prefix("X-rs-scene-render-").is_some_and(|rest| !rest.is_empty());
+    FIXED.contains(&c) || inert || sch || engine
+}
+
+/// The report's shape, field by field, as SREP 18's Specification 2 and 3 give it.
+fn check_shape(r: &Value) {
+    let o = r.as_object().expect("one JSON object");
+    let mut keys: Vec<&str> = o.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["engine", "findings", "format", "output", "scene"]);
+    assert_eq!(r["format"], "scene-render-report/1");
+    assert_eq!(r["engine"]["name"], "rs-scene-render");
+    assert!(r["engine"]["version"].as_str().is_some_and(|v| !v.is_empty()));
+    let sha = r["scene"]["sha256"].as_str().unwrap();
+    assert!(sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()), "{sha}");
+    for k in ["width", "height"] {
+        assert!(r["output"][k].as_u64().is_some(), "output.{k}: {}", r["output"]);
+    }
+    for k in ["start", "end"] {
+        assert!(r["output"][k].as_f64().is_some(), "output.{k}: {}", r["output"]);
+    }
+    let findings = r["findings"].as_array().expect("findings array");
+    let allowed = ["code", "severity", "path", "node", "time", "measured", "limit", "unit", "message"];
+    for f in findings {
+        for k in f.as_object().unwrap().keys() {
+            assert!(allowed.contains(&k.as_str()), "unknown field {k} in {f}");
+        }
+        let code = f["code"].as_str().unwrap();
+        assert!(known_code(code), "code {code} is neither in the registry nor engine-specific");
+        assert!(["error", "warning", "info"].contains(&f["severity"].as_str().unwrap()), "{f}");
+        assert!(f["path"].as_str().unwrap().starts_with("/scene"), "{f}");
+        assert!(f["message"].is_string(), "{f}");
+        if let Some(t) = f.get("time") {
+            let t = t.as_array().unwrap();
+            assert!(t.len() == 2 && t[0].as_f64().unwrap() <= t[1].as_f64().unwrap(), "{f}");
+        }
+        for k in ["measured", "limit"] {
+            assert!(f.get(k).is_none_or(Value::is_number), "{f}");
+        }
+    }
+    // sorted: findings without a time first, then by start time, code and path
+    let key = |f: &Value| {
+        let t = f.get("time").map(|t| t[0].as_f64().unwrap());
+        (
+            u8::from(t.is_some()),
+            t.unwrap_or(0.0),
+            f["code"].as_str().unwrap().to_string(),
+            f["path"].as_str().unwrap().to_string(),
+        )
+    };
+    for w in findings.windows(2) {
+        let order = key(&w[0]).partial_cmp(&key(&w[1]));
+        assert!(order != Some(std::cmp::Ordering::Greater), "findings out of order: {} then {}", w[0], w[1]);
+    }
+}
+
+#[test]
+fn srep_0018_report_lists_exactly_the_inert_findings() {
+    let d = dir("report");
+    let o = encode(&d, REPORT_SCENE, "case.report.json");
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    let r = read(&d.join("case.report.json"));
+    check_shape(&r);
+    assert_eq!(codes(&r), ["INERT-I2", "INERT-I8"], "{r:#}");
+    let f = &r["findings"];
+    assert_eq!(f[0]["severity"], "info");
+    assert_eq!(f[0]["path"], "/scene/composition/shape[1]");
+    assert_eq!(f[0]["node"], "chip");
+    assert_eq!(f[1]["severity"], "info");
+    assert_eq!(f[1]["path"], "/scene/composition/shape[2]");
+    assert_eq!(f[1]["node"], "late");
+    // the document as read, the version it declares, and the output as rendered
+    let bytes = std::fs::read(d.join("case.scene.xml")).unwrap();
+    assert_eq!(r["scene"]["sha256"], sha256_hex(&bytes));
+    assert_eq!(r["scene"]["version"], "1.2");
+    assert_eq!((r["output"]["width"].as_u64(), r["output"]["height"].as_u64()), (Some(64), Some(48)));
+    assert_eq!((r["output"]["start"].as_f64(), r["output"]["end"].as_f64()), (Some(0.0), Some(0.2)));
+    // no path outside the document's folder, no host name
+    let text = std::fs::read_to_string(d.join("case.report.json")).unwrap();
+    assert!(!text.contains(d.to_str().unwrap()), "{text}");
+}
+
+#[test]
+fn srep_0018_failed_render_still_writes_its_report() {
+    let d = dir("failed");
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([255, 0, 0, 255])).save(d.join("red.png")).unwrap();
+    let wrong = "0".repeat(64);
+    let scene = REPORT_SCENE.replace(
+        "<composition>",
+        &format!(
+            r#"<assets><image id="img" src="red.png" width="4" height="4" sha256="{wrong}"/></assets>
+  <composition><layer id="pic" asset="img"/>"#
+        ),
+    );
+    let o = encode(&d, &scene, "case.report.json");
+    assert_eq!(o.status.code(), Some(1), "the render fails: {}", String::from_utf8_lossy(&o.stdout));
+    let r = read(&d.join("case.report.json"));
+    check_shape(&r);
+    let c = codes(&r);
+    assert!(c.contains(&"ASSET-MISSING".to_string()), "{r:#}");
+    let missing = r["findings"].as_array().unwrap().iter().find(|f| f["code"] == "ASSET-MISSING").unwrap();
+    assert_eq!(missing["severity"], "error");
+    assert_eq!(missing["node"], "img");
+    // the message names the file relative to the document, never by an absolute path
+    assert!(!missing["message"].as_str().unwrap().contains(d.to_str().unwrap()), "{missing}");
+}
+
+#[test]
+fn srep_0018_reports_are_deterministic() {
+    let d = dir("deterministic");
+    let first = encode(&d, REPORT_SCENE, "first.json");
+    assert_eq!(first.status.code(), Some(0), "{}", String::from_utf8_lossy(&first.stderr));
+    let second = encode(&d, REPORT_SCENE, "second.json");
+    assert_eq!(second.status.code(), Some(0), "{}", String::from_utf8_lossy(&second.stderr));
+    let (a, b) = (std::fs::read(d.join("first.json")).unwrap(), std::fs::read(d.join("second.json")).unwrap());
+    assert!(!a.is_empty());
+    assert_eq!(a, b, "the same document, engine and output give the same bytes");
+}
+
+#[test]
+fn text_that_overflows_its_box_is_reported_with_the_overflow() {
+    let d = dir("txt-fit");
+    let scene = r##"<scene version="1.2">
+  <project width="200" height="120" fps="10" duration="1" background="#000000"/>
+  <assets>
+    <text id="t" text="a&#10;b&#10;c" width="180" height="50" size="20" lineHeight="1.5" font="DejaVu Sans"/>
+    <text id="cut" text="ab&#10;cd&#10;ef" width="180" height="100" size="20" maxLines="1" font="DejaVu Sans"/>
+  </assets>
+  <composition><layer id="tall" asset="t"/><layer id="short" asset="cut" y="60"/></composition>
+</scene>"##;
+    let o = encode(&d, scene, "r.json");
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    let r = read(&d.join("r.json"));
+    check_shape(&r);
+    let find = |code: &str| r["findings"].as_array().unwrap().iter().find(|f| f["code"] == code).cloned();
+    let fit = find("TXT-FIT").unwrap_or_else(|| panic!("no TXT-FIT: {r:#}"));
+    // drawn whole inside the frame: nothing is lost, so it is information
+    assert_eq!(fit["severity"], "info");
+    assert_eq!(fit["node"], "tall");
+    // three 30 px lines in a 50 px box
+    assert!((fit["measured"].as_f64().unwrap() - 40.0).abs() < 1e-6, "{fit}");
+    assert_eq!(fit["unit"], "px");
+    assert_eq!(fit["time"][0].as_f64(), Some(0.0));
+    let cut = find("TXT-CUT").unwrap_or_else(|| panic!("no TXT-CUT: {r:#}"));
+    assert_eq!(cut["node"], "short");
+    assert_eq!(cut["measured"].as_f64(), Some(4.0), "{cut}");
+}
+
+#[test]
+fn several_outputs_need_an_id_in_the_report_path() {
+    let d = dir("several");
+    let scene = r##"<scene version="1.2">
+  <project width="32" height="32" fps="10" duration="0.2" background="#000000"/>
+  <output id="a" path="a/f_%04d.png" codec="png-sequence"/>
+  <output id="b" path="b/f_%04d.png" codec="png-sequence"/>
+  <composition><shape id="s" shape="rect" width="8" height="8"/></composition>
+</scene>"##;
+    let file = d.join("case.scene.xml");
+    std::fs::write(&file, scene).unwrap();
+    let o = run(&["encode", file.to_str().unwrap(), "--report", d.join("r.json").to_str().unwrap()]);
+    assert_eq!(o.status.code(), Some(2), "{}", String::from_utf8_lossy(&o.stderr));
+    let o = run(&["encode", file.to_str().unwrap(), "--report", d.join("r-{id}.json").to_str().unwrap()]);
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    for id in ["a", "b"] {
+        let r = read(&d.join(format!("r-{id}.json")));
+        check_shape(&r);
+        assert_eq!(r["output"]["id"], id);
+        assert!(codes(&r).is_empty(), "{r:#}");
+    }
+}
+
+#[test]
+fn srep_0018_report_through_output_report() {
+    // output/@report, relative to the document, written after rendering without any command-line flag
+    let d = dir("attribute");
+    let scene = REPORT_SCENE.replace(
+        "<composition>",
+        r#"<output id="frames" path="frames/f_%04d.png" codec="png-sequence" end="0.2" report="reports/frames.json"/>
+  <composition>"#,
+    );
+    let file = d.join("case.scene.xml");
+    std::fs::write(&file, scene).unwrap();
+    let o = run(&["encode", file.to_str().unwrap()]);
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    let r = read(&d.join("reports/frames.json"));
+    check_shape(&r);
+    assert_eq!(codes(&r), ["INERT-I2", "INERT-I8"], "{r:#}");
+    assert_eq!(r["output"]["id"], "frames");
+}
+
+#[test]
+fn a_render_that_stops_before_rendering_still_writes_its_report() {
+    // SREP 18, 1.3: the adapter cannot be opened (no adapter has this name), the run exits 2, and the report is there
+    let d = dir("early-exit");
+    let file = d.join("case.scene.xml");
+    let scene = REPORT_SCENE.replace(
+        "<composition>",
+        r#"<output id="frames" path="frames/f_%04d.png" codec="png-sequence" end="0.2" report="reports/frames.json"/>
+  <composition>"#,
+    );
+    std::fs::write(&file, scene).unwrap();
+    let o = Command::new(env!("CARGO_BIN_EXE_scene-render"))
+        .args(["encode", file.to_str().unwrap()])
+        .env("NO_COLOR", "1")
+        .env("SR_GPU_ADAPTER", "no adapter is called this 7f3e")
+        .output()
+        .expect("binary runs");
+    assert_eq!(o.status.code(), Some(2), "{}", String::from_utf8_lossy(&o.stderr));
+    let r = read(&d.join("reports/frames.json"));
+    check_shape(&r);
+    let errors: Vec<&Value> = r["findings"].as_array().unwrap().iter().filter(|f| f["severity"] == "error").collect();
+    assert_eq!(errors.len(), 1, "{r:#}");
+    assert_eq!(errors[0]["code"], "X-rs-scene-render-DELIVERY");
+    assert!(errors[0]["message"].as_str().unwrap().contains("no adapter is called this 7f3e"), "{}", errors[0]);
+    // the document's own findings are there too
+    assert!(codes(&r).contains(&"INERT-I2".to_string()), "{r:#}");
+    assert_eq!(r["output"]["id"], "frames");
+}
+
+#[test]
+fn no_matching_output_still_writes_the_requested_report() {
+    let d = dir("no-output");
+    let file = d.join("case.scene.xml");
+    std::fs::write(&file, REPORT_SCENE).unwrap();
+    let rp = d.join("r.json");
+    let o = run(&["encode", file.to_str().unwrap(), "--output", "missing", "--report", rp.to_str().unwrap()]);
+    assert_eq!(o.status.code(), Some(2), "{}", String::from_utf8_lossy(&o.stderr));
+    let r = read(&rp);
+    check_shape(&r);
+    assert!(r["findings"].as_array().unwrap().iter().any(|f| f["code"] == "X-rs-scene-render-DELIVERY"), "{r:#}");
+}
+
+#[test]
+fn strict_counts_every_finding_at_warning_or_error_and_no_information() {
+    let d = dir("strict");
+    // information only (INERT-I2, INERT-I8): --strict passes
+    let o = encode_args(&d, REPORT_SCENE, &["--strict"]);
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    // a TXT-FIT warning (text clipped to its box), which a report lists, fails --strict with or without a report
+    let scene = r##"<scene version="1.2">
+  <project width="200" height="120" fps="10" duration="1" background="#000000"/>
+  <assets><text id="t" text="a" width="180" height="20" size="20" lineHeight="1.5" overflow="clip" font="DejaVu Sans"/></assets>
+  <composition><layer id="tall" asset="t"/></composition>
+</scene>"##;
+    let o = encode_args(&d, scene, &["--strict"]);
+    assert_eq!(o.status.code(), Some(1), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("--strict"));
+    let o = encode_args(&d, scene, &[]);
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "without --strict a warning does not fail: {}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+}
+
+/// `encode` of `scene` to a frame sequence over 0.2 s, with `extra` arguments.
+fn encode_args(dir: &Path, scene: &str, extra: &[&str]) -> Output {
+    let file = dir.join("args.scene.xml");
+    std::fs::write(&file, scene).unwrap();
+    let frames = dir.join("args/f_%04d.png");
+    let mut args = vec!["encode", file.to_str().unwrap(), "-o", frames.to_str().unwrap(), "--end", "0.2"];
+    args.extend_from_slice(extra);
+    run(&args)
+}
+
+/// The TXT-FIT findings of `scene`'s report, encoded over 0.2 s, and whether `--strict` passed.
+fn txt_fit(name: &str, scene: &str) -> (Vec<Value>, Option<i32>) {
+    let d = dir(name);
+    let o = encode(&d, scene, "r.json");
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    let r = read(&d.join("r.json"));
+    check_shape(&r);
+    let fit = r["findings"].as_array().unwrap().iter().filter(|f| f["code"] == "TXT-FIT").cloned().collect();
+    (fit, encode_args(&d, scene, &["--strict"]).status.code())
+}
+
+#[test]
+fn a_sub_pixel_line_box_overhang_is_information_and_passes_strict() {
+    // the films' case: size 64 in a 76 px box, the default lineHeight 1.2 makes a 76.8 px line box
+    let (fit, strict) = txt_fit(
+        "overhang",
+        r##"<scene version="1.2">
+  <project width="400" height="200" fps="10" duration="1" background="#000000"/>
+  <assets><text id="t" text="121" width="258" height="76" size="64" align="end" wrap="none" font="DejaVu Sans"/></assets>
+  <composition><layer id="seats" asset="t" x="40" y="40"/></composition>
+</scene>"##,
+    );
+    assert_eq!(fit.len(), 1, "{fit:?}");
+    assert_eq!(fit[0]["severity"], "info");
+    assert!((fit[0]["measured"].as_f64().unwrap() - 0.8).abs() < 1e-6, "{}", fit[0]);
+    assert_eq!(strict, Some(0));
+}
+
+#[test]
+fn text_clipped_to_its_box_is_a_warning_and_fails_strict() {
+    // one 30 px line in a 20 px box with overflow="clip": no character is dropped, but 10 px of the line are cut
+    let (fit, strict) = txt_fit(
+        "clipped",
+        r##"<scene version="1.2">
+  <project width="200" height="120" fps="10" duration="1" background="#000000"/>
+  <assets><text id="t" text="a" width="180" height="20" size="20" lineHeight="1.5" overflow="clip" font="DejaVu Sans"/></assets>
+  <composition><layer id="clipped" asset="t" x="10" y="10"/></composition>
+</scene>"##,
+    );
+    assert_eq!(fit.len(), 1, "{fit:?}");
+    assert_eq!(fit[0]["severity"], "warning");
+    assert!((fit[0]["measured"].as_f64().unwrap() - 10.0).abs() < 1e-6, "{}", fit[0]);
+    assert_eq!(strict, Some(1));
+}
+
+#[test]
+fn a_block_leaving_the_frame_is_a_warning() {
+    // three 30 px lines in a 50 px box placed at y = 100 of a 120 px frame: the block ends at 190, 70 px out
+    let (fit, strict) = txt_fit(
+        "off-frame",
+        r##"<scene version="1.2">
+  <project width="200" height="120" fps="10" duration="1" background="#000000"/>
+  <assets><text id="t" text="a&#10;b&#10;c" width="180" height="50" size="20" lineHeight="1.5" font="DejaVu Sans"/></assets>
+  <composition><layer id="low" asset="t" y="100"/></composition>
+</scene>"##,
+    );
+    assert_eq!(fit.len(), 1, "{fit:?}");
+    assert_eq!(fit[0]["severity"], "warning");
+    assert!((fit[0]["measured"].as_f64().unwrap() - 70.0).abs() < 1e-6, "{}", fit[0]);
+    assert_eq!(strict, Some(1));
+}
+
+#[test]
+fn srep_0034_findings_reach_the_report() {
+    let d = dir("srep34");
+    let collapse = r##"<scene version="1.2">
+  <project width="64" height="48" fps="10" duration="1" background="#000000"/>
+  <composition><group id="g" collapse="true"><shape id="s" shape="rect" width="8" height="8"/></group></composition>
+</scene>"##;
+    let o = encode(&d, collapse, "collapse.json");
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    let r = read(&d.join("collapse.json"));
+    check_shape(&r);
+    assert_eq!(codes(&r), ["INERT-I9"], "{r:#}");
+    assert_eq!(r["findings"][0]["node"], "g");
+    let miss = r##"<scene version="1.2">
+  <project width="64" height="48" fps="10" duration="1" background="#000000"/>
+  <composition><shape id="m" shape="rect" width="30" height="40" fill="#FF0000"><mask type="rect" x="50" y="0" width="30" height="40" mode="add"/></shape></composition>
+</scene>"##;
+    let o = encode(&d, miss, "miss.json");
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    let r = read(&d.join("miss.json"));
+    check_shape(&r);
+    assert_eq!(codes(&r), ["MASK-MISS"], "{r:#}");
+    let f = &r["findings"][0];
+    assert_eq!(f["severity"], "warning");
+    assert_eq!(f["path"], "/scene/composition/shape/mask");
+    assert_eq!((f["measured"].as_f64(), f["unit"].as_str()), (Some(20.0), Some("px")), "{f}");
+}
+
+#[test]
+fn srep_0022_the_report_names_constructs_this_engine_does_not_draw_exactly() {
+    let d = dir("srep22");
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 128, 255, 255])).save(d.join("tile.png")).unwrap();
+    // a pattern paint: listed as approximate in capabilities.json
+    let scene = r##"<scene version="1.2">
+  <project width="32" height="32" fps="10" duration="1" background="url(#tiles)"/>
+  <assets><image id="tile" src="tile.png" width="4" height="4"/></assets>
+  <paints><pattern id="tiles" asset="tile"/></paints>
+  <composition><shape id="s" shape="rect" width="8" height="8"/></composition>
+</scene>"##;
+    let o = encode(&d, scene, "r.json");
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    let r = read(&d.join("r.json"));
+    check_shape(&r);
+    let sup: Vec<&Value> = r["findings"].as_array().unwrap().iter().filter(|f| f["code"] == "SUP-APPROX").collect();
+    assert_eq!(sup.len(), 1, "{r:#}");
+    assert_eq!(sup[0]["severity"], "warning");
+    assert!(sup[0]["message"].as_str().unwrap().starts_with("pattern "), "{}", sup[0]["message"]);
+    assert_eq!(sup[0]["path"], "/scene/paints/pattern");
+    assert_eq!(sup[0]["node"], "tiles");
+}
+
+#[test]
+fn srep_0022_the_manifest_is_published_by_the_cli() {
+    let o = run(&["capabilities"]);
+    assert_eq!(o.status.code(), Some(0));
+    let printed: Value = serde_json::from_slice(&o.stdout).expect("JSON");
+    let file =
+        std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../capabilities.json")).unwrap();
+    assert_eq!(printed, serde_json::from_str::<Value>(&file).unwrap());
+    assert_eq!(printed["format"], "scene-render-capabilities/1");
+}

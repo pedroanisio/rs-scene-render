@@ -262,6 +262,18 @@
     "c7.scene.xml": [
       "C7"
     ],
+    "c70-font-file.scene.xml": [
+      "C70"
+    ],
+    "c71-unpinned-asset.scene.xml": [
+      "C71"
+    ],
+    "c72-host-family.scene.xml": [
+      "C72"
+    ],
+    "c73-host-fallback.scene.xml": [
+      "C73"
+    ],
     "c74.scene.xml": [
       "C74"
     ],
@@ -1196,6 +1208,7 @@
     "particles3d.scene.xml": [],
     "pdf-region.scene.xml": [],
     "physics-internal-edges.scene.xml": [],
+    "pinned-fonts.scene.xml": [],
     "pyro-blast-gas.scene.xml": [],
     "pyro-blast.scene.xml": [],
     "pyro-colliders.scene.xml": [],

@@ -33,6 +33,9 @@ pub fn map_drape(
     mp: &m::MapAsset,
     frame: Option<(sr_geo::view::Map, sr_geo::view::View)>,
 ) -> Result<Drawing, String> {
+    // the faces labels may use (all of them, or only the document's under fontPolicy="pinned")
+    let failed = register_fonts(tc, cx.p);
+    cx.unsupported.extend(failed);
     map::map_drawing_as(tc, cx, mp, frame)
 }
 /// Paint resolution over a box (node-local x, y, w, h).
@@ -279,24 +282,31 @@ fn register_fonts(tc: &mut TextCache, p: &Program) -> Vec<String> {
         return Vec::new();
     }
     tc.font_assets.insert(String::new(), None);
+    // SREP 21: under fontPolicy="pinned" the faces are the document's font assets and nothing else
+    let pinned = p.fonts_pinned();
+    if pinned {
+        tc.lib = Some(FontLib::pinned());
+    }
     // fonts are referenced by text styles (fontAsset), never by layers, so they are not in the program's
     // asset table: read them from the documents themselves
     let mut found = Vec::new();
+    let mut faces = Vec::new();
     let docs = std::iter::once(&p.scene).chain(p.includes.iter().map(|i| &i.1));
     for (doc, scene) in docs.enumerate() {
         let base = p.base_dirs.get(doc).cloned().unwrap_or_default();
-        for c in scene.assets.iter().flat_map(|a| a.children.iter()) {
-            if let (AssetsChild::Font(f), Some(id)) = (c, c.id()) {
-                found.push((id.to_string(), resolve_path(&f.src, &base).map(|x| (x, f.collection_index as u32))));
-            }
+        for f in sr_eval::font_policy::font_assets(scene) {
+            let at = resolve_path(&f.src, &base).map(|x| (x, f.index));
+            found.push((f.id.clone(), at.clone()));
+            faces.push((f, at));
         }
     }
     let lib = tc.lib();
     let mut failed = Vec::new();
-    for (k, v) in &found {
-        if let Some((path, idx)) = v {
-            if lib.file(path, *idx).is_none() {
-                failed.push(format!("font asset {k}: {} is not a font this renderer can read", path.display()));
+    for (f, at) in &faces {
+        if let Some((path, idx)) = at {
+            let face = if pinned { lib.pin(path, *idx, &f.family, f.weight, f.italic) } else { lib.file(path, *idx) };
+            if face.is_none() {
+                failed.push(format!("font asset {}: {} is not a font this renderer can read", f.id, path.display()));
             }
         }
     }
@@ -801,6 +811,20 @@ fn para_of(tc: &mut TextCache, cx: &mut Cx, t: &m::TextAsset) -> (Para, Decor, V
     (Para { runs, styles, opts }, decor, roles)
 }
 
+/// The layout a text asset is drawn with in this frame: its fonts, styles and the substitutions of its animators,
+/// as [`asset_drawing`] lays it out. For audits that measure text without drawing it (SREP 18 `TXT-FIT`, `TXT-CUT`).
+pub fn text_layout(tc: &mut TextCache, cx: &mut Cx, key: &str, t: &m::TextAsset) -> Arc<Layout> {
+    let failed = register_fonts(tc, cx.p);
+    cx.unsupported.extend(failed);
+    let (mut para, _, roles) = para_of(tc, cx, t);
+    let anims = {
+        let pre = cached_layout(tc, layout_key(key, &para), &para);
+        animators(tc, cx, &pre, &roles).0
+    };
+    substitutions(cx, &mut para, &anims);
+    cached_layout(tc, layout_key(key, &para), &para)
+}
+
 /// Draws a text or data-graphics asset in its own box (0, 0, width, height).
 pub fn asset_drawing(tc: &mut TextCache, cx: &mut Cx, key: &str, a: &AssetsChild) -> Option<Result<Drawing, String>> {
     let failed = register_fonts(tc, cx.p);
@@ -1140,7 +1164,8 @@ pub fn track_cues(tr: &m::CaptionTrack, base: &FsPath) -> Result<Vec<Cue>, Strin
     Ok(cues)
 }
 
-fn load_track(tr: &m::CaptionTrack, base: &FsPath) -> Result<Track, String> {
+/// Loads a caption track: its cues, and its pages as the burned layout breaks them.
+pub fn load_track(tr: &m::CaptionTrack, base: &FsPath) -> Result<Track, String> {
     let at = Attrs { e: tr, props: None };
     let cues = track_cues(tr, base)?;
     let pages = captions::paginate_with_line_breaks(

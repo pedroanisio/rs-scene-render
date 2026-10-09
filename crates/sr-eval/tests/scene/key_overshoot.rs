@@ -1,5 +1,5 @@
 //! `key/@overshoot` (back-* curves) and `key/@period` (elastic-* curves) tune the fixed Penner constants; a key that
-//! sets one on a curve that does not read it is reported (E19, a warning).
+//! sets one on a curve that does not read it is reported (SREP 34: `INERT-I12`, information).
 
 use sr_eval::{EvalOptions, Evaluator};
 
@@ -63,9 +63,9 @@ fn elastic_period_sets_the_ringing_and_the_default_is_unchanged() {
 #[test]
 fn a_parameter_on_a_curve_that_ignores_it_is_reported() {
     let w = warnings(&document(r#"overshoot="2""#, "ease-out"));
-    assert!(w.iter().any(|(c, m)| c == "E19" && m.contains("overshoot") && m.contains("back")), "{w:?}");
+    assert!(w.iter().any(|(c, m)| c == "INERT-I12" && m.contains("overshoot") && m.contains("back")), "{w:?}");
     let w = warnings(&document(r#"period="0.4""#, "back-out"));
-    assert!(w.iter().any(|(c, m)| c == "E19" && m.contains("period") && m.contains("elastic")), "{w:?}");
+    assert!(w.iter().any(|(c, m)| c == "INERT-I12" && m.contains("period") && m.contains("elastic")), "{w:?}");
     // read by their own curves: silent
     assert!(warnings(&document(r#"overshoot="2""#, "back-in-out")).is_empty());
     assert!(warnings(&document(r#"period="0.4""#, "elastic-in")).is_empty());

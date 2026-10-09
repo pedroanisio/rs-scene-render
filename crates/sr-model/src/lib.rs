@@ -37,13 +37,14 @@ pub mod document;
 pub mod effect_attrs;
 pub mod element;
 pub mod foam;
+pub mod inert;
 pub mod model;
 pub mod parse;
 pub mod rules;
 pub mod values;
 pub mod xsd;
 
-pub use diag::{Diagnostic, Loc, Report, Severity};
+pub use diag::{Diagnostic, Loc, Measure, Report, Severity};
 pub use document::{
     load_file, load_str, validate_file, validate_str, Document, Index, LoadError, LoadOptions, NodePath, NodeRoot,
     ResolvedPaint, Target, Version,

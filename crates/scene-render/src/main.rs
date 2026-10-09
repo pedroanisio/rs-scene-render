@@ -377,6 +377,10 @@ enum Command {
         /// its size and is softer.
         #[arg(long, value_enum)]
         quality: Option<QualityArg>,
+        /// Also write each output's render report (scene-render-report/1, SREP 18) here, as output/@report does;
+        /// with several outputs, include {id} in the path for the output's id.
+        #[arg(long, value_name = "PATH")]
+        report: Option<PathBuf>,
     },
     /// Simulate the document's physics and write its cache file (physics@cache).
     Simulate {
@@ -422,6 +426,9 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Print this engine's capability manifest (scene-render-capabilities/1, SREP 22): the constructs of the scene
+    /// format it does not draw exactly.
+    Capabilities,
     /// Describe a diagnostic code, or list every code.
     Explain {
         /// Code such as S06, C21 or R24-fill; omit to list all codes.
@@ -1557,6 +1564,25 @@ fn codec_for_path(p: &str) -> &'static str {
     }
 }
 
+/// Where the `--report` path puts the report of an output: `{id}` is the output's id (`output` without one).
+fn cli_report_path(pattern: &Path, id: Option<&str>) -> PathBuf {
+    PathBuf::from(pattern.to_string_lossy().replace("{id}", id.unwrap_or("output")))
+}
+
+/// Writes a render report, saying so on stderr; false when it could not be written.
+fn write_render_report(report: &sr_deliver::render_report::RenderReport, path: &Path) -> bool {
+    match sr_deliver::render_report::ReportWriter::write(report, path) {
+        Ok(()) => {
+            eprintln!("report: {}", path.display());
+            true
+        }
+        Err(e) => {
+            eprintln!("error: cannot write the render report {}: {e}", path.display());
+            false
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn encode(
     file: &Path,
@@ -1566,15 +1592,32 @@ fn encode(
     opts: sr_deliver::Options,
     json: bool,
     strict: bool,
+    report_to: Option<&Path>,
     out: &mut Out,
 ) -> std::io::Result<ExitCode> {
-    let text = match std::fs::read_to_string(file) {
-        Ok(t) => t,
+    use sr_deliver::render_report::{self, Finding, OutputInfo, ReportWriter};
+    let bytes = match std::fs::read(file) {
+        Ok(b) => b,
         Err(e) => {
             eprintln!("error: cannot read {}: {e}", file.display());
             return Ok(ExitCode::from(2));
         }
     };
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    let folder = match file.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let writer = ReportWriter::new(&bytes, &folder);
+    let several = path.is_none() && ids.len() != 1;
+    if let Some(r) = report_to.filter(|r| several && !r.to_string_lossy().contains("{id}")) {
+        // one path for several outputs would keep only the last report
+        let n = sr_model::load_file(file, &LoadOptions::without_assets()).map(|d| d.scene.outputs.len()).unwrap_or(2);
+        if n > 1 {
+            eprintln!("error: --report {}: the document has {n} outputs; include {{id}} in the path", r.display());
+            return Ok(ExitCode::from(2));
+        }
+    }
     let lines = LineIndex::new(&text);
     let doc = match sr_model::load_file(file, &LoadOptions::default()) {
         Ok(d) => d,
@@ -1587,6 +1630,33 @@ fn encode(
                 out.diagnostic(file, &lines, d)?;
             }
             out.summary(file, &r, false)?;
+            // a render that stops on an error still writes its report, with the error among the findings (SREP 18)
+            let findings: Vec<Finding> = r.diagnostics.iter().map(Finding::of_diagnostic).collect();
+            let mut targets: Vec<(PathBuf, OutputInfo)> = Vec::new();
+            match &path {
+                Some(_) => {
+                    if let Some(rp) = report_to {
+                        let info = OutputInfo { id: None, width: 0, height: 0, start: 0.0, end: 0.0 };
+                        targets.push((cli_report_path(rp, None), info));
+                    }
+                }
+                None => {
+                    for o in writer.raw_outputs() {
+                        if !ids.is_empty() && !o.info.id.as_ref().is_some_and(|i| ids.contains(i)) {
+                            continue;
+                        }
+                        if let Some(rp) = &o.report {
+                            targets.push((folder.join(rp.strip_prefix("file://").unwrap_or(rp)), o.info.clone()));
+                        }
+                        if let Some(rp) = report_to {
+                            targets.push((cli_report_path(rp, o.info.id.as_deref()), o.info.clone()));
+                        }
+                    }
+                }
+            }
+            for (rp, info) in targets {
+                write_render_report(&writer.report(info, findings.clone()), &rp);
+            }
             return Ok(ExitCode::from(1));
         }
     };
@@ -1609,8 +1679,40 @@ fn encode(
             .cloned()
             .collect(),
     };
+    // where each output's report goes, and the output as the document gives it, for a run that stops before rendering
+    let report_targets = |outputs: &[sr_model::model::Output]| -> Vec<(PathBuf, OutputInfo)> {
+        let (pw, ph) = doc.frame_size();
+        let mut t = Vec::new();
+        for o in outputs {
+            let info = OutputInfo {
+                id: o.id.clone(),
+                width: o.width.map_or(pw as u32, |w| w as u32),
+                height: o.height.map_or(ph as u32, |h| h as u32),
+                start: opts.start.unwrap_or(o.start),
+                end: opts.end.or(o.end).unwrap_or(doc.scene.project.duration.get()),
+            };
+            t.extend(render_report::report_path(&folder, o).map(|p| (p, info.clone())));
+            if let Some(rp) = report_to {
+                t.push((cli_report_path(rp, o.id.as_deref()), info));
+            }
+        }
+        t
+    };
+    // a render that stops on an error still writes its reports, with the error among the findings (SREP 18, 1.3)
+    let stop_early = |targets: Vec<(PathBuf, OutputInfo)>, message: String| {
+        let mut findings: Vec<Finding> = doc.warnings().iter().map(Finding::of_diagnostic).collect();
+        findings.push(Finding::scene(render_report::code::engine("DELIVERY"), Severity::Error, message));
+        for (rp, info) in targets {
+            write_render_report(&writer.report(info, findings.clone()), &rp);
+        }
+    };
     if outputs.is_empty() {
-        eprintln!("error: {} defines no matching <output>; pass -o PATH for an ad-hoc output", file.display());
+        let message = format!("{} defines no matching <output>; pass -o PATH for an ad-hoc output", file.display());
+        eprintln!("error: {message}");
+        if let Some(rp) = report_to {
+            let info = OutputInfo { id: None, width: 0, height: 0, start: 0.0, end: 0.0 };
+            stop_early(vec![(cli_report_path(rp, None), info)], message);
+        }
         return Ok(ExitCode::from(2));
     }
     // the adapter is chosen from the document: one that cannot run the 3D pass is skipped when an output draws in 3D
@@ -1626,6 +1728,7 @@ fn encode(
         }
         Err(e) => {
             eprintln!("error: {e}");
+            stop_early(report_targets(&outputs), e.to_string());
             return Ok(ExitCode::from(2));
         }
     };
@@ -1633,6 +1736,7 @@ fn encode(
         Ok(g) => g,
         Err(e) => {
             eprintln!("error: {e}");
+            stop_early(report_targets(&outputs), e.to_string());
             return Ok(ExitCode::from(2));
         }
     };
@@ -1695,14 +1799,55 @@ fn encode(
                 last = (done, st1, cpu1);
             }
         };
-        match sr_deliver::deliver(&doc, o, gpu.as_ref(), &opts, &mut progress) {
+        let mut report_paths: Vec<PathBuf> = render_report::report_path(&folder, o).into_iter().collect();
+        if let Some(rp) = report_to {
+            report_paths.push(cli_report_path(rp, o.id.as_deref()));
+        }
+        // --strict counts every finding at warning or error (SREP 18: only information is left out), so it needs
+        // the measures a report has
+        let o_opts = sr_deliver::Options { report: !report_paths.is_empty() || strict, ..opts.clone() };
+        let (r, outcome) = sr_deliver::deliver_reporting(&doc, o, gpu.as_ref(), &o_opts, &mut progress);
+        let mut counted = 0;
+        if !report_paths.is_empty() || strict {
+            let mut findings: Vec<Finding> = doc.warnings().iter().map(Finding::of_diagnostic).collect();
+            findings.extend(r.evaluation_warnings.iter().map(Finding::of_diagnostic));
+            findings.extend(
+                r.unsupported
+                    .iter()
+                    .map(|u| Finding::scene(render_report::code::engine("UNSUPPORTED"), Severity::Warning, u.clone())),
+            );
+            findings.extend(r.findings.iter().cloned());
+            // SREP 22: what this engine does not draw exactly, as the document uses it
+            findings.extend(sr_deliver::capabilities::findings(&sr_deliver::capabilities::manifest(), &text));
+            if let Err(e) = &outcome {
+                findings.extend(render_report::error_findings(e));
+            }
+            let (pw, ph) = doc.frame_size();
+            let [width, height] = if r.size != [0, 0] {
+                r.size
+            } else {
+                [o.width.map_or(pw as u32, |w| w as u32), o.height.map_or(ph as u32, |h| h as u32)]
+            };
+            let [start, end] = if r.range[1] > r.range[0] {
+                r.range
+            } else {
+                [opts.start.unwrap_or(o.start), opts.end.or(o.end).unwrap_or(doc.scene.project.duration.get())]
+            };
+            let info = OutputInfo { id: o.id.clone(), width, height, start, end };
+            let report = writer.report(info, findings);
+            counted = report.findings.iter().filter(|f| f.severity != Severity::Info).count();
+            for rp in &report_paths {
+                failed |= !write_render_report(&report, rp);
+            }
+        }
+        match outcome.map(|()| r) {
             Ok(r) => {
-                let problems = r.unsupported.len()
-                    + r.accessibility.len()
-                    + r.evaluation_warnings.iter().filter(|d| !d.is_info()).count();
-                if strict && problems > 0 {
+                // every finding of the output's report at warning or error severity: validation and evaluator
+                // warnings, unsupported content, accessibility and legibility, safe area, text fit, fonts, engine
+                // support; information (inert attributes) is not counted (SREP 18)
+                if strict && counted > 0 {
                     eprintln!(
-                        "error: --strict: {}: {problems} item(s) not delivered as authored (unsupported content, evaluator warnings or accessibility findings)",
+                        "error: --strict: {}: {counted} finding(s) at warning or error severity (the render report's findings; information is not counted)",
                         o.path
                     );
                     failed = true;
@@ -1905,6 +2050,7 @@ fn main() -> ExitCode {
             json,
             strict,
             quality,
+            report,
         } => {
             let opts = sr_deliver::Options {
                 out_dir,
@@ -1917,8 +2063,9 @@ fn main() -> ExitCode {
                 row: row.map(|r| (data, r)),
                 parallel,
                 quality: quality.map(QualityArg::model),
+                report: false,
             };
-            encode(&file, &outputs, path, codec, opts, json, strict, &mut out)
+            encode(&file, &outputs, path, codec, opts, json, strict, report.as_deref(), &mut out)
         }
         Command::Simulate { file, output } => simulate(&file, output, &mut out),
         Command::BakeVolume(args) => bake_volume(args, &mut out),
@@ -1927,6 +2074,7 @@ fn main() -> ExitCode {
             resolve(&file, &o, json, &mut out)
         }
         Command::Gpus { json } => gpus(json, &mut out),
+        Command::Capabilities => write!(out.w, "{}", sr_deliver::capabilities::MANIFEST).map(|()| ExitCode::SUCCESS),
         Command::Explain { code } => explain(code.as_deref(), &mut out),
         Command::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "scene-render", &mut std::io::stdout());

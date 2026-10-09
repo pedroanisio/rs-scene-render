@@ -7,7 +7,7 @@ include!(concat!(env!("OUT_DIR"), "/sch_asserts.rs"));
 pub struct Code {
     /// The code as it appears in diagnostics.
     pub code: &'static str,
-    /// Stage that emits it: `xml`, `structure`, `rules`, `assets` or `model`.
+    /// Stage that emits it: `xml`, `structure`, `rules`, `assets`, `model` or `inert`.
     pub stage: &'static str,
     /// One-line description.
     pub summary: &'static str,
@@ -86,10 +86,12 @@ const FIXED: &[(&str, &str, &str)] = &[
     ("M01", "model", "Internal error: the validated document could not be converted to the typed model."),
 ];
 
-/// Every code: fixed codes first, then the Schematron asserts in schema order.
+/// Every code: fixed codes first, then the inert-attribute rules (SREP 18), then the Schematron asserts in schema
+/// order.
 pub fn all() -> Vec<Code> {
     let mut v: Vec<Code> =
         FIXED.iter().map(|(code, stage, summary)| Code { code, stage, summary, rule: None }).collect();
+    v.extend(crate::inert::RULES.iter().map(|(code, summary)| Code { code, stage: "inert", summary, rule: None }));
     v.extend(SCH_ASSERTS.iter().map(|(id, _p, ctx, test, msg)| Code {
         code: id,
         stage: "rules",

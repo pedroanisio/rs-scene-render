@@ -181,6 +181,17 @@ pub struct Layout {
     pub size: [f64; 2],
     /// Lines were dropped (maxLines or overflow).
     pub truncated: bool,
+    /// How far the laid-out lines reach past the box, in px at the drawn size: the largest of the four sides,
+    /// 0 when they fit (SREP 18 `TXT-FIT`).
+    pub overflow: f64,
+    /// Characters dropped by `maxLines`, `overflow="clip"` or `overflow="ellipsis"`, counted in code points
+    /// without line breaks (SREP 18 `TXT-CUT`).
+    pub dropped: usize,
+    /// Characters no face available to the text has, drawn as the primary face's `.notdef`, in order of first
+    /// appearance (SREP 21 `FONT-GLYPH`).
+    pub missing: Vec<char>,
+    /// Faces drawn instead of the family, weight or style a style asked for (SREP 21 `FONT-SUB`).
+    pub substituted: Vec<crate::font::Substitution>,
     /// Content must be clipped to the box.
     pub clip: bool,
     /// Styles at the laid-out size.
@@ -322,13 +333,38 @@ pub fn layout_at(lib: &mut FontLib, para: &Para, k: f64) -> (Layout, bool) {
     }
     // faces
     let primary: Vec<Option<usize>> = styles.iter().map(|s| lib.select(s)).collect();
-    let Some(any_face) = primary.iter().flatten().next().copied() else { return (out, false) };
+    let Some(any_face) = primary.iter().flatten().next().copied() else {
+        // no face at all (a pinned document without font assets): nothing can be drawn, not even a .notdef, and
+        // every visible character is missing (SREP 21 FONT-GLYPH)
+        for &c in &chars {
+            if !crate::font::invisible(c) && !out.missing.contains(&c) {
+                out.missing.push(c);
+            }
+        }
+        return (out, false);
+    };
     let ch_face: Vec<usize> = (0..n)
         .map(|i| {
             let p = primary[ch_style[i]].unwrap_or(any_face);
             lib.face_for(p, &styles[ch_style[i]], chars[i], o.emoji_color)
         })
         .collect();
+    for i in 0..n {
+        let c = chars[i];
+        if !crate::font::invisible(c) && !lib.covers(ch_face[i], c) && !out.missing.contains(&c) {
+            out.missing.push(c);
+        }
+    }
+    let mut used: Vec<usize> = ch_style.clone();
+    used.sort_unstable();
+    used.dedup();
+    for s in used {
+        if let Some(sub) = lib.substitution(&styles[s], primary[s].unwrap_or(any_face)) {
+            if !out.substituted.contains(&sub) {
+                out.substituted.push(sub);
+            }
+        }
+    }
     // bidi
     let default = match o.direction {
         Dir::Ltr => Some(Level::ltr()),
@@ -608,6 +644,8 @@ pub fn layout_at(lib: &mut FontLib, para: &Para, k: f64) -> (Layout, bool) {
         0.0
     };
     let nlines = lines.len();
+    // the first character no glyph is drawn for: the end of the last line kept, or where an ellipsis cut it
+    let mut cut_from = lines.last().map_or(n, |l| l.1);
     for (li, &(a, b, hyph, hard)) in lines.iter().enumerate() {
         let (asc, desc, lh) = line_h[li];
         // glyphs of the line in visual order
@@ -664,7 +702,9 @@ pub fn layout_at(lib: &mut FontLib, para: &Para, k: f64) -> (Layout, bool) {
                 .unwrap_or((0, 0.0));
             if xc == '\u{2026}' && limit.is_finite() {
                 while !glyphs.is_empty() && glyphs.iter().map(|x| x.2).sum::<f64>() + g.1 > limit {
-                    glyphs.pop();
+                    if let Some(popped) = glyphs.pop() {
+                        cut_from = cut_from.min(popped.5);
+                    }
                 }
             }
             let ch = glyphs.last().map(|x| x.5).unwrap_or(a);
@@ -746,6 +786,11 @@ pub fn layout_at(lib: &mut FontLib, para: &Para, k: f64) -> (Layout, bool) {
         out.lines.push(LineBox { rect, baseline, glyphs: first..out.glyphs.len() });
         v += lh;
     }
+    if truncated {
+        out.dropped =
+            chars[cut_from.min(n)..].iter().filter(|c| !matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}')).count();
+    }
+    out.overflow = overflow_of(&out.lines, [o.width, o.height]);
     // word boxes per line
     for lb in &out.lines {
         let mut k2 = lb.glyphs.start;
@@ -774,6 +819,26 @@ pub fn layout_at(lib: &mut FontLib, para: &Para, k: f64) -> (Layout, bool) {
         }
     }
     (out, overflow)
+}
+
+/// How far line boxes reach past a box of `size` (a side that is not finite cannot be crossed), in px: the largest
+/// of the four sides, 0 when they fit.
+fn overflow_of(lines: &[LineBox], size: [f64; 2]) -> f64 {
+    let mut over = 0.0f64;
+    for l in lines {
+        let [x, y, w, h] = l.rect;
+        if size[0].is_finite() {
+            over = over.max(-x).max(x + w - size[0]);
+        }
+        if size[1].is_finite() {
+            over = over.max(-y).max(y + h - size[1]);
+        }
+    }
+    if over > 1e-6 {
+        over
+    } else {
+        0.0
+    }
 }
 
 /// The latest hyphenation point in the word overlapping `[from, to)` that satisfies `fits`.

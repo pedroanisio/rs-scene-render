@@ -128,6 +128,21 @@ pub struct Diagnostic {
     /// Optional suggestion for fixing the problem.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub help: Option<String>,
+    /// What a check measured, when it measured something (SREP 18 `measured`, `limit`, `unit`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub measured: Option<Measure>,
+}
+
+/// A quantity a check measured, the threshold it was compared with, and their unit.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct Measure {
+    /// The quantity found.
+    pub value: f64,
+    /// The threshold, when there is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<f64>,
+    /// The unit: `px`, `s`, `cps`, …
+    pub unit: &'static str,
 }
 
 impl Diagnostic {
@@ -140,6 +155,7 @@ impl Diagnostic {
             loc,
             path: path.into(),
             help: None,
+            measured: None,
         }
     }
 
@@ -152,7 +168,14 @@ impl Diagnostic {
             loc,
             path: path.into(),
             help: None,
+            measured: None,
         }
+    }
+
+    /// Attaches what a check measured: `value` against `limit`, in `unit`.
+    pub fn with_measure(mut self, value: f64, limit: Option<f64>, unit: &'static str) -> Self {
+        self.measured = Some(Measure { value, limit, unit });
+        self
     }
 
     /// Attaches a suggestion.

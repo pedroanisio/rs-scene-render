@@ -495,6 +495,10 @@ fn ik_pole_and_soft_reach() {
     assert!(eased < 19.0 && eased > 14.0, "{eased}");
     // never beyond the full reach: for a target far away the exponential underflows and the value is the reach itself
     assert!(rig::soft_reach(1e6, 10.0, 10.0, 0.3) <= 20.0);
+    // below the reach for every distance (SREP 54), even where exp(-(d - s)/e) underflows
+    for far in [1e3, 1e6, 1e300, f64::MAX] {
+        assert!(rig::soft_reach(far, 10.0, 10.0, 0.3) < 20.0, "{far}");
+    }
     assert!(rig::soft_reach(25.0, 10.0, 10.0, 0.3) < 20.0, "a target past the reach is still short of it");
     let mut last = 0.0;
     for k in 0..400 {

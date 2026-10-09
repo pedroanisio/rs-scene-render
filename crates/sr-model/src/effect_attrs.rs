@@ -2,7 +2,7 @@
 //!
 //! `effectType` in the schema is one flat bag of attributes shared by every effect type, so the schema accepts any of them on any type.
 //! Each type reads a subset. A document that sets an attribute its type does not read gets no effect from it, silently:
-//! a vignette given `intensity` keeps the default `radius` of 4 px. The evaluator warns (E19) from these lists.
+//! a vignette given `intensity` keeps the default `radius` of 4 px. The evaluator reports them (SREP 34 `INERT-I13`) from these lists.
 //!
 //! The lists are declared by hand next to the kernels and are checked in the tests of the renderer: every read of an effect
 //! attribute during a render must be in its type's list (or in [`ALWAYS`]), so a kernel that reads an undeclared attribute fails

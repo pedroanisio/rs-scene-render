@@ -1,5 +1,5 @@
 //! Every attribute of the shared effect bag that a kernel reads while rendering is declared for its type
-//! (`sr_model::effect_attrs`), so the evaluator's warning for an attribute its type does not read (E19) is never wrong.
+//! (`sr_model::effect_attrs`), so the evaluator's warning for an attribute its type does not read (`INERT-I13`) is never wrong.
 
 use super::common;
 use common::*;

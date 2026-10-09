@@ -4,6 +4,11 @@
 //! weight, style and stretch); characters a face lacks fall back to the
 //! style's other families, then to any installed face that has them, with
 //! colour emoji faces preferred for emoji when `emoji="color"`.
+//!
+//! Under `fontPolicy="pinned"` (SREP 21) a library made with [`FontLib::pinned`] knows only the faces the document
+//! pins with [`FontLib::pin`], under the family, weight and style their font assets declare: no host font is
+//! consulted, families resolve to those faces only, a character falls back only through the style's own family
+//! list, and one that no permitted face has is drawn as the primary face's `.notdef`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -34,7 +39,42 @@ pub struct FaceData {
     pub family: String,
     /// Has colour glyph tables (COLR, CBDT or sbix).
     pub color: bool,
+    /// The face's weight (OS/2 usWeightClass, through fontdb).
+    pub weight: u16,
+    /// The face is italic or oblique.
+    pub italic: bool,
+    /// The face has a `wght` variation axis, so it draws any weight in its range.
+    pub variable_weight: bool,
 }
+
+/// A face pinned by a font asset (SREP 21): the family, weight and style the asset declares.
+#[derive(Debug, Clone, PartialEq)]
+struct Pin {
+    family: String,
+    weight: u16,
+    italic: bool,
+    face: usize,
+}
+
+/// A face drawn in place of what a style asked for (SREP 21 `FONT-SUB`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Substitution {
+    /// What the style asked for: family, weight and style.
+    pub requested: String,
+    /// The face drawn.
+    pub drawn: String,
+}
+
+/// Characters that draw nothing of their own, so no face needs a glyph for them: white space, controls, and the
+/// default-ignorable joiners, selectors and marks.
+pub fn invisible(c: char) -> bool {
+    c.is_whitespace()
+        || c.is_control()
+        || matches!(c as u32, 0xAD | 0x34F | 0x180B..=0x180F | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x206F | 0xFE00..=0xFE0F | 0xFEFF | 0xE0000..=0xE0FFF)
+}
+
+/// Generic family names, which name no face of their own.
+pub const GENERIC_FAMILIES: [&str; 6] = ["sans-serif", "serif", "monospace", "cursive", "fantasy", "system-ui"];
 
 /// Fonts known to a render: system faces and document files.
 pub struct FontLib {
@@ -47,6 +87,8 @@ pub struct FontLib {
     fallback: Mutex<HashMap<(char, bool), Option<usize>>>,
     /// Outline cache: (face, glyph, variation key) → path in font units (y up).
     pub(crate) outlines: Mutex<HashMap<(usize, u16, u64), Arc<sr_vector::Path>>>,
+    /// `fontPolicy="pinned"`: the only faces there are, in the order the document pins them.
+    pins: Option<Vec<Pin>>,
 }
 
 fn has_color(face: &ttf_parser::Face) -> bool {
@@ -86,7 +128,40 @@ impl FontLib {
             cover: Mutex::new(HashMap::new()),
             fallback: Mutex::new(HashMap::new()),
             outlines: Mutex::new(HashMap::new()),
+            pins: None,
         }
+    }
+
+    /// A library for `fontPolicy="pinned"` (SREP 21): no host fonts, fontconfig included; only the faces
+    /// [`FontLib::pin`] adds.
+    pub fn pinned() -> FontLib {
+        FontLib { pins: Some(Vec::new()), ..FontLib::new(false) }
+    }
+
+    /// Whether this library is pinned.
+    pub fn is_pinned(&self) -> bool {
+        self.pins.is_some()
+    }
+
+    /// Adds the face of a font asset (file `path`, collection `index`) under the family, weight and style the asset
+    /// declares. Returns the face, or `None` when the file is not a font this library can read.
+    pub fn pin(&mut self, path: &Path, index: u32, family: &str, weight: u16, italic: bool) -> Option<usize> {
+        let face = self.file(path, index)?;
+        if let Some(pins) = &mut self.pins {
+            pins.push(Pin { family: family.to_lowercase(), weight, italic, face });
+        }
+        Some(face)
+    }
+
+    /// The pinned face of `family` nearest the style's weight and slant, when a font asset declares that family.
+    fn pinned_family(&self, family: &str, st: &Style) -> Option<usize> {
+        let fam = family.to_lowercase();
+        self.pins
+            .as_ref()?
+            .iter()
+            .filter(|p| p.family == fam)
+            .min_by_key(|p| (p.italic != st.italic, (p.weight as i32 - st.weight as i32).abs()))
+            .map(|p| p.face)
     }
 
     /// Faces loaded so far.
@@ -99,9 +174,15 @@ impl FontLib {
             return Some(i);
         }
         let family = self.db.face(id).and_then(|f| f.families.first().map(|x| x.0.clone())).unwrap_or_default();
+        let (weight, italic) =
+            self.db.face(id).map(|f| (f.weight.0, f.style != fontdb::Style::Normal)).unwrap_or((400, false));
         let (data, index) = self.db.with_face_data(id, |d, i| (d.to_vec(), i))?;
-        let color = ttf_parser::Face::parse(&data, index).map(|f| has_color(&f)).ok()?;
-        self.faces.push(FaceData { data: Arc::new(data), index, family, color });
+        let (color, variable_weight) = ttf_parser::Face::parse(&data, index)
+            .map(|f| {
+                (has_color(&f), f.variation_axes().into_iter().any(|a| a.tag == ttf_parser::Tag::from_bytes(b"wght")))
+            })
+            .ok()?;
+        self.faces.push(FaceData { data: Arc::new(data), index, family, color, weight, italic, variable_weight });
         self.by_id.insert(id, self.faces.len() - 1);
         Some(self.faces.len() - 1)
     }
@@ -123,12 +204,17 @@ impl FontLib {
         r
     }
 
-    /// The primary face of a style.
+    /// The primary face of a style. Pinned: the style's file (a font asset), else the first of its families a font
+    /// asset declares, else the document's first pinned face.
     pub fn select(&mut self, st: &Style) -> Option<usize> {
         if let Some((p, i)) = &st.file {
             if let Some(f) = self.file(p, *i) {
                 return Some(f);
             }
+        }
+        if let Some(pins) = &self.pins {
+            let first = pins.first().map(|p| p.face);
+            return st.families.iter().find_map(|f| self.pinned_family(f, st)).or(first);
         }
         let key = format!("{:?}|{}|{}|{}", st.families, st.weight, st.italic, st.stretch);
         if let Some(r) = self.select_cache.lock().unwrap().get(&key) {
@@ -166,6 +252,35 @@ impl FontLib {
         found
     }
 
+    /// The face `face` drawn for style `st`, when it is not what the style asked for: another family (a named one),
+    /// another weight (unless the face varies its weight) or another slant. A face from the file the style names is
+    /// what it asked for.
+    pub fn substitution(&self, st: &Style, face: usize) -> Option<Substitution> {
+        // a style that names its file (fontAsset, fontFile) asked for that face
+        if st.file.as_ref().is_some_and(|(p, i)| self.files.get(&(p.clone(), *i)) == Some(&Some(face))) {
+            return None;
+        }
+        let f = &self.faces[face];
+        let asked = st.families.first().map(String::as_str).unwrap_or("sans-serif");
+        let generic = GENERIC_FAMILIES.iter().any(|g| g.eq_ignore_ascii_case(asked));
+        let pinned_as = self.pins.as_ref().and_then(|p| p.iter().find(|p| p.face == face)).map(|p| p.family.clone());
+        let family_ok = generic
+            || f.family.eq_ignore_ascii_case(asked)
+            || pinned_as.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(asked));
+        let weight = self.pins.as_ref().and_then(|p| p.iter().find(|p| p.face == face)).map_or(f.weight, |p| p.weight);
+        let weight_ok = f.variable_weight || weight == st.weight;
+        let slant_ok = f.italic == st.italic;
+        if family_ok && weight_ok && slant_ok {
+            return None;
+        }
+        let slant = |i: bool| if i { "italic" } else { "normal" };
+        let drawn_family = pinned_as.unwrap_or_else(|| f.family.clone());
+        Some(Substitution {
+            requested: format!("{asked} {} {}", st.weight, slant(st.italic)),
+            drawn: format!("{drawn_family} {weight} {}", slant(f.italic)),
+        })
+    }
+
     /// Whether face `f` maps `ch`.
     pub fn covers(&self, f: usize, ch: char) -> bool {
         if let Some(&c) = self.cover.lock().unwrap().get(&(f, ch)) {
@@ -185,6 +300,16 @@ impl FontLib {
         }
         if emoji && self.faces[primary].color && self.covers(primary, ch) {
             return primary;
+        }
+        if self.pins.is_some() {
+            // only the style's own fallback families, then the primary face's .notdef
+            return st
+                .families
+                .iter()
+                .skip(1)
+                .filter_map(|f| self.pinned_family(f, st))
+                .find(|&f| self.covers(f, ch))
+                .unwrap_or(primary);
         }
         // other families of the style
         for fam in st.families.iter().skip(1) {
