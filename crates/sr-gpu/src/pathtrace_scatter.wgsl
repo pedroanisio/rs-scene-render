@@ -95,9 +95,8 @@ fn scatter_walk(reservoir: ScatterReservoir, toward_viewer: vec3<f32>, sigma_wat
     var point=reservoir.point; var base=reservoir.base; var outgoing=toward_viewer;
     var beta=reservoir.coefficient*(reservoir.mass/reservoir.chosen_mass);
     var color=vec3(0.0);
-    var limit=u32(tverts[base+13u].w);
-    for (var bounce=1u; bounce<32u; bounce++) {
-        if (bounce>=limit) { break; }
+    var limit=min(32u,u32(tverts[base+13u].w));
+    for (var bounce=1u; bounce<limit; bounce++) {
         let direction=scatter_direction(outgoing,tverts[base+6u].w);
         let hit=scatter_flight(point,direction,sigma_water);
         color+=beta*hit.emission;

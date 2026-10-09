@@ -726,12 +726,17 @@ mod tests {
         for base in [plain, grid_source()] {
             for water in [false, true] {
                 for foam in [false, true] {
-                    let source = variant_source(&base, water, foam, true);
-                    let module = naga::front::wgsl::parse_str(&source)
-                        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
-                    naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+                    for scatter in [false, true] {
+                        let source = variant_source(&base, water, foam, scatter);
+                        let module = naga::front::wgsl::parse_str(&source)
+                            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+                        naga::valid::Validator::new(
+                            naga::valid::ValidationFlags::all(),
+                            naga::valid::Capabilities::all(),
+                        )
                         .validate(&module)
                         .unwrap_or_else(|e| panic!("{e:?}"));
+                    }
                 }
             }
         }
@@ -1123,7 +1128,16 @@ fn water_source(base: &str) -> String {
                  \x20           }}\n{VISIBLE}"
             ),
         );
-    format!("{hooked}\n{}", include_str!("pathtrace_water.wgsl"))
+    let water = include_str!("pathtrace_water.wgsl");
+    let water = if base.contains("fn volume_incident_exact(") {
+        water.replace(
+            "volume_incident(point, -d, albedo.w, tverts[base + 13u].y > 0.5)",
+            "volume_incident(point, -d, albedo.w, tverts[base + 13u].y > 0.5, base)",
+        )
+    } else {
+        water.to_string()
+    };
+    format!("{hooked}\n{water}")
 }
 
 /// The shader for scenes where some surface has foam mixed into its material: the shader it is given plus the foam at the hit. A
@@ -1231,6 +1245,14 @@ fn variant_source(base: &str, water: bool, foam: bool, scatter: bool) -> String 
         return source;
     }
     let source = source
+        // Keep sparse interpolation as one runtime loop in the larger scatter
+        // shader. Unrolling its eight lookups at every call site exhausts the
+        // software Vulkan driver's coroutine-frame analysis memory.
+        .replace(
+            "for (var z=0; z<2; z++) { for (var y=0; y<2; y++) { for (var x=0; x<2; x++) {\n        let delta=vec3(x,y,z);",
+            "for (var corner=0u; corner<pp.media.w; corner++) {\n        let delta=vec3<i32>(i32(corner&1u),i32((corner>>1u)&1u),i32(corner>>2u));",
+        )
+        .replacen("    }}}\n    return value;", "    }\n    return value;", 1)
         .replace("var color=vec3(0.0); var trans=1.0; var cursor=0.0;",
             "var color=vec3(0.0); var trans=1.0; var cursor=0.0; var reservoir: ScatterReservoir;")
         .replace("if (MEDIUM_LIGHTING && any(albedo.rgb>vec3(0.0)))",

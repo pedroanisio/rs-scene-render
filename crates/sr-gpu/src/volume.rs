@@ -385,7 +385,7 @@ pub(crate) fn validate(volumes: &[VolumeDraw]) -> Result<(), String> {
     Ok(())
 }
 
-/// Returns the row offset and count, sample budget and reserved word for shader parameters.
+/// Returns the row offset and count, sample budget and interpolation corner count for shader parameters.
 pub(crate) fn pack(out: &mut Vec<[f32; 4]>, volumes: &[VolumeDraw]) -> [u32; 4] {
     let offset = out.len();
     out.resize(offset + volumes.len() * RECORD_ROWS, [0.0; 4]);
@@ -481,7 +481,7 @@ pub(crate) fn pack(out: &mut Vec<[f32; 4]>, volumes: &[VolumeDraw]) -> [u32; 4] 
             }
         }
     }
-    [offset as u32, volumes.len() as u32, volumes.iter().map(|v| v.march.max_steps).min().unwrap_or(0), 0]
+    [offset as u32, volumes.len() as u32, volumes.iter().map(|v| v.march.max_steps).min().unwrap_or(0), 8]
 }
 
 fn density_peak(medium: &Medium) -> f64 {
