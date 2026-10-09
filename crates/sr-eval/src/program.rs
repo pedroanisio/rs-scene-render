@@ -551,6 +551,8 @@ pub struct Program {
     pub links: Vec<LinkInst>,
     /// The point generators of repeats with a `points` child (SREP 26).
     pub points: Vec<crate::points::Generator>,
+    /// Connectors with the effective ids of their ends and label layer (SREP 16).
+    pub connectors: Vec<crate::connector::ConnectorInst>,
     /// Element targets.
     pub elements: Vec<ElemTarget>,
     /// Transitions.
@@ -1185,6 +1187,8 @@ struct Builder {
     pending_link: Vec<(u32, m::Link, Option<u32>, Arc<str>, u16)>,
     project_seed: u64,
     points: Vec<crate::points::Generator>,
+    /// Connectors, with the scope their `from` and `to` resolve in and those ids as written.
+    connectors: Vec<(crate::connector::ConnectorInst, Arc<str>, [Option<String>; 2])>,
     params: HashMap<String, V>,
     assets: HashMap<Arc<str>, (u16, String)>,
     analysis_tracks: HashSet<String>,
@@ -1504,6 +1508,7 @@ impl Builder {
                     self.place_sequence(idx, s);
                 }
                 Node::Repeat(r) => self.repeat(idx, r, n, ctx),
+                Node::Connector(c) => self.connector(idx, c, ctx),
                 Node::Instance(i) => self.instance(idx, i, ctx),
                 Node::Include(i) => self.include(idx, i, ctx),
                 Node::Layer(l) => self.layer_clock(idx, l, ctx),
@@ -1794,6 +1799,61 @@ impl Builder {
             copies.push(cidx);
         }
         self.nodes[idx as usize].children = copies;
+    }
+
+    /// Registers a connector (SREP 16), and gives it its label: a `layer` of the label's text asset, a child of the
+    /// connector placed each frame by the connector's geometry.
+    fn connector(&mut self, idx: u32, c: &m::Connector, ctx: &Ctx) {
+        let id = self.nodes[idx as usize].id.clone();
+        let label = match &c.label {
+            Some(asset) => match Node::from_fragment(&format!(r#"<layer id="label" asset="{asset}"/>"#)) {
+                Ok(layer) => {
+                    let cctx = Ctx { scope: id.clone(), ..ctx.clone() };
+                    let kids = self.instantiate(std::slice::from_ref(&layer), Some(idx), &cctx);
+                    self.nodes[idx as usize].children = kids.clone();
+                    kids.first().map(|&k| self.nodes[k as usize].id.clone())
+                }
+                Err(e) => {
+                    self.diags.push(err(
+                        "E10",
+                        format!("connector {id:?}: label {asset:?}: {}", e.message),
+                        c.loc,
+                        &*id,
+                    ));
+                    None
+                }
+            },
+            None => None,
+        };
+        let scope = self.nodes[idx as usize].scope.clone();
+        let inst = crate::connector::ConnectorInst { id, from: None, to: None, label };
+        self.connectors.push((inst, scope, [c.from.clone(), c.to.clone()]));
+    }
+
+    /// Resolves the ends of every connector to the effective ids of their nodes, once all nodes exist.
+    fn connector_ends(&mut self) {
+        for k in 0..self.connectors.len() {
+            let (scope, ends) = (self.connectors[k].1.clone(), self.connectors[k].2.clone());
+            let mut found: [Option<Arc<str>>; 2] = [None, None];
+            for (slot, written) in found.iter_mut().zip(ends.iter()) {
+                let Some(w) = written else { continue };
+                match self.resolve(&scope, w) {
+                    Some(t) => *slot = Some(self.nodes[t as usize].id.clone()),
+                    None => {
+                        let who = self.connectors[k].0.id.clone();
+                        self.diags.push(err(
+                            "E11",
+                            format!("connector {who:?}: {w:?} is not a node of the composition"),
+                            Loc::default(),
+                            &*who,
+                        ));
+                    }
+                }
+            }
+            let [from, to] = found;
+            self.connectors[k].0.from = from;
+            self.connectors[k].0.to = to;
+        }
     }
 
     /// The points of a repeat's `points` child (SREP 26), or None after reporting path data that cannot be read.
@@ -3222,6 +3282,7 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
         pending_link: Vec::new(),
         project_seed: scene.project.seed,
         points: Vec::new(),
+        connectors: Vec::new(),
         params: t.params,
         assets: HashMap::new(),
         analysis_tracks: HashSet::new(),
@@ -3230,6 +3291,7 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
     let roots = b.instantiate(&scene.composition.children, None, &root);
     b.transitions();
     b.resolve_links();
+    b.connector_ends();
     // the animated parts of every node exist before anything reads them: a link or expression may name a bone
     // or another part that sits later in the document
     for n in 0..b.nodes.len() as u32 {
@@ -3376,6 +3438,7 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
         exprs: b.exprs,
         links: b.links,
         points: b.points,
+        connectors: b.connectors.into_iter().map(|(c, _, _)| c).collect(),
         elements: b.elements,
         transitions: b.transitions,
         markers,

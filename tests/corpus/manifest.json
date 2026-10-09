@@ -228,6 +228,21 @@
     "c6.scene.xml": [
       "C6"
     ],
+    "c60.scene.xml": [
+      "C60"
+    ],
+    "c61.scene.xml": [
+      "C61"
+    ],
+    "c62.scene.xml": [
+      "C62"
+    ],
+    "c63.scene.xml": [
+      "C63"
+    ],
+    "c64.scene.xml": [
+      "C64"
+    ],
     "c65.scene.xml": [
       "C65"
     ],
@@ -839,8 +854,20 @@
     "r47.scene.xml": [
       "R47"
     ],
+    "r48-from.scene.xml": [
+      "R48-from"
+    ],
+    "r48-to.scene.xml": [
+      "R48-to"
+    ],
+    "r49.scene.xml": [
+      "R49"
+    ],
     "r5.scene.xml": [
       "R5"
+    ],
+    "r50.scene.xml": [
+      "R50"
     ],
     "r6-duplicate.scene.xml": [
       "R6"
@@ -937,6 +964,9 @@
     ],
     "v10.scene.xml": [
       "V10"
+    ],
+    "v11.scene.xml": [
+      "V11"
     ],
     "v2-outputs.scene.xml": [
       "V2"
@@ -1106,6 +1136,8 @@
     "black-hole-disk-at-isco.scene.xml": [],
     "black-hole-without-disk.scene.xml": [],
     "black-hole.scene.xml": [],
+    "connector-points.scene.xml": [],
+    "connector.scene.xml": [],
     "crater-capture.scene.xml": [],
     "crater-impact-influence-large.scene.xml": [],
     "crater-impact-influence-small.scene.xml": [],

@@ -239,6 +239,9 @@ pub struct FrameNode {
     /// (column-major, scene space), at the pose the object draws.
     #[serde(skip)]
     pub joints: Option<Arc<JointFrames>>,
+    /// A connector's geometry at this time (SREP 16): None when it draws nothing, or for other nodes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connector: Option<Arc<crate::connector::Connector>>,
     /// The node's element after templating (static attributes).
     #[serde(skip)]
     pub elem: Arc<Node>,
@@ -991,7 +994,9 @@ impl<'p> Frame<'p> {
     ) {
         let p = self.p;
         let fs = p.size;
-        let active: Vec<u32> = kids.iter().copied().filter(|&k| self.active(k)).collect();
+        // a connector has no box and takes no slot (SREP 16 §1.2)
+        let active: Vec<u32> =
+            kids.iter().copied().filter(|&k| p.nodes[k as usize].name != "connector" && self.active(k)).collect();
         if let Some((spec, own)) = layout {
             let mut placed = Vec::new();
             let mut sizes = Vec::new();
@@ -1204,6 +1209,7 @@ fn evaluate_inner(p: &Program, t: f64, clocks: &[(u32, f64)], include_inactive: 
             voxels: None,
             pose3: None,
             joints: None,
+            connector: None,
             elem: node.elem.clone(),
         });
         if node.name == "shape" {
@@ -1287,6 +1293,8 @@ fn evaluate_inner(p: &Program, t: f64, clocks: &[(u32, f64)], include_inactive: 
     }
 
     crate::rig::post_pass(p, &mut out.nodes, t);
+    // connectors read their ends as drawn, once every pose is final
+    crate::connector::resolve(p, &mut out.nodes);
 
     let camera = out.nodes.iter().enumerate().rev().find(|(_, n)| n.kind == "camera" && n.draw).map(|(i, _)| i as u32);
 

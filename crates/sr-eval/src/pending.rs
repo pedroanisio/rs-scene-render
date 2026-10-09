@@ -24,7 +24,6 @@ pub struct Pending {
 
 /// The pending SREPs. One row each; the gap branches delete their own.
 pub const PENDING: &[Pending] = &[
-    Pending { srep: 16, what: "connectors that follow the nodes they join", elements: &["connector"], attributes: &[] },
     Pending {
         srep: 17,
         what: "PDF page assets and text-anchored regions",
