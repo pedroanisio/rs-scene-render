@@ -1975,19 +1975,45 @@ fn at_top(seen: &[(usize, f64)]) -> Vec<(usize, f64)> {
     seen.iter().filter(|s| s.1 >= top - 1e-3).copied().collect()
 }
 
-/// The frames to measure a text's contrast at, of the (frame, opacity) it was seen in: those where it is at
-/// its most visible, all of them up to `limit`, else that many spread evenly from the first to the last, so a
-/// title held for minutes does not render every one of its frames twice more.
+/// The frames to measure a text's contrast at, of the (frame, opacity) it was seen in: those where it is at its most
+/// visible, all of them up to [`CONTRAST_PROBES`], else that many spread evenly from the first to the last, so a title
+/// held for minutes does not render every one of its frames twice more. Under a smaller `limit`, the first `limit` of
+/// those in coarse-to-fine order (both ends, then the middle, then the quarters, ...): the frames for a smaller limit
+/// are always among those for a larger one, so a prediction made with another limit still saves its renders.
 fn probe_frames(seen: &[(usize, f64)], limit: usize) -> Vec<(usize, f64)> {
     let at_top = at_top(seen);
-    if at_top.len() <= limit {
-        return at_top;
+    let full: Vec<(usize, f64)> = if at_top.len() <= CONTRAST_PROBES {
+        at_top
+    } else {
+        (0..CONTRAST_PROBES).map(|i| at_top[i * (at_top.len() - 1) / (CONTRAST_PROBES - 1)]).collect()
+    };
+    if full.len() <= limit {
+        return full;
     }
-    if limit <= 1 {
-        // the middle of the span: one probe says most about a held text
-        return at_top.get(at_top.len() / 2).copied().into_iter().collect();
+    let mut keep = coarse_to_fine(full.len());
+    keep.truncate(limit);
+    keep.sort_unstable();
+    keep.into_iter().map(|i| full[i]).collect()
+}
+
+/// The indices `0..n` in coarse-to-fine order: `0` and `n - 1`, then the middle of each gap, breadth first.
+fn coarse_to_fine(n: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = match n {
+        0 => return Vec::new(),
+        1 => return vec![0],
+        _ => vec![0, n - 1],
+    };
+    let mut gaps = std::collections::VecDeque::from([(0, n - 1)]);
+    while let Some((a, b)) = gaps.pop_front() {
+        if b - a < 2 {
+            continue;
+        }
+        let m = (a + b) / 2;
+        order.push(m);
+        gaps.push_back((a, m));
+        gaps.push_back((m, b));
     }
-    (0..limit).map(|i| at_top[i * (at_top.len() - 1) / (limit - 1)]).collect()
+    order
 }
 
 /// The same selected observations, grouped in time order without dropping any target; every target shares the
@@ -2137,6 +2163,27 @@ mod tests {
             } else {
                 assert_eq!(thinned.len(), texts, "{texts} texts");
                 assert!(thinned.iter().all(|(_, got, of)| *got < CONTRAST_PROBES && *of == 1500));
+            }
+        }
+    }
+
+    /// The prefetch during the main pass predicts the texts, and the post pass measures those actually seen: their
+    /// numbers can differ, and so can each text's share of the budget. A smaller share's frames are among a larger
+    /// one's, so what the prediction measured is reused.
+    #[test]
+    fn a_smaller_share_of_probes_is_a_subset_of_a_larger_one() {
+        let seen: Vec<(usize, f64)> = (0..1500).map(|k| (k, 1.0)).collect();
+        for n in [0, 1, 2, 3, 7, 32, 33, 100] {
+            let mut order = coarse_to_fine(n);
+            order.sort_unstable();
+            assert_eq!(order, (0..n).collect::<Vec<_>>(), "every index once for {n}");
+        }
+        for small in 1..=CONTRAST_PROBES {
+            let a = probe_frames(&seen, small);
+            assert_eq!(a.len(), small);
+            for large in small..=CONTRAST_PROBES {
+                let b = probe_frames(&seen, large);
+                assert!(a.iter().all(|f| b.contains(f)), "{small} probes are not among {large}");
             }
         }
     }
