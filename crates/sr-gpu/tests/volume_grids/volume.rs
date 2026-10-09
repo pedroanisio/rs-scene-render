@@ -1044,3 +1044,82 @@ fn shadow_march_dims_by_the_optical_depth_of_thin_dense_media_and_ignores_neglig
     let negligible = render(&mut eng, 1e-30, 1.0);
     assert!((negligible - open).abs() < 1e-4 * open, "negligible slab: {negligible} vs {open}");
 }
+
+#[test]
+fn multiple_scattering_matches_the_independent_homogeneous_slab_reference() {
+    // tools/volume_slab_reference.py solves the isotropic transport integral equation
+    // independently. Optical thickness 2, sun cosine 0.8, view cosine 0.7.
+    let Some(g) = common::gpu() else { return };
+    let mut eng = ThreeEngine::new(g.device.clone(), g.queue.clone());
+    let direction = Vec3::new((1.0_f32 - 0.7 * 0.7).sqrt(), 0.0, -0.7);
+    let center = Vec3::new(0.0, 0.0, 1.0);
+    let mut scene = Scene3 {
+        cam: resolve(
+            &CameraParams {
+                orthographic: true,
+                position: Some(center - direction * 10.0),
+                target: Some(center),
+                ..Default::default()
+            },
+            8.0,
+            8.0,
+        ),
+        clip_fix: Mat4::IDENTITY,
+        size: [8, 8],
+        exposure: 1.0,
+        dof: None,
+        lens_k1: 0.0,
+        draws: Vec::new(),
+        lights: Vec::new(),
+        env: None,
+        splats: Vec::new(),
+        volumes: Vec::new(),
+        encode_srgb: false,
+        ao: None,
+        ssr: false,
+        path: Some(PathOpts { samples: 128, bounces: 1, denoise: false }),
+        geodesic: None,
+    };
+    scene.lights.push(sr_gpu::three::Light3 {
+        kind: sr_gpu::three::LightKind::Directional,
+        pos: Vec3::ZERO,
+        dir: Vec3::new(-0.6, 0.0, -0.8),
+        right: Vec3::X,
+        color: Vec3::ONE,
+        range: 0.0,
+        falloff: 2.0,
+        cos_outer: 0.0,
+        cos_inner: 0.0,
+        cast_shadow: true,
+        softness: 0.0,
+        bias: 0.0005,
+        map_size: 128,
+        size: [0.0; 3],
+        ies: None,
+        affects_diffuse: true,
+        affects_specular: true,
+        contact: 0.0,
+    });
+    for (albedo, bounces, expected, tolerance) in
+        [(1.0, 0, 0.0, 0.0001), (1.0, 1, 0.16588, 0.001), (1.0, 32, 0.56361, 0.035), (0.8, 32, 0.29005, 0.025)]
+    {
+        let medium = Medium::new(
+            Arc::new(SparseGrid::new(Transform::identity(), 1.0, 0).unwrap()),
+            Some(Bounds::new([-100.0, -100.0, 0.0], [100.0, 100.0, 2.0]).unwrap()),
+            Transform::identity(),
+            Optical { albedo: [albedo; 3], scatter_bounces: bounces, ..Default::default() },
+        )
+        .unwrap();
+        scene.volumes = vec![VolumeDraw::new(Arc::new(medium), March { step_size: 0.0625, max_steps: 65536 }).unwrap()];
+        let pixels = eng.render_now(&scene, None);
+        assert!(pixels.iter().flatten().all(|v| v.is_finite()));
+        let brf =
+            pixels.iter().map(|p| f64::from(p[0])).sum::<f64>() / pixels.len() as f64 * std::f64::consts::PI / 0.8;
+        assert!(
+            (brf - expected).abs() < tolerance,
+            "albedo {albedo}, bounces {bounces}: BRF {brf}, reference {expected}"
+        );
+        let alpha = 1.0 - (-2.0_f32 / 0.7).exp();
+        assert!(pixels.iter().all(|p| (p[3] - alpha).abs() < 0.001), "scattering must preserve extinction alpha");
+    }
+}

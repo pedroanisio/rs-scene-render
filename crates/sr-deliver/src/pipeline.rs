@@ -1039,7 +1039,9 @@ fn run_delivery(
                 Some(frames) => frames.iter().map(|f| f.output).collect(),
                 None => times.iter().map(|t| t - output.start).collect(),
             };
-            diagnostics.extend(layer.safe_diagnostics(&output_times));
+            let overlay_diagnostics = layer.safe_diagnostics(&output_times);
+            report.findings.extend(overlay_diagnostics.iter().map(crate::render_report::Finding::of_diagnostic));
+            diagnostics.extend(overlay_diagnostics);
         }
         if diagnostics.iter().any(|d| d.is_error()) {
             // the findings above carry them, with their nodes and times, into the render report

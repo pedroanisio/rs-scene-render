@@ -88,7 +88,13 @@ fn constructs_parse_in_the_three_forms_only() {
 }
 
 fn test_manifest() -> Manifest {
-    let entry = |construct: &str, status| Entry { construct: construct.into(), status, definition: None, note: None };
+    let entry = |construct: &str, status| Entry {
+        construct: construct.into(),
+        status,
+        definition: None,
+        note: None,
+        when: Vec::new(),
+    };
     Manifest {
         format: FORMAT.into(),
         engine: sr_deliver::capabilities::Engine { name: "rs-scene-render".into(), version: "0.0.0".into() },
@@ -171,5 +177,18 @@ fn a_raster_document_with_a_shadow_catcher_gets_no_sup_finding() {
         f[0].message.contains("camera/@renderer=pathtrace") && f[0].message.contains("shadowCatcher"),
         "{}",
         f[0].message
+    );
+}
+
+#[test]
+fn a_conditional_capability_requires_every_companion_construct() {
+    let mut m = test_manifest();
+    m.entries.retain(|e| e.construct == "pattern");
+    m.entries[0].when = vec!["camera/@renderer=pathtrace".into(), "object3D/@shadowCatcher=true".into()];
+    assert!(findings(&m, r#"<scene><pattern/><camera renderer="pathtrace"/></scene>"#).is_empty());
+    assert_eq!(
+        findings(&m, r#"<scene><pattern/><camera renderer="pathtrace"/><object3D shadowCatcher="true"/></scene>"#)
+            .len(),
+        1
     );
 }

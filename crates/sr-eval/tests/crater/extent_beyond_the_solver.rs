@@ -49,3 +49,11 @@ fn a_large_body_within_the_solver_is_not_refused() {
     );
     assert!(!said.iter().any(|m| m.contains("2^47 m")), "{said:?}");
 }
+
+#[test]
+fn an_infinite_body_coupled_to_an_ocean_is_refused_without_panicking() {
+    let said = said(
+        r#"<scene version="1.3"><project width="64" height="64" fps="24" duration="2"/><composition><object3D id="float" primitive="sphere" radius="0.5" y="INF"><rigidBody shape="sphere" mass="200"/></object3D><ocean id="sea" width="8" depth="8" cellSize="0.5" bottomDepth="4" colliders="float" bodyCoupling="full" bodyDrag="1.5"/></composition><physics pixelsPerMeter="1"/></scene>"#,
+    );
+    assert!(said.iter().any(|m| m.starts_with("float: rigidBody:") && m.contains("finite")), "{said:?}");
+}

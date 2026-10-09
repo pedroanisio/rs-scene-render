@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- expect: S06 -->
+<!-- expect: S06 R53 -->
 <!-- Exercises every section of scene-render 1.1. Digests are filled in by tools/build_corpus.py. -->
 <scene version="1.2">
   <project width="1920" height="1080" fps="30000/1001" duration="12.5" seed="7" background="var(--bg)"
@@ -87,7 +87,7 @@
     <chart id="sales" kind="bar" width="800" height="400">
       <series name="2026" values="1 2 3.5 4"/>
     </chart>
-    <audiogram id="wave" source="music" width="800" height="120"/>
+    <audiogram id="wave" source="music-track" width="800" height="120"/>
     <code id="qr" kind="qr" data="https://example.com" width="200" height="200"/>
     <formula id="euler" tex="e^{i\pi}+1=0" width="400" height="100"/>
     <geo id="places" src="../media/places.geojson" sha256="6835b996e02a5d81173cc113fec9b1f3558e5c7f65c17e2db0573964b31a55da"/>

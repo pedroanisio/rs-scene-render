@@ -78,7 +78,7 @@ fn the_ball_of_the_stress_document_hits_the_block_and_the_block_does_not_break_i
     // every frame (it is over 2e5: see the next test), so the block falls whole. (A rough estimate that supposes the block held at its ends reads 1e7 Pa: it is not held.)
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/corpus/valid");
     let doc =
-        sr_model::load_file(&dir.join("voxel-fracture-stress.scene.xml"), &sr_model::LoadOptions::default()).unwrap();
+        sr_model::load_file(dir.join("voxel-fracture-stress.scene.xml"), &sr_model::LoadOptions::default()).unwrap();
     let ev = Evaluator::new(&doc, &EvalOptions::default()).unwrap();
     let mut last = 0.0;
     for n in 0..ev.frame_count() {

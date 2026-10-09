@@ -66,17 +66,28 @@ pub struct Optical {
     pub emission: [f64; 3],
     /// Cosine between incoming and outgoing propagation directions: positive is forward.
     pub anisotropy: f64,
+    /// Maximum path-tracer scattering collisions; zero retains absorption and emission only.
+    /// The CPU reference integrator evaluates the first scattering order.
+    pub scatter_bounces: u32,
 }
 
 impl Default for Optical {
     fn default() -> Self {
-        Self { density_scale: 1.0, extinction: 1.0, albedo: [0.0; 3], emission: [0.0; 3], anisotropy: 0.0 }
+        Self {
+            density_scale: 1.0,
+            extinction: 1.0,
+            albedo: [0.0; 3],
+            emission: [0.0; 3],
+            anisotropy: 0.0,
+            scatter_bounces: 1,
+        }
     }
 }
 
 impl Optical {
     fn validate(&self) -> Result<(), Error> {
-        if !self.density_scale.is_finite()
+        if self.scatter_bounces > 32
+            || !self.density_scale.is_finite()
             || self.density_scale < 0.0
             || !self.extinction.is_finite()
             || self.extinction < 0.0
@@ -86,7 +97,7 @@ impl Optical {
             || self.anisotropy.abs() >= 1.0
         {
             return Err(Error::Invalid(
-                "medium coefficients must be finite, nonnegative; albedo in [0,1], anisotropy in (-1,1)",
+                "medium coefficients must be finite, nonnegative; albedo in [0,1], anisotropy in (-1,1), scatter bounces in [0,32]",
             ));
         }
         Ok(())
@@ -446,7 +457,7 @@ pub fn integrate(
                 let optical = medium.optical;
                 let sigma = density * optical.extinction;
                 extinction += sigma;
-                let light = if optical.albedo == [0.0; 3] {
+                let light = if optical.scatter_bounces == 0 || optical.albedo == [0.0; 3] {
                     [0.0; 3]
                 } else {
                     incident(point, (-ray.direction).to_array(), optical.anisotropy)

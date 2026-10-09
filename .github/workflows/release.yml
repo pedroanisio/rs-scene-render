@@ -92,7 +92,7 @@ jobs:
         run: |
           package="scene-render-${RELEASE_TAG}-linux-x86_64"
           mkdir -p "dist/$package"
-          cp target/release/scene-render README.md LICENSE "dist/$package/"
+          cp target/release/scene-render README.md LICENSE THIRD-PARTY-NOTICES.md capabilities.json "dist/$package/"
           printf '%s\n' "$GITHUB_SHA" > "dist/$package/COMMIT"
           tar -C dist -czf "dist/$package.tar.gz" "$package"
           cd dist

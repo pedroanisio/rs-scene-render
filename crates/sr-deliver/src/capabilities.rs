@@ -67,6 +67,9 @@ pub struct Entry {
     /// What is different, or when.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub note: Option<String>,
+    /// Every listed construct must also be used by the document (SREP 63).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub when: Vec<String>,
 }
 
 /// A construct, parsed.
@@ -134,6 +137,9 @@ pub fn findings(manifest: &Manifest, xml: &str) -> Vec<Finding> {
             Status::Reported => code::SUP_REPORTED,
             Status::Exact | Status::Unsupported => continue,
         };
+        if !e.when.iter().all(|condition| Construct::parse(condition).is_some_and(|c| c.first_use(&doc).is_some())) {
+            continue;
+        }
         let Some(c) = Construct::parse(&e.construct) else { continue };
         let Some(n) = c.first_use(&doc) else { continue };
         let how = match e.status {

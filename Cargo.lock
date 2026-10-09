@@ -2529,7 +2529,7 @@ dependencies = [
 
 [[package]]
 name = "scene-render"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "anstream 0.6.21",
  "anstyle",
@@ -2730,7 +2730,7 @@ dependencies = [
 
 [[package]]
 name = "sr-3d"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "glam 0.30.10",
@@ -2751,7 +2751,7 @@ dependencies = [
 
 [[package]]
 name = "sr-audio"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "rayon",
  "serde",
@@ -2760,7 +2760,7 @@ dependencies = [
 
 [[package]]
 name = "sr-deliver"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "image",
  "rayon",
@@ -2780,7 +2780,7 @@ dependencies = [
 
 [[package]]
 name = "sr-eval"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "glam 0.30.10",
  "image",
@@ -2803,7 +2803,7 @@ dependencies = [
 
 [[package]]
 name = "sr-fuzz"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "serde_json",
  "sr-3d",
@@ -2816,7 +2816,7 @@ dependencies = [
 
 [[package]]
 name = "sr-geo"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "flate2",
  "roxmltree 0.20.0",
@@ -2825,7 +2825,7 @@ dependencies = [
 
 [[package]]
 name = "sr-gpu"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "glam 0.30.10",
@@ -2855,7 +2855,7 @@ dependencies = [
 
 [[package]]
 name = "sr-media"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "image",
  "jxl-oxide",
@@ -2867,7 +2867,7 @@ dependencies = [
 
 [[package]]
 name = "sr-model"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "image",
  "rayon",
@@ -2882,7 +2882,7 @@ dependencies = [
 
 [[package]]
 name = "sr-resolve"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "hayro",
  "image",
@@ -2903,7 +2903,7 @@ dependencies = [
 
 [[package]]
 name = "sr-sim"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "rapier2d-f64",
  "rapier3d-f64",
@@ -2914,7 +2914,7 @@ dependencies = [
 
 [[package]]
 name = "sr-text"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "fontdb",
  "hyphenation",
@@ -2932,7 +2932,7 @@ dependencies = [
 
 [[package]]
 name = "sr-vector"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "libm",
  "miniz_oxide 0.8.9",
@@ -2944,7 +2944,7 @@ dependencies = [
 
 [[package]]
 name = "sr-volume"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "blosc-src",
  "flate2",

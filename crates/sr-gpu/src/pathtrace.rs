@@ -672,7 +672,7 @@ mod tests {
             [(false, false, false), (true, false, false), (true, false, true), (true, true, false), (true, true, true)]
         {
             for (water, foam) in [(true, false), (true, true), (false, true)] {
-                slots.insert(variant_slot(media, grid, lighting, water, foam));
+                slots.insert(variant_slot(media, grid, lighting, water, foam, false));
             }
         }
         assert_eq!(slots.len(), 15);
@@ -687,7 +687,8 @@ mod tests {
         assert!(needs_scatter([1u32, 4].into_iter()) && needs_scatter([0u32].into_iter()));
         // the slots: the fifteen there were keep their numbers, a scene with more scattering and no water or foam has its own, and every
         // shape of scene with scattering is another set of twenty
-        let shapes = [(false, false, false), (true, false, false), (true, false, true), (true, true, false), (true, true, true)];
+        let shapes =
+            [(false, false, false), (true, false, false), (true, false, true), (true, true, false), (true, true, true)];
         let mut before = std::collections::BTreeSet::new();
         let mut all = std::collections::BTreeSet::new();
         for (media, grid, lighting) in shapes {
@@ -702,12 +703,38 @@ mod tests {
             }
         }
         assert_eq!(before.len(), 15);
-        assert_eq!((before.first(), before.last()), (Some(&0), Some(&14)), "the slots of the variants that were are those they had");
+        assert_eq!(
+            (before.first(), before.last()),
+            (Some(&0), Some(&14)),
+            "the slots of the variants that were are those they had"
+        );
         assert_eq!((all.first(), all.last(), all.len()), (Some(&0), Some(&39), 40));
         // the text: without scattering the base is not touched, by any of the additions
         let base = format!("{}\n{}", include_str!("pathtrace.wgsl"), include_str!("volume.wgsl"));
         assert_eq!(variant_source(&base, false, false, false), base);
         assert_eq!(variant_source(&base, true, false, false), variant_source_without_scatter(&base, true, false));
+    }
+
+    #[test]
+    fn scatter_shader_validates_with_water_foam_and_grid_combinations() {
+        let plain = format!(
+            "{}\n{}\n{}",
+            include_str!("sampling.wgsl"),
+            include_str!("pathtrace.wgsl"),
+            include_str!("volume.wgsl")
+        );
+        for base in [plain, grid_source()] {
+            for water in [false, true] {
+                for foam in [false, true] {
+                    let source = variant_source(&base, water, foam, true);
+                    let module = naga::front::wgsl::parse_str(&source)
+                        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+                    naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+                        .validate(&module)
+                        .unwrap_or_else(|e| panic!("{e:?}"));
+                }
+            }
+        }
     }
 
     #[test]
@@ -731,16 +758,16 @@ mod tests {
         assert!(variant_constants(true, true, true, true).contains(&("MEDIUM_LIGHTING", 1.0)));
         // the text: nothing added for a scene with neither (the plain pipeline is not a variant), the refracted shadow rays only for
         // water, the hook only for foam
-        assert_eq!(variant_source(&plain, false, false), plain);
-        let foam_only = variant_source(&plain, false, true);
+        assert_eq!(variant_source(&plain, false, false, false), plain);
+        let foam_only = variant_source(&plain, false, true, false);
         assert!(foam_only.contains("pick < foam") && !foam_only.contains("fn light_through("));
-        let water_only = variant_source(&plain, true, false);
+        let water_only = variant_source(&plain, true, false, false);
         assert!(water_only.contains("fn light_through(") && !water_only.contains("pick < foam"));
         assert!(
             water_only.contains("override FOAM: bool = false;"),
             "the water shader declares the override the constant sets"
         );
-        let both = variant_source(&plain, true, true);
+        let both = variant_source(&plain, true, true, false);
         assert!(both.contains("fn light_through(") && both.contains("pick < foam"));
         assert!(
             !foam_only.contains("override FOAM"),
@@ -1158,12 +1185,18 @@ fn variant_of<'a>(materials: impl Iterator<Item = &'a sr_3d::MaterialParams>) ->
 }
 
 /// The slot of the variant pipeline for a scene: five by media and grid lighting, times water, water with foam, or foam alone.
-fn variant_slot(media: bool, grid: bool, lighting: bool, water: bool, foam: bool) -> usize {
+fn variant_slot(media: bool, grid: bool, lighting: bool, water: bool, foam: bool, scatter: bool) -> usize {
     (match (media, grid) {
         (false, _) => 0,
         (true, false) => 1 + lighting as usize,
         (true, true) => 3 + lighting as usize,
-    }) + 5 * if water { foam as usize } else { 2 }
+    }) + 5 * if water {
+        foam as usize
+    } else if foam {
+        2
+    } else {
+        3
+    } + 20 * scatter as usize
 }
 
 /// The override constants of a variant pipeline: the media ones always, `WATER` only for a scene with a transmissive material and
@@ -1178,13 +1211,54 @@ fn variant_constants(media: bool, lighting: bool, water: bool, foam: bool) -> Ve
 }
 
 /// The shader text of a variant: the base with the water additions when `water`, and the foam at the hit when `foam`.
-fn variant_source(base: &str, water: bool, foam: bool) -> String {
+fn variant_source_without_scatter(base: &str, water: bool, foam: bool) -> String {
     let source = if water { water_source(base) } else { base.to_string() };
     if foam {
         foam_source(&source)
     } else {
         source
     }
+}
+
+fn needs_scatter(mut bounces: impl Iterator<Item = u32>) -> bool {
+    bounces.any(|b| b != 1)
+}
+
+/// Keep the single-scattering shader unchanged; the random walk is compiled only when requested.
+fn variant_source(base: &str, water: bool, foam: bool, scatter: bool) -> String {
+    let source = variant_source_without_scatter(base, water, foam);
+    if !scatter {
+        return source;
+    }
+    let source = source
+        .replace("var color=vec3(0.0); var trans=1.0; var cursor=0.0;",
+            "var color=vec3(0.0); var trans=1.0; var cursor=0.0; var reservoir: ScatterReservoir;")
+        .replace("if (MEDIUM_LIGHTING && any(albedo.rgb>vec3(0.0)))",
+            "if (MEDIUM_LIGHTING && tverts[base+13u].w > 0.0 && any(albedo.rgb>vec3(0.0)))")
+        .replace("color+=trans*source*weight; trans*=attenuation;",
+            "scatter_offer(&reservoir, point, vec3(trans*weight)); color+=trans*source*weight; trans*=attenuation;")
+        .replace("return vec4(color,trans);", "return vec4(color+scatter_walk(reservoir,-d,vec3(0.0)),trans);")
+        .replace("var color = vec3(0.0); var trans = vec3(1.0); var open = 1.0; var cursor = 0.0;",
+            "var color = vec3(0.0); var trans = vec3(1.0); var open = 1.0; var cursor = 0.0; var reservoir: ScatterReservoir;")
+        .replace("if (MEDIUM_LIGHTING && any(albedo.rgb > vec3(0.0)))",
+            "if (MEDIUM_LIGHTING && tverts[base + 13u].w > 0.0 && any(albedo.rgb > vec3(0.0)))")
+        .replace("color += trans * source * weight; trans *= attenuation; open *= exp(-sigma * ds);",
+            "scatter_offer(&reservoir, point, trans*weight); color += trans * source * weight; trans *= attenuation; open *= exp(-sigma * ds);")
+        .replace("return Transport(color, trans, open);",
+            "return Transport(color+scatter_walk(reservoir,-d,sigma_water), trans, open);");
+    let extra = include_str!("pathtrace_scatter.wgsl");
+    let extra = if source.contains("fn volume_incident_exact(") {
+        extra.replace(
+            "scatter_incident(point, outgoing, base)",
+            "volume_incident(point,outgoing,tverts[base+6u].w,tverts[base+13u].y>0.5,base)",
+        )
+    } else {
+        extra.replace(
+            "scatter_incident(point, outgoing, base)",
+            "volume_incident(point,outgoing,tverts[base+6u].w,tverts[base+13u].y>0.5)",
+        )
+    };
+    format!("{source}\n{extra}")
 }
 
 /// Pipelines of the path tracer (built on first use).
@@ -1196,7 +1270,7 @@ pub struct PtGpu {
     trace_volume: [std::sync::OnceLock<wgpu::ComputePipeline>; 2],
     /// The same with the `WATER` constant for scenes with transmissive materials: no volumes, volumes
     /// (by whether their lighting needs albedo), and grid-lit volumes (the same).
-    trace_water: [std::sync::OnceLock<wgpu::ComputePipeline>; 15],
+    trace_water: [std::sync::OnceLock<wgpu::ComputePipeline>; 40],
     module: wgpu::ShaderModule,
     /// The variant of the shader with light grids, its group-1 layout and pipelines (built on first use).
     bgl_grid: wgpu::BindGroupLayout,
@@ -1367,8 +1441,9 @@ impl PtGpu {
 
     fn trace_pipeline(&self, d: &wgpu::Device, scene: &Scene3, grid: bool) -> &wgpu::ComputePipeline {
         let (water, foam) = variant_of(scene.draws.iter().map(|dr| &dr.material));
-        if water || foam {
-            return self.variant_pipeline(d, scene, grid, water, foam);
+        let scatter = needs_scatter(scene.volumes.iter().map(|v| v.medium().optical().scatter_bounces));
+        if water || foam || scatter {
+            return self.variant_pipeline(d, scene, grid, water, foam, scatter);
         }
         if scene.volumes.is_empty() {
             return &self.trace;
@@ -1424,10 +1499,11 @@ impl PtGpu {
         grid: bool,
         water: bool,
         foam: bool,
+        scatter: bool,
     ) -> &wgpu::ComputePipeline {
         let lighting = scene.volumes.iter().any(|v| v.medium().optical().albedo.iter().any(|v| *v > 0.0));
         let media = !scene.volumes.is_empty();
-        let slot = variant_slot(media, grid, lighting, water, foam);
+        let slot = variant_slot(media, grid, lighting, water, foam, scatter);
         self.trace_water[slot].get_or_init(|| {
             let constants = variant_constants(media, lighting, water, foam);
             let base = if media && grid {
@@ -1440,7 +1516,7 @@ impl PtGpu {
                     include_str!("volume.wgsl")
                 )
             };
-            let source = variant_source(&base, water, foam);
+            let source = variant_source(&base, water, foam, scatter);
             let module = d.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("pathtrace-variant"),
                 source: wgpu::ShaderSource::Wgsl(source.into()),

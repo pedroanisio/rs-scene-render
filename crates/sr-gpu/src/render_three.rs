@@ -1139,6 +1139,7 @@ impl Renderer {
                 albedo: std::array::from_fn(|i| f64::from(albedo[i])),
                 emission: std::array::from_fn(|i| f64::from(emission[i]) * a.num("emissionScale", 0.0)),
                 anisotropy: a.num("anisotropy", 0.0),
+                scatter_bounces: a.num("scatterBounces", 1.0) as u32,
             };
             march = March { step_size: a.num("stepSize", 1.0), max_steps: a.num("maxSteps", 2048.0) as u32 };
             if a.str("lighting").as_deref() == Some("grid") {

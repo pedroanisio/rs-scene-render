@@ -410,7 +410,7 @@ pub(crate) fn pack(out: &mut Vec<[f32; 4]>, volumes: &[VolumeDraw]) -> [u32; 4] 
             volume.cast_shadow as u8 as f32,
             volume.receive_shadow as u8 as f32,
             volume.light_grid.is_some() as u8 as f32,
-            0.0,
+            o.scatter_bounces as f32,
         ];
         if let Some(next) = m.next_density() {
             let index = DMat4::from_cols_array(&next.transform().columns());

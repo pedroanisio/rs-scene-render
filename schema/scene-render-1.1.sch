@@ -742,4 +742,12 @@
       <sch:assert id="GEO3" test="not(@primitive='globe' and *[@property='terrain' or @property='terrainEncoding' or @property='planetRadius' or @property='terrainTileSize' or @property='terrainZoom' or @property='terrainMissing' or @property='terrainMemoryMiB']) and not(@primitive='globe' and @terrain and rigidBody and *[@property='radius' or @property='segments' or @property='exaggeration'])">globe terrain sampling and planetRadius are static; globe rigid collider relief cannot animate radius, segments or exaggeration.</sch:assert>
     </sch:rule>
   </sch:pattern>
+  <sch:pattern id="p77">
+    <sch:rule context="@audioBuses | @audioTracks | @captions | @colliders | @duckUnder | @effects | @fit | @forceFields | @lights | @looks | @splash">
+      <sch:assert id="R53" test="normalize-space(.) != ''">An ID reference list names at least one id.</sch:assert>
+    </sch:rule>
+    <sch:rule context="assets/audiogram">
+      <sch:assert id="R54" test="/scene/audioMix/audioTrack[@id = current()/@source]">audiogram/@source names an audioTrack of audioMix.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
 </sch:schema>

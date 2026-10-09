@@ -86,7 +86,7 @@
     <chart id="sales" kind="bar" width="800" height="400">
       <series name="2026" values="1 2 3.5 4"/>
     </chart>
-    <audiogram id="wave" source="music" width="800" height="120"/>
+    <audiogram id="wave" source="music-track" width="800" height="120"/>
     <code id="qr" kind="qr" data="https://example.com" width="200" height="200"/>
     <formula id="euler" tex="e^{i\pi}+1=0" width="400" height="100"/>
     <geo id="places" src="../media/places.geojson" sha256="{sha:places.geojson}"/>

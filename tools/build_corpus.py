@@ -336,10 +336,10 @@ CASES = [
     ("s06-length", ["S06"], sub('group id="hero" x="50%"', 'group id="hero" x="50px"')),
     ("s06-double", ["S06"], sub('<marker id="drop" time="4.2"', '<marker id="drop" time="4,2"')),
     ("s06-integer", ["S06"], sub('seed="7"', 'seed="-7"')),
-    ("s06-idrefs-empty", ["S06"], sub('<adjustment id="grade-all" effects="grade"/>', '<adjustment id="grade-all" effects=" "/>')),
+    ("s06-idrefs-empty", ["S06", "R53"], sub('<adjustment id="grade-all" effects="grade"/>', '<adjustment id="grade-all" effects=" "/>')),
     ("s07-text", ["S07"], sub("<master/>", "<master>loud</master>")),
     ("s09-duplicate-id", ["S09"], sub('<bus id="fx"/>', '<bus id="fx"/>\n    <bus id="fx"/>')),
-    ("s10-dangling-idref", ["S10"], sub('<audiogram id="wave" source="music"', '<audiogram id="wave" source="musik"')),
+    ("s10-dangling-idref", ["S10", "R54"], sub('<audiogram id="wave" source="music-track"', '<audiogram id="wave" source="musik"')),
     # ---- version check
     ("v1-sections", ["V1"], lambda t: v10("", '<markers><marker time="1"/></markers>')),
     ("v2-outputs", ["V2"], lambda t: '<scene version="1.0"><project width="640" height="360" fps="25" duration="2"/><output path="a.mp4" codec="h264"/><output path="b.mp4" codec="h264"/><composition/></scene>\n'),
@@ -631,7 +631,7 @@ VALID = {
 # libxml2 (the oracle) skips two XSD 1.0 checks that sr-model enforces:
 # IDREF resolution (Part 1, Validation Rule: Validation Root Valid (ID/IDREF
 # Table)) and minLength 1 on whitespace-only IDREFS lists.
-ORACLE_BLIND = {"s06-idrefs-empty", "s10-dangling-idref"}
+ORACLE_BLIND = {"s06-idrefs-empty", "s10-dangling-idref", "r53-empty-list"}
 
 # ---- generated marker ids (beat.N and bar.N of a beatGrid), SREP 57
 def marker_doc(markers='<beatGrid bpm="120" offset="0.25"/>', shape='', anim='', outputs=''):
@@ -677,6 +677,11 @@ WARN_CASES.append(
 )
 
 CASES.append(("openvdb-format", ["S06"], lambda _: VALID["openvdb"].replace('format="openvdb"', 'format="guess"')))
+
+CASES += [
+    ("r53-empty-list", ["S06", "R53"], lambda _: MINIMAL.replace('<composition/>', '<composition><group id="g" effects=""/></composition>')),
+    ("r54-audiogram-source", ["R54"], lambda _: MINIMAL.replace('<composition/>', '<assets><audiogram id="a" source="wrong" width="32" height="32"/></assets><composition><group id="wrong"/></composition>')),
+]
 
 def write(path, text, expect):
     header = f"<!-- expect: {' '.join(expect) if expect else 'valid'} -->\n"

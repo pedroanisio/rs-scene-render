@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" elementFormDefault="qualified" version="1.4.0">
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" elementFormDefault="qualified" version="1.5.0">
   <xs:annotation>
     <xs:documentation>
       scene-render scene format 1.1. This schema is the interchange contract
@@ -4250,7 +4250,7 @@
       </xs:sequence>
       <xs:attribute name="version" use="required">
         <xs:simpleType><xs:restriction base="xs:string">
-          <xs:enumeration value="1.0"/><xs:enumeration value="1.1"/><xs:enumeration value="1.2"/><xs:enumeration value="1.3"/><xs:enumeration value="1.4"/>
+          <xs:enumeration value="1.0"/><xs:enumeration value="1.1"/><xs:enumeration value="1.2"/><xs:enumeration value="1.3"/><xs:enumeration value="1.4"/><xs:enumeration value="1.5"/>
         </xs:restriction></xs:simpleType>
       </xs:attribute>
     </xs:complexType>

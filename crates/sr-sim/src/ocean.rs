@@ -541,7 +541,16 @@ impl Ocean {
             pressure_by: vec![[0.0; 2]; spec.body_owners],
         };
         let mut work = Work { remaining: spec.max_work, substeps: 0 };
-        advance(&spec, Bed::Fixed(&bed_y), sponge.as_ref(), &impulses, &mut initial, 0.0, &mut work, &mut Scratch::default())?;
+        advance(
+            &spec,
+            Bed::Fixed(&bed_y),
+            sponge.as_ref(),
+            &impulses,
+            &mut initial,
+            0.0,
+            &mut work,
+            &mut Scratch::default(),
+        )?;
         let frame = publish(&initial, spec.dry_tolerance)?;
         let spec_dt = spec.dt;
         let (spec_checkpoint_bytes, spec_owners) = (spec.checkpoint_bytes, spec.body_owners);
@@ -794,7 +803,16 @@ impl Ocean {
             match (&mut ends, driver.as_deref_mut()) {
                 (Some((now, next)), Some(driver)) => {
                     let bed = Bed::Moving { from: now, to: next, t0: end - dt, t1: end };
-                    advance(&self.spec, bed, self.sponge.as_ref(), &self.impulses, &mut state, end, &mut work, &mut scratch)?;
+                    advance(
+                        &self.spec,
+                        bed,
+                        self.sponge.as_ref(),
+                        &self.impulses,
+                        &mut state,
+                        end,
+                        &mut work,
+                        &mut scratch,
+                    )?;
                     std::mem::swap(now, next);
                     // the pushes were for the step that ended; nothing reads them again
                     now.pushes = Vec::new();
@@ -822,7 +840,16 @@ impl Ocean {
             Some((now, next)) => {
                 let (t0, t1) = (k as f64 * dt, (k + 1) as f64 * dt);
                 let bed = Bed::Moving { from: now, to: next, t0, t1 };
-                advance(&self.spec, bed, self.sponge.as_ref(), &self.impulses, &mut sampled, time, &mut work, &mut scratch)?;
+                advance(
+                    &self.spec,
+                    bed,
+                    self.sponge.as_ref(),
+                    &self.impulses,
+                    &mut sampled,
+                    time,
+                    &mut work,
+                    &mut scratch,
+                )?;
                 let s = ((time - t0) / (t1 - t0)).clamp(0.0, 1.0);
                 frame_bed = now.bed.iter().zip(&next.bed).map(|(a, b)| a + (b - a) * s).collect();
             }
@@ -909,12 +936,14 @@ fn publish(state: &State, dry: f64) -> Result<Frame, Error> {
 const ORDER2_EXTRA_BYTES: usize = 144;
 const ORDER2_WORK_FACTOR: usize = 3;
 fn step_work(spec: &Spec) -> usize {
+    let sponge = usize::from(spec.boundary == Boundary::Absorbing);
     match spec.order {
-        Order::First => 8,
-        Order::Second => 8 * ORDER2_WORK_FACTOR,
+        Order::First => 8 + sponge,
+        Order::Second => 8 * ORDER2_WORK_FACTOR + 2 * sponge,
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn advance(
     spec: &Spec,
     bed: Bed<'_>,

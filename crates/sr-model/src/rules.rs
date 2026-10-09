@@ -853,6 +853,31 @@ impl<'a> Eval<'a> {
         if local == "scene" && n.parent_element().is_none() {
             self.pinned_fonts(n);
         }
+        for attr in n.attributes().filter(|a| {
+            [
+                "audioBuses",
+                "audioTracks",
+                "captions",
+                "colliders",
+                "duckUnder",
+                "effects",
+                "fit",
+                "forceFields",
+                "lights",
+                "looks",
+                "splash",
+            ]
+            .contains(&a.name())
+        }) {
+            self.check(!attr.value().trim().is_empty(), n, "R53", || {
+                "An ID reference list names at least one id.".into()
+            });
+        }
+        if local == "audiogram" && parent_is("assets") {
+            self.check(a("source").is_some_and(|id| self.sets.audio_tracks.contains(id)), n, "R54", || {
+                "audiogram/@source names an audioTrack of audioMix.".into()
+            });
+        }
 
         if local == "scene" && n.parent_element().is_none() && a("version") != Some("1.3") {
             let uses_volume = n.descendants().any(|d| {

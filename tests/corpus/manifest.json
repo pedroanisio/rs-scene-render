@@ -922,6 +922,13 @@
     "r52.scene.xml": [
       "R52"
     ],
+    "r53-empty-list.scene.xml": [
+      "S06",
+      "R53"
+    ],
+    "r54-audiogram-source.scene.xml": [
+      "R54"
+    ],
     "r6-duplicate.scene.xml": [
       "R6"
     ],
@@ -971,7 +978,8 @@
       "S06"
     ],
     "s06-idrefs-empty.scene.xml": [
-      "S06"
+      "S06",
+      "R53"
     ],
     "s06-integer.scene.xml": [
       "S06"
@@ -995,7 +1003,8 @@
       "S09"
     ],
     "s10-dangling-idref.scene.xml": [
-      "S10"
+      "S10",
+      "R54"
     ],
     "solid-colliders-blob.scene.xml": [
       "P3D6",

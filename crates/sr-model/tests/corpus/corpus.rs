@@ -47,8 +47,7 @@ fn corpus_covers_every_rule_and_structural_code() {
     let covered: BTreeSet<&str> = m.values().flat_map(|s| s.values()).flatten().map(String::as_str).collect();
     // Rules of accepted SREPs this engine does not implement yet (the rows of sr_eval::pending::PENDING): the
     // schema carries them, the Rust mirror and the corpus do not. An SREP's rules leave this list with its row.
-    const PENDING_RULES: &[&str] = &[
-    ];
+    const PENDING_RULES: &[&str] = &[];
     let mut missing: Vec<&str> = codes::SCH_ASSERTS
         .iter()
         .map(|a| a.0)
