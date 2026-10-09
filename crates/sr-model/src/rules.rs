@@ -1774,6 +1774,25 @@ impl<'a> Eval<'a> {
                 self.check(grid_only, n, "VOL10", || {
                     "the lightGrid* attributes of a medium apply only with lighting=\"grid\".".into()
                 });
+                // more bounces of a medium that scatters nothing have nothing to do (an albedo of black: the first three digits of the colour)
+                for m in kids(n, "medium") {
+                    let black = m.attribute("albedo").is_some_and(|c| {
+                        let digits = c.trim().trim_start_matches('#');
+                        let rgb = if digits.len() >= 6 { &digits[..6] } else { digits };
+                        !rgb.is_empty() && rgb.chars().all(|d| d == '0')
+                    });
+                    if black
+                        && m.attribute("scatterBounces")
+                            .and_then(|v| v.trim().parse::<u32>().ok())
+                            .is_some_and(|b| b > 1)
+                    {
+                        self.warn(
+                            m,
+                            "W10",
+                            "this medium has scatterBounces above 1 and an albedo of black: it scatters no light, so the extra bounces have nothing to do.".into(),
+                        );
+                    }
+                }
                 self.check(a("primitive") != Some("mesh") || has("mesh"), n, "C6", || {
                     "object3D primitive=\"mesh\" requires @mesh.".into()
                 });
