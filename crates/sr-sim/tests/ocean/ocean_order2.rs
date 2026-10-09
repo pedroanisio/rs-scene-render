@@ -1,4 +1,4 @@
-use sr_sim::ocean::{Boundary, Cell, Impulse, ImpulseKind, Ocean, Order, Spec};
+use sr_sim::ocean::{Boundary, Cell, Error, Impulse, ImpulseKind, Ocean, Order, Spec};
 
 const ORDERS: [Order; 2] = [Order::First, Order::Second];
 
@@ -337,11 +337,11 @@ fn second_order_scratch_counts_against_resident_memory() {
     };
     let first = n * 256 + 4096;
     assert!(make(Order::First, first).is_ok());
-    assert!(matches!(make(Order::First, first - 1), Err(sr_sim::ocean::Error::Limit(_))));
-    assert!(matches!(make(Order::Second, first), Err(sr_sim::ocean::Error::Limit(_))));
+    assert!(matches!(make(Order::First, first - 1), Err(Error::Limit(_))));
+    assert!(matches!(make(Order::Second, first), Err(Error::Limit(_))));
     let second = first + n * ORDER2_EXTRA_BYTES_PER_CELL;
     assert!(make(Order::Second, second).is_ok());
-    assert!(matches!(make(Order::Second, second - 1), Err(sr_sim::ocean::Error::Limit(_))));
+    assert!(matches!(make(Order::Second, second - 1), Err(Error::Limit(_))));
 }
 
 /// Two cells in different row bands (and different rows) carry a velocity whose
@@ -395,7 +395,7 @@ fn the_state_and_samples_kept_of_the_step_passed_count_against_resident_memory()
     };
     let wanted = n * MOVING_BODIES_BYTES_PER_CELL + 4096;
     assert!(make(wanted).is_ok());
-    assert!(matches!(make(wanted - 1), Err(sr_sim::ocean::Error::Limit(_))));
+    assert!(matches!(make(wanted - 1), Err(Error::Limit(_))));
 }
 
 /// The work a seek of a driven solver is charged, found as the smallest budget that lets it through.
