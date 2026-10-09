@@ -353,7 +353,9 @@ fn bsdf(s: Surf, n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, lobes: vec2<f32>) -> 
     if (nl <= 0.0 || nv <= 0.0) { return vec3(0.0); }
     let h = normalize(l + v);
     let nh = max(dot(n, h), 0.0);
-    let vh = max(dot(v, h), 0.0);
+    // clamped above too: when l is close to v, the rounding of normalize can put v.h a few ULP over 1, and
+    // pow of a negative base is undefined in SPIR-V (NaN on adapters that compute it as exp2(y log2 x))
+    let vh = clamp(dot(v, h), 0.0, 1.0);
     let f = s.f0 + (vec3(1.0) - s.f0) * pow(1.0 - vh, 5.0);
     let spec = f * d_ggx(nh, s.a) * v_smith(nl, nv, s.a) * s.specw;
     let kd = (vec3(1.0) - f) * (1.0 - s.metallic) * (1.0 - s.trans);
