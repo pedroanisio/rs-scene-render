@@ -116,6 +116,13 @@ mod connector_ids {
     pub const LABEL: &str = "R50";
 }
 
+/// Rule ids of SREP 17 (pdf assets and regions), as the schema editor numbered them for 1.2.0 (sr-core p72, p73).
+mod pdf_ids {
+    pub const VERSION: &str = "V9";
+    pub const REGION: &str = "R51";
+    pub const REGION_LAYER: &str = "R52";
+}
+
 // ------------------------------------------------------------------ XPath helpers
 
 /// `number()` of a string, as libxml2 evaluates it: XPath 1.0 `Number`
@@ -677,6 +684,32 @@ impl<'a> Eval<'a> {
         }
     }
 
+    /// p73: a shape placed on a region of a pdf asset (SREP 17).
+    fn region_shape(&mut self, n: Node, region: &str) {
+        let layer = n.attribute("regionLayer");
+        self.check(layer.is_some(), n, "C67", || "@region needs @regionLayer, the layer that shows the page.".into());
+        let c68 = n.attribute("parent").is_none() && !has_kid(n, "transformConstraint");
+        self.check(c68, n, "C68", || "a shape placed on a region has no other transform parent or constraint.".into());
+        let root = n.document().root_element();
+        let pdfs: Vec<Node> = kids(root, "assets").flat_map(|s| kids(s, "pdf")).collect();
+        let holders: Vec<&str> = pdfs
+            .iter()
+            .filter(|p| kids(**p, "region").any(|g| g.attribute("id") == Some(region)))
+            .filter_map(|p| p.attribute("id"))
+            .collect();
+        self.check(!holders.is_empty(), n, pdf_ids::REGION, || "@region must name a region of a pdf asset.".into());
+        let r52 = layer.is_some_and(|l| {
+            root.descendants().any(|d| {
+                is(d, "layer")
+                    && d.attribute("id") == Some(l)
+                    && d.attribute("asset").is_some_and(|a| holders.contains(&a))
+            })
+        });
+        self.check(r52, n, pdf_ids::REGION_LAYER, || {
+            "@regionLayer must name a layer whose asset holds the region.".into()
+        });
+    }
+
     /// p71: a connector's ends, anchors, route, transform, targets and label (SREP 16).
     fn connector(&mut self, n: Node) {
         let a = |k: &str| n.attribute(k);
@@ -1052,6 +1085,10 @@ impl<'a> Eval<'a> {
                     "documents before version=\"1.2\" cannot use 1.2 elements or asset kinds; set version=\"1.2\"."
                         .into()
                 });
+                // p72 (SREP 17)
+                self.check(!kids(n, "assets").any(|s| has_kid(s, "pdf")), n, pdf_ids::VERSION, || {
+                    "pdf assets need version=\"1.2\".".into()
+                });
                 // p70 (SREP 16)
                 self.check(!n.descendants().any(|d| is(d, "connector")), n, connector_ids::VERSION, || {
                     "connector needs version=\"1.2\".".into()
@@ -1091,10 +1128,13 @@ impl<'a> Eval<'a> {
                 self.check(!marked || matches!(a("shape"), Some("path" | "line")), n, "C65", || {
                     "markers need an open outline: shape=\"path\" or \"line\".".into()
                 });
-                // p73: shape[@region] matches the earlier rule in this pattern.
-                self.check(has("region") || (has("width") && has("height")), n, "C69", || {
-                    "shape needs @width and @height unless it takes its box from @region.".into()
-                });
+                // p73 (SREP 17): a shape on a region takes its box from it, others need their own
+                match a("region") {
+                    Some(region) => self.region_shape(n, region),
+                    None => self.check(has("width") && has("height"), n, "C69", || {
+                        "shape needs @width and @height unless it takes its box from @region.".into()
+                    }),
+                }
             }
             // p4
             "mask" => {
@@ -1916,6 +1956,10 @@ impl<'a> Eval<'a> {
             }
             // p71 (SREP 16)
             "connector" => self.connector(n),
+            // p73 (SREP 17)
+            "pdf" if parent_is("assets") => {
+                self.check(has("sha256"), n, "C66", || "a pdf asset pins its source with @sha256.".into());
+            }
             // p76 (SREP 26)
             "points" if parent_is("repeat") => {
                 let ty = a("type");

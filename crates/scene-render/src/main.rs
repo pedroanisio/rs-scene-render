@@ -807,7 +807,7 @@ fn resolve(file: &Path, o: &sr_resolve::Options, json: bool, out: &mut Out) -> s
             }
         }
         if rows.is_empty() {
-            writeln!(out.w, "nothing to resolve: no <generated> assets or transcribed caption tracks")?;
+            writeln!(out.w, "nothing to resolve: no <generated> or <pdf> assets or transcribed caption tracks")?;
         }
     }
     let failed = rows.iter().any(|r| r.status == Status::Error || (o.check && r.status == Status::Stale));

@@ -194,6 +194,11 @@ pub fn verify(doc: &Document<'_>, base_dir: &Path, out: &mut Vec<Diagnostic>) {
             if numbered && attr == "src" {
                 continue;
             }
+            // a renderer never reads a pdf asset's source, only its pinned cache (SREP 17 §1.2); the resolve step
+            // checks the source against @sha256
+            if name == "pdf" && attr == "src" {
+                continue;
+            }
             let Some(value) = n.attribute(attr) else { continue };
             if name == "volume" && n.attribute("format") == Some("srvseq") && attr == "src" {
                 match resolve(value, base_dir) {

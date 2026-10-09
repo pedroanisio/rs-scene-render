@@ -24,12 +24,6 @@ pub struct Pending {
 
 /// The pending SREPs. One row each; the gap branches delete their own.
 pub const PENDING: &[Pending] = &[
-    Pending {
-        srep: 17,
-        what: "PDF page assets and text-anchored regions",
-        elements: &["pdf", "region"],
-        attributes: &[("shape", "region", None), ("shape", "regionLayer", None), ("shape", "regionPadding", Some("0"))],
-    },
     Pending { srep: 18, what: "render reports", elements: &[], attributes: &[("output", "report", None)] },
     Pending {
         srep: 19,

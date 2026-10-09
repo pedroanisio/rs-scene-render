@@ -48,8 +48,7 @@ fn corpus_covers_every_rule_and_structural_code() {
     // Rules of accepted SREPs this engine does not implement yet (the rows of sr_eval::pending::PENDING): the
     // schema carries them, the Rust mirror and the corpus do not. An SREP's rules leave this list with its row.
     const PENDING_RULES: &[&str] = &[
-        // SREP 17, PDF pages and regions
-        "C66", "C67", "C68", "C69", "R51", "R52", "V9", // SREP 21, the pinned-font policy
+        // SREP 21, the pinned-font policy
         "C70", "C71", "C72", "C73",
     ];
     let mut missing: Vec<&str> = codes::SCH_ASSERTS

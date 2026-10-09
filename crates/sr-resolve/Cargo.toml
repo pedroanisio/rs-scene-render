@@ -20,6 +20,19 @@ sha2.workspace = true
 image.workspace = true
 roxmltree.workspace = true
 tempfile = "3"
+# PDF pages for pdf assets (SREP 17): pure Rust, Apache-2.0 OR MIT; its standard-font substitutes are PDFium's
+# (BSD-3-Clause). No SIMD resampling, so a page renders the same on every CPU.
+# Needs Rust 1.92 (hayro's rust-version); without the `pdf` feature the workspace builds on its 1.90.
+hayro = { version = "0.8", default-features = false, features = ["embed-fonts", "embed-cmaps"], optional = true }
+# NFKC for matching region phrases (MIT OR Apache-2.0)
+unicode-normalization = { version = "0.1", optional = true }
+
+[features]
+default = []
+# The resolve step of pdf assets (SREP 17): page images and text regions. Opt-in, because hayro needs Rust 1.92 and the
+# workspace's minimum is 1.90. Without it, resolve reports every pdf asset as an error; the renderer draws pdf assets
+# from their pinned caches either way.
+pdf = ["dep:hayro", "dep:unicode-normalization"]
 
 [[bin]]
 name = "scene-render-provider-example"
