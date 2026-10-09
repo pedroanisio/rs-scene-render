@@ -251,8 +251,10 @@ fn imported_fracture_freezes_node_animation_and_authored_morph_weights() {
     assert!((min - 0.5).abs() < 1e-5 && (max - 3.5).abs() < 1e-5, "frozen glTF x bounds {min}..{max}");
 }
 
-#[test]
-fn imported_fracture_freezes_two_clips_blended_by_animation_blend() {
+/// A 2 m cube imported with a morph target stretching x and two clips moving the node along x by 4 ("move") and 8
+/// ("far") over 2 s, fractured at t = 1 with `attrs` on the object: the x bounds of the frozen pieces, and the
+/// frame's problems and failures.
+fn two_clip_fracture(attrs: &str) -> (f64, f64, Vec<String>, Vec<String>) {
     use serde_json::json;
     let dir = Fixture::new();
     let mesh = sr_3d::prim::cuboid(2., 2., 2.);
@@ -291,15 +293,16 @@ fn imported_fracture_freezes_two_clips_blended_by_animation_blend() {
         {"name":"far","samplers":[{"input":3,"output":5,"interpolation":"LINEAR"}],"channels":[{"sampler":0,"target":{"node":0,"path":"translation"}}]}]});
     std::fs::write(dir.0.join("shape.gltf"), serde_json::to_vec(&data).unwrap()).unwrap();
     std::fs::write(dir.0.join("shape.bin"), bytes).unwrap();
-    let xml = xml("scaleX=\"0.01\" scaleY=\"0.01\" scaleZ=\"0.01\" animationClip=\"move\" animationClipTo=\"far\" animationBlend=\"0.5\" morphWeights=\"0.5\"", "")
+    let xml = xml(&format!("scaleX=\"0.01\" scaleY=\"0.01\" scaleZ=\"0.01\" {attrs}"), "")
         .replace("<materials>", "<assets><mesh id=\"source\" src=\"shape.gltf\"/></assets><materials>")
         .replace("primitive=\"box\"", "primitive=\"mesh\" mesh=\"source\"");
     let doc = sr_model::load_str(&xml, &sr_model::LoadOptions { verify_assets: true, base_dir: Some(dir.0.clone()) })
         .unwrap();
     let ev = sr_eval::Evaluator::new(&doc, &Default::default()).unwrap();
     let frame = ev.evaluate(1.);
-    assert!(frame.problems.is_empty(), "{:?}", frame.problems);
-    let split = frame.nodes[0].fracture.as_ref().unwrap();
+    let Some(split) = frame.nodes[0].fracture.as_ref() else {
+        return (f64::NAN, f64::NAN, frame.problems.clone(), frame.failures.clone());
+    };
     let xs: Vec<_> = split
         .geometry
         .pieces
@@ -310,8 +313,32 @@ fn imported_fracture_freezes_two_clips_blended_by_animation_blend() {
         .collect();
     let min = xs.iter().copied().fold(f64::INFINITY, f64::min);
     let max = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    (min, max, frame.problems.clone(), frame.failures.clone())
+}
+
+#[test]
+fn imported_fracture_freezes_two_clips_blended_by_animation_blend() {
+    let (min, max, problems, _) =
+        two_clip_fracture(r#"animationClip="move" animationClipTo="far" animationBlend="0.5" morphWeights="0.5""#);
+    assert!(problems.is_empty(), "{problems:?}");
     // translation at t = 1: 2 in "move", 4 in "far"; halfway 3, and the half morph stretches the cube to +-1.5
     assert!((min - 1.5).abs() < 1e-5 && (max - 4.5).abs() < 1e-5, "frozen blended x bounds {min}..{max}");
+}
+
+#[test]
+fn imported_fracture_with_an_unknown_second_clip_freezes_the_blend_toward_the_rest_pose() {
+    // SREP 42: a fracture freezes the blended pose (Semantics 1), and an unknown animationClipTo is reported and
+    // blends toward the rest pose (Semantics 4), so the fracture happens instead of failing
+    let (min, max, problems, failures) = two_clip_fracture(
+        r#"animationClip="move" animationClipTo="nosuchclip" animationBlend="0.5" morphWeights="0.5""#,
+    );
+    assert!(failures.is_empty(), "{failures:?}");
+    assert!(
+        problems.iter().any(|m| m.contains("nosuchclip") && m.contains("animationClipTo")),
+        "the unknown name is reported: {problems:?}"
+    );
+    // translation at t = 1: 2 in "move", 0 at rest; halfway 1, and the half morph stretches the cube to +-1.5
+    assert!((min + 0.5).abs() < 1e-5 && (max - 2.5).abs() < 1e-5, "frozen x bounds {min}..{max}");
 }
 
 #[test]

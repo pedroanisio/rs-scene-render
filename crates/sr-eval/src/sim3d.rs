@@ -888,6 +888,7 @@ pub(crate) fn build(
                 continue;
             }
         };
+        problems.extend(geometry.notes.iter().map(|m| format!("{}: {m}", n.id)));
         let mut fragments = Vec::new();
         let mut indices = Vec::new();
         let impulse = [num(config, "impulseX", 0.), num(config, "impulseY", 0.), num(config, "impulseZ", 0.)];
@@ -1228,7 +1229,9 @@ impl Driver3 for Driver<'_, '_> {
             use std::hash::{Hash, Hasher};
             let graph = self.graphs.at(composition);
             let Some(i) = index_of(&graph, &body.id) else { return Ok(None) };
-            let (sources, _) = crate::fracture::source::load(self.p, &graph.nodes[i], body.scale, budget)?;
+            // an unknown animationClipTo is reported by the renderer, which draws the same object
+            let (sources, _) =
+                crate::fracture::source::load(self.p, &graph.nodes[i], body.scale, budget, &mut Vec::new())?;
             let mut vertices = Vec::new();
             let mut triangles = Vec::new();
             let mut hash = std::collections::hash_map::DefaultHasher::new();

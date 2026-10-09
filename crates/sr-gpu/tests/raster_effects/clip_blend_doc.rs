@@ -60,6 +60,11 @@ fn centre(doc: &sr_model::Document, t: f64) -> Option<f32> {
     let r = render_times(doc, &[t])?;
     let problems: Vec<_> = r.stats.unsupported.iter().chain(&r.stats.errors).collect();
     assert!(problems.is_empty(), "{problems:?}");
+    Some(mean_x(&r))
+}
+
+/// The mean x of the covered pixels of a frame.
+fn mean_x(r: &Rendered) -> f32 {
     let (mut sum, mut n) = (0.0, 0.0);
     for (i, p) in r.px.iter().enumerate() {
         if p[3] > 0.5 {
@@ -68,7 +73,7 @@ fn centre(doc: &sr_model::Document, t: f64) -> Option<f32> {
         }
     }
     assert!(n > 100.0, "the model is drawn: {n} pixels");
-    Some(sum / n)
+    sum / n
 }
 
 #[test]
@@ -95,8 +100,22 @@ fn a_keyed_weight_cross_fades_over_time() {
 }
 
 #[test]
-fn an_unknown_second_clip_is_reported() {
-    let doc = scene(r#"animationClip="left" animationClipTo="nope" animationBlend="0.5""#, "");
-    let Some(r) = render_times(&doc, &[0.5]) else { return };
-    assert!(r.stats.errors.iter().any(|m| m.contains("nope")), "{:?}", r.stats.errors);
+fn an_unknown_second_clip_is_reported_and_blends_toward_the_rest_pose() {
+    // SREP 42 Semantics 4: "A name of animationClipTo that matches no clip MUST be reported, as for animationClip;
+    // the object then blends toward the rest pose." The frame is drawn: the name is a note, not a failure.
+    let Some(rest) = centre(&scene("", ""), 0.5) else { return };
+    let right = centre(&scene(r#"animationClip="right""#, ""), 0.5).unwrap();
+    assert!((right - rest - 60.0).abs() < 1.5, "clip right holds 0.6 m: {rest} {right}");
+    for (w, want) in [("0.5", rest + 30.0), ("0", right), ("1", rest)] {
+        let doc = scene(&format!(r#"animationClip="right" animationClipTo="nope" animationBlend="{w}""#), "");
+        let r = render_times(&doc, &[0.5]).unwrap();
+        assert!(r.stats.errors.is_empty(), "an unknown second clip does not fail the frame: {:?}", r.stats.errors);
+        assert!(
+            r.stats.unsupported.iter().any(|m| m.contains("nope") && m.contains("animationClipTo")),
+            "the unknown name is reported: {:?}",
+            r.stats.unsupported
+        );
+        let x = mean_x(&r);
+        assert!((x - want).abs() < 1.5, "weight {w} toward the rest pose: {x}, want {want}");
+    }
 }

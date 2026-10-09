@@ -82,6 +82,12 @@ pub fn pose(model: &Model, anim: Option<&Animation>, t: f32) -> (Vec<Trs>, Vec<V
     (locals, weights)
 }
 
+/// What is reported when `animationClipTo` names no clip of the model: the object is still drawn, blended toward the
+/// rest pose (SREP 42, Semantics 4). The renderer and a fracture's frozen pose report the same words.
+pub fn unknown_clip_to_rest(name: &str) -> String {
+    format!("animation clip {name} not found; blending toward the rest pose")
+}
+
 /// The pose of `a` at `ta` seconds blended with the pose of `b` at `tb` by `w` (0: all `a`, 1: all `b`). Translation, scale
 /// and morph weights blend linearly and rotation along the shortest arc. A clip that does not animate a node leaves it at
 /// its rest pose in that clip; `None` is the rest pose throughout.

@@ -5,11 +5,14 @@ use sr_3d::{Model, Primitive};
 use sr_model::element::Element;
 use std::sync::Arc;
 
+/// The source's surfaces as frozen at `n`'s frame. `notes` receives what is reported without failing: an
+/// `animationClipTo` that names no clip (SREP 42: the pose blends toward the rest pose).
 pub(crate) fn load(
     p: &Program,
     n: &FrameNode,
     scale: [f64; 3],
     budget: usize,
+    notes: &mut Vec<String>,
 ) -> Result<(Vec<Primitive>, Option<Arc<Model>>), String> {
     let value = |key, default| {
         n.props.get(key).and_then(crate::Value::as_num).unwrap_or_else(|| crate::sim::num(&*n.elem, key, default))
@@ -52,8 +55,13 @@ pub(crate) fn load(
         for attr in ["animationClip", "animationClipTo"] {
             let name = text(attr);
             let clip = name.as_ref().and_then(find);
-            if name.is_some() && clip.is_none() {
-                return Err("fracture animation clip not found".into());
+            match (&name, clip) {
+                // SREP 42 Semantics 4: reported, and the pose blends toward the rest pose (`None`)
+                (Some(want), None) if attr == "animationClipTo" => {
+                    notes.push(format!("animationClipTo: {}", sr_3d::anim::unknown_clip_to_rest(want)))
+                }
+                (Some(_), None) => return Err("fracture animation clip not found".into()),
+                _ => {}
             }
             clips.push(clip);
         }
