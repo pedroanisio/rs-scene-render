@@ -561,7 +561,9 @@ impl StepProgram {
             width: self.width,
             height: self.height,
             rgba: rgba
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|p| {
                     let a = p[3] as f32 / 255.0;
                     let c = |v: u8| srgb_to_linear(v as f64 / 255.0) * a;
