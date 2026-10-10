@@ -1945,8 +1945,14 @@ impl Renderer {
         self.frame_rect = None;
     }
 
-    /// A texture of `size` the caller keeps across renders (the placed sides of a join).
+    /// A texture of `size` the caller keeps across renders, in the output stage's format (f16 whatever the working
+    /// precision): the placed sides of a join, overlay and flash pictures.
     pub fn texture(&self, size: [u32; 2]) -> Arc<Tex> {
+        Arc::new(resources::create(&self.gpu.device, &self.bgl1, size, 1, "kept"))
+    }
+
+    /// A texture of `size` in this renderer's working format (SREP 72), which a frame can be copied into.
+    pub fn working_texture(&self, size: [u32; 2]) -> Arc<Tex> {
         Arc::new(resources::create_as(&self.gpu.device, &self.bgl1, self.format, size, 1, "kept"))
     }
 
@@ -2045,11 +2051,40 @@ impl Renderer {
                 to.clone()
             }
         };
-        // the result is a pooled temporary: copy it out before the pool hands it to the next render
+        // the result is a pooled temporary: copy it out before the pool hands it to the next render; into a texture
+        // of another format (f16 output under f32 working precision, SREP 72) a pass converts it
         let keep = out.clone();
+        let convert = keep.tex.format() != into.tex.format();
+        if convert {
+            let mut v = [[0.0f32; 4]; 8];
+            v[0][0] = 1.0;
+            let pass = fx::Pass {
+                entry: fx::Entry::Copy,
+                params: fx::Params::new(v, [0; 4]),
+                src: keep.clone(),
+                aux: fx::Aux::None,
+                aux2: None,
+                lut: None,
+                out: Arc::new(resources::create_as(
+                    &self.gpu.device,
+                    &self.bgl1,
+                    into.tex.format(),
+                    size,
+                    1,
+                    "join out",
+                )),
+                additive: false,
+                clear: true,
+                custom: None,
+                label: "join format".into(),
+            };
+            let target = pass.out.clone();
+            Self::finish_builder(&mut plan, vec![pass], vec![target], Vec::new(), &who);
+        }
+        let converted = if convert { plan.jobs.last().map(|j| j.fx[0].out.clone()) } else { None };
         let stats = self.execute(plan, 0, None, &[]);
         let mut enc = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("join") });
-        Self::copy(&mut enc, &keep, into, [0, 0, size[0], size[1]]);
+        Self::copy(&mut enc, converted.as_ref().unwrap_or(&keep), into, [0, 0, size[0], size[1]]);
         self.last_submit = Some(self.gpu.queue.submit([enc.finish()]));
         problems.extend(stats.unsupported);
         problems.extend(stats.errors);

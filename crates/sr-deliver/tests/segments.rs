@@ -436,3 +436,40 @@ fn a_segment_on_an_empty_frame_is_reported() {
     assert_eq!(r.warnings.len(), 1, "{:?}", r.warnings);
     assert!(r.warnings[0].starts_with("late ends"), "{:?}", r.warnings);
 }
+
+#[test]
+fn a_crossfade_join_delivers_at_f32_working_precision() {
+    // SREP 72: the join's sides are placed and joined in the output stage's f16 textures while the frames render at
+    // f32, so the joined frame is converted, not copied, across formats
+    let Some(g) = gpu() else { return };
+    let d = dir("join-f32");
+    let doc = |precision: &str| {
+        format!(
+            r##"<scene version="1.6"><project width="64" height="36" fps="10" duration="3" background="#000000" {precision}/>
+          <output path="{}/f_%03d.png" codec="png-sequence">
+            <segment from="2" to="3"><transition type="crossfade" duration="0.5" curve="linear"/></segment>
+            <segment from="0" to="1"/>
+          </output>
+          <composition>{CLOCK}</composition></scene>"##,
+            d.display()
+        )
+    };
+    if !g.device.features().contains(sr_gpu::resources::F32_FEATURES) {
+        let path = d.join("scene.xml");
+        std::fs::write(&path, doc(r#"precision="f32""#)).unwrap();
+        let doc = sr_model::load_file(&path, &sr_model::LoadOptions::default()).unwrap();
+        let opts = sr_deliver::Options { hardware: sr_media::encode::Hardware::Software, ..Default::default() };
+        match sr_deliver::deliver(&doc, &doc.scene.outputs[0], Some(&g), &opts, &mut |_, _| {}) {
+            Ok(_) => panic!("precision=\"f32\" delivered on an adapter without the features it needs"),
+            Err(e) => assert!(e.to_string().contains("FLOAT32_"), "{e}"),
+        }
+        return;
+    }
+    let (f16, _) = render(&d, &doc(""));
+    let (f32, r) = render(&d, &doc(r#"precision="f32""#));
+    assert!(r.unsupported.is_empty(), "{:?}", r.unsupported);
+    assert_eq!(f16.len(), f32.len());
+    for (k, (a, b)) in f16.iter().zip(&f32).enumerate() {
+        assert!(near(b, 32, 18, rgb(a, 32, 18)), "frame {k}: f16 {:?}, f32 {:?}", rgb(a, 32, 18), rgb(b, 32, 18));
+    }
+}

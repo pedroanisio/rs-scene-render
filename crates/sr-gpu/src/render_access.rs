@@ -50,7 +50,7 @@ impl Renderer {
             return (frame, Vec::new());
         }
         let [w, h] = frame.texture.size;
-        let kept = self.texture([w, h]);
+        let kept = self.working_texture([w, h]);
         let mut enc = self.gpu.device.create_command_encoder(&Default::default());
         Self::copy(&mut enc, &frame.texture, &kept, [0, 0, w, h]);
         self.gpu.queue.submit([enc.finish()]);
