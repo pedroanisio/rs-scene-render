@@ -1,0 +1,11 @@
+{
+  "adapter": "llvmpipe (LLVM 19.1.7, 256 bits) (Vulkan, Mesa 25.0.7-2+deb13u1 (LLVM 19.1.7))",
+  "hashes": {
+    "effects": "eedcb9529fb3feae4ce5a09ab0328d5719d7c9d5e6a6670a6ffe7bd64a0ab597",
+    "golden": "82748d00d69927ec740e818ec73365b9f98514a391691ec6ca7a888b20af3577",
+    "object3d": "fd3e249c7c7bf496897dc64444f03a6428f54a97d11b0cc6198057d771209d5f",
+    "particles": "e0ed611418daca50a74e3b6aa21107c0d1267b416d9a8c92bf4ee33d1a633b1a",
+    "vectors": "3a690b49f4ee96feb44e32564d058235a83ad720a35bd619c297336b5956dfe0"
+  },
+  "baseline_commit": "4bf7a9ea0a0a9ffa999f20f98f44d557be82e26d"
+}

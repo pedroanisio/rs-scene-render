@@ -71,8 +71,8 @@ fn documents() -> Vec<(&'static str, String, String, String)> {
         (
             "object3d",
             r##"width="128" height="72" background="#000000""##.into(),
-            r##"<materials><material id="gray" baseColor="#888888" roughness="0.6"/></materials>"##.into(),
-            r#"<object3D id="ball" primitive="sphere" radius="20" x="64" y="36" material="gray"/>"#.into(),
+            r##"<materials><material id="matte-gray" baseColor="#888888" roughness="0.6"/></materials>"##.into(),
+            r#"<object3D id="ball" primitive="sphere" radius="20" x="64" y="36" material="matte-gray"/>"#.into(),
         ),
     ]
 }
