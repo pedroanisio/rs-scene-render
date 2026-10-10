@@ -429,31 +429,28 @@ fn morph_displaces_by_the_luminance_difference_unlike_a_crossfade() {
     for x in [8, 32, 56] {
         assert!(close(morph.at(x, 16), fade.at(x, 16), 2e-2), "x {x}: {:?} vs {:?}", morph.at(x, 16), fade.at(x, 16));
     }
-    // the crossfade is opaque everywhere, with b's green
+    // the frame's background is opaque black: half of a red over it is (½, 0, 0), half of b white is (½, ½, ½)
+    let (both, a_only, b_only) = ([1.0, 0.5, 0.5, 1.0], [0.5, 0.0, 0.0, 1.0], [0.5, 0.5, 0.5, 1.0]);
     for x in [0, 1, 62, 63] {
-        let f = fade.at(x, 16);
-        assert!(f[3] > 0.97 && f[1] > 0.3, "crossfade at x {x}: {f:?}");
+        assert!(close(fade.at(x, 16), both, 2e-2), "crossfade at x {x}: {:?}", fade.at(x, 16));
     }
     // a is read 2.52 px to the right: columns 62 and 63 read a beyond the frame (transparent), 59 and 60 still inside
     for x in [62, 63] {
-        let m = morph.at(x, 16);
-        assert!(m[3] < 0.6, "x {x}: a is displaced out of the frame, only b at p = 1/2 is left: {m:?}");
+        assert!(close(morph.at(x, 16), b_only, 2e-2), "x {x}: a is displaced out of the frame: {:?}", morph.at(x, 16));
     }
     for x in [59, 60] {
-        assert!(morph.at(x, 16)[3] > 0.97, "x {x}: a still covers it: {:?}", morph.at(x, 16));
+        assert!(close(morph.at(x, 16), both, 2e-2), "x {x}: a still covers it: {:?}", morph.at(x, 16));
     }
-    // b is read 2.52 px to the left: columns 0 and 1 read b beyond the frame, so only red is left (no green)
+    // b is read 2.52 px to the left: columns 0 and 1 read b beyond the frame, 3 and 4 still inside
     for x in [0, 1] {
-        let m = morph.at(x, 16);
-        assert!(m[1] < 0.03 && m[3] < 0.6, "x {x}: b is displaced out of the frame, only a is left: {m:?}");
+        assert!(close(morph.at(x, 16), a_only, 2e-2), "x {x}: b is displaced out of the frame: {:?}", morph.at(x, 16));
     }
     for x in [3, 4] {
-        let m = morph.at(x, 16);
-        assert!(m[1] > 0.3 && m[3] > 0.97, "x {x}: b still covers it: {m:?}");
+        assert!(close(morph.at(x, 16), both, 2e-2), "x {x}: b still covers it: {:?}", morph.at(x, 16));
     }
     // vertically the shift is 1.26 px: row 31 loses a, row 0 loses b
-    assert!(morph.at(32, 31)[3] < 0.6 && morph.at(32, 30)[3] > 0.97, "{:?}", morph.at(32, 31));
-    assert!(morph.at(32, 0)[1] < 0.03 && morph.at(32, 1)[1] > 0.3, "{:?}", morph.at(32, 0));
+    assert!(close(morph.at(32, 31), b_only, 2e-2) && close(morph.at(32, 30), both, 2e-2), "{:?}", morph.at(32, 31));
+    assert!(close(morph.at(32, 0), a_only, 2e-2) && close(morph.at(32, 1), both, 2e-2), "{:?}", morph.at(32, 0));
 }
 
 #[test]
