@@ -218,3 +218,65 @@ fn supersample_one_is_todays_rendering() {
     let Some(a) = render_xml(&plain) else { return };
     assert_eq!(a.px, render_xml(&one).unwrap().px);
 }
+
+/// The kit's precision case: an ISF pass stores 2049 in a FLOAT target and reads it back, red when exact, blue not.
+fn float_pass(project: &str) -> String {
+    scene(
+        project,
+        r##"<shape id="s" shape="rect" width="100" height="100" anchorX="50" anchorY="50" x="320" y="180" fill="#FFFFFFFF" effects="fx"/>"##,
+        &format!(r#"<effects><effect id="fx" type="shader" src="{}"/></effects>"#, shader("srep72-f32.fs")),
+    )
+}
+
+#[test]
+fn srep_0072_precision_f32() {
+    let Some(gpu) = gpu() else { return };
+    let xml = float_pass(r#"precision="f32""#);
+    let d = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap();
+    let r = render(&d).unwrap();
+    if gpu.device.features().contains(sr_gpu::resources::F32_FEATURES) {
+        assert!(
+            r.stats.errors.is_empty() && r.stats.unsupported.is_empty(),
+            "{:?} {:?}",
+            r.stats.errors,
+            r.stats.unsupported
+        );
+        assert_eq!(r.renderer.format(), sr_gpu::resources::FORMAT_F32);
+        expect(&r, "red", [320.0, 180.0, 100.0, 100.0]);
+        assert!(measure(&r, "blue").is_none(), "2049 did not survive: {:?}", measure(&r, "blue"));
+    } else {
+        // no silent fallback: the frame reports why f32 is not available
+        assert!(
+            r.stats.errors.iter().any(|e| e.contains("precision=\"f32\"") && e.contains("FLOAT32_")),
+            "{:?}",
+            r.stats.errors
+        );
+    }
+}
+
+#[test]
+fn the_default_precision_cannot_hold_2049_in_a_float_pass() {
+    // binary16 spaces its values 2 apart above 2048: the kit case tells the precisions apart
+    let Some(r) = render_xml(&float_pass("")) else { return };
+    assert_eq!(r.renderer.format(), sr_gpu::resources::FORMAT);
+    expect(&r, "blue", [320.0, 180.0, 100.0, 100.0]);
+    assert!(measure(&r, "red").is_none());
+}
+
+#[test]
+fn f32_working_textures_read_back_as_written() {
+    // the frame and every readback decode 32-bit texels: a gradient of 4096 levels comes back with its levels
+    let Some(gpu) = gpu() else { return };
+    if !gpu.device.features().contains(sr_gpu::resources::F32_FEATURES) {
+        return;
+    }
+    let xml = scene(
+        r#"precision="f32" linearLight="true""#,
+        r##"<shape id="s" shape="rect" x="0" y="0" width="640" height="360" fill="#808080FF"/>"##,
+        "",
+    );
+    let r = render_xml(&xml).unwrap();
+    let p = r.at(320, 180);
+    // #80 decoded to linear light is 0.2158605 (sRGB transfer); f16 would round it to 0.2158203
+    assert!((p[0] - 0.215_860_5).abs() < 2e-6, "{p:?}");
+}

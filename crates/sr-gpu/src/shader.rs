@@ -20,7 +20,7 @@ use sr_model::model as m;
 use crate::color::{self, Working};
 use crate::fx::{Builder, Cx, FxEngine, Pass};
 use crate::glsl::{self, Program};
-use crate::resources::{Tex, FORMAT};
+use crate::resources::Tex;
 use crate::vector::Attrs;
 
 /// A compiled custom program.
@@ -116,7 +116,7 @@ impl FxEngine {
                     entry_point: Some("main"),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
-                        format: FORMAT,
+                        format: self.format,
                         blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     })],

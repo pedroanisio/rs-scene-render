@@ -287,7 +287,8 @@ impl Renderer {
     /// Reads a rectangle (x, y, w, h) of a texture.
     fn read_rect(&self, t: &Tex, r: [u32; 4]) -> Vec<[f32; 4]> {
         let [x, y, w, h] = r;
-        let row = (w * 8).div_ceil(256) * 256;
+        let (format, bytes) = (t.tex.format(), resources::texel_bytes(t.tex.format()));
+        let row = (w * bytes).div_ceil(256) * 256;
         let buf = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("probe"),
             size: (row * h) as u64,
@@ -314,9 +315,8 @@ impl Renderer {
         let data = buf.slice(..).get_mapped_range().expect("mapped");
         let mut out = Vec::with_capacity((w * h) as usize);
         for yy in 0..h {
-            for px in data[(yy * row) as usize..(yy * row + w * 8) as usize].as_chunks::<8>().0 {
-                let c = |k: usize| half::f16::from_le_bytes([px[k], px[k + 1]]).to_f32();
-                out.push([c(0), c(2), c(4), c(6)]);
+            for px in data[(yy * row) as usize..(yy * row + w * bytes) as usize].chunks_exact(bytes as usize) {
+                out.push(resources::texel(format, px));
             }
         }
         out

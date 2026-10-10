@@ -362,6 +362,10 @@ pub struct Renderer {
     prev_root: Vec<u64>,
     pool: Pool,
     frame: Option<Arc<Tex>>,
+    /// The working format (SREP 72 `project/@precision`): of the pool, the frame and every pipeline drawing into them.
+    format: wgpu::TextureFormat,
+    /// Why `precision="f32"` could not be honoured on this device; reported with every frame.
+    precision_error: Option<PrecisionError>,
     /// The frame filtered down from a supersampled render (SREP 72), reused while its size holds.
     ss_frame: Option<Arc<Tex>>,
     video: crate::video::VideoEngine,
@@ -727,10 +731,12 @@ fn to_clip(p: [f64; 2], size: [u32; 2]) -> [f32; 4] {
     [(2.0 * p[0] / size[0] as f64 - 1.0) as f32, (1.0 - 2.0 * p[1] / size[1] as f64) as f32, 0.0, 1.0]
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compositor_pipeline(
     device: &wgpu::Device,
     module: &wgpu::ShaderModule,
     layout: &wgpu::PipelineLayout,
+    format: wgpu::TextureFormat,
     fragment: &str,
     blend: Option<wgpu::BlendState>,
     full_screen: bool,
@@ -756,11 +762,7 @@ fn compositor_pipeline(
                 module,
                 entry_point: Some(fragment),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: if fragment == "fs_mask_coverage" {
-                        wgpu::TextureFormat::R32Float
-                    } else {
-                        resources::FORMAT
-                    },
+                    format: if fragment == "fs_mask_coverage" { wgpu::TextureFormat::R32Float } else { format },
                     blend,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -778,10 +780,62 @@ fn compositor_pipeline(
     }
 }
 
+/// `project/@precision="f32"` asked of a device that cannot blend into or filter 32-bit float textures (SREP 72).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrecisionError {
+    /// The adapter.
+    pub adapter: String,
+    /// The features it lacks, by name.
+    pub missing: Vec<&'static str>,
+}
+
+impl std::fmt::Display for PrecisionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "precision=\"f32\" needs 32-bit float working textures that the compositor can blend into and filter; the \
+             adapter {} lacks {}; this is an error, not a silent fallback to f16",
+            self.adapter,
+            self.missing.join(" and ")
+        )
+    }
+}
+
+impl std::error::Error for PrecisionError {}
+
+/// The working format for `precision` on `gpu`, and the error when f32 is asked of a device without the features it
+/// needs (the format is then f16, and every frame reports the error).
+pub fn working_format(gpu: &Gpu, precision: m::Precision) -> (wgpu::TextureFormat, Option<PrecisionError>) {
+    if precision != m::Precision::F32 {
+        return (resources::FORMAT, None);
+    }
+    let have = gpu.device.features();
+    let missing: Vec<&'static str> = [
+        (wgpu::Features::FLOAT32_BLENDABLE, "FLOAT32_BLENDABLE"),
+        (wgpu::Features::FLOAT32_FILTERABLE, "FLOAT32_FILTERABLE"),
+    ]
+    .into_iter()
+    .filter(|(f, _)| !have.contains(*f))
+    .map(|(_, n)| n)
+    .collect();
+    if missing.is_empty() {
+        (resources::FORMAT_F32, None)
+    } else {
+        (resources::FORMAT, Some(PrecisionError { adapter: gpu.info.name.clone(), missing }))
+    }
+}
+
 impl Renderer {
+    /// The working format of this renderer's offscreens and frames (SREP 72 `project/@precision`).
+    pub fn format(&self) -> wgpu::TextureFormat {
+        self.format
+    }
+
     /// Builds pipelines and resources for `program`.
     pub fn new(gpu: Gpu, program: &Program) -> Renderer {
         let d = &gpu.device;
+        // SREP 72: the working format of every offscreen, effect pass and the frame
+        let (format, precision_error) = working_format(&gpu, program.scene.project.precision);
         let storage = |b: u32| wgpu::BindGroupLayoutEntry {
             binding: b,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -885,7 +939,7 @@ impl Renderer {
             },
         };
         let pipe = |fs: &str, blend: Option<wgpu::BlendState>, full_screen: bool, ellipse: bool| {
-            compositor_pipeline(d, &module, &layout, fs, blend, full_screen, ellipse)
+            compositor_pipeline(d, &module, &layout, format, fs, blend, full_screen, ellipse)
         };
         let blend = [pipe("fs_blend", None, false, false), pipe("fs_blend", None, false, true)];
         let variants = [
@@ -941,7 +995,7 @@ impl Renderer {
             mapped_at_creation: false,
         });
         gpu.queue.write_buffer(&globals, 0, bytemuck::bytes_of(&g));
-        let dummy = Arc::new(resources::create(d, &bgl1, [1, 1], 1, "dummy"));
+        let dummy = Arc::new(resources::create_as(d, &bgl1, format, [1, 1], 1, "dummy"));
         gpu.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &dummy.tex,
@@ -955,7 +1009,7 @@ impl Renderer {
         );
         let max_texture = d.limits().max_texture_dimension_2d.min(8192);
         let (gpu_device, gpu_queue) = (gpu.device.clone(), gpu.queue.clone());
-        let raster = Raster::new(&gpu.device);
+        let raster = Raster::new_as(&gpu.device, format);
         Renderer {
             seed: program.seed,
             tokens: token_table(&program.scene),
@@ -987,10 +1041,16 @@ impl Renderer {
             cache_frame: 0,
             prefix: None,
             prev_root: Vec::new(),
-            pool: Pool::default(),
+            pool: Pool::of(format),
+            format,
+            precision_error,
             frame: None,
             ss_frame: None,
-            fx: fx::FxEngine::new(gpu_device.clone(), gpu_queue.clone()),
+            fx: {
+                let mut fx = fx::FxEngine::new(gpu_device.clone(), gpu_queue.clone());
+                fx.format = format;
+                fx
+            },
             bare: Default::default(),
             in_transition: Default::default(),
             sampling: false,
@@ -2291,7 +2351,7 @@ impl Renderer {
         }
         let target = match self.subtree.get(&key) {
             Some((_, t)) if t.size == space.size && Arc::strong_count(t) <= 2 => t.clone(),
-            _ => Arc::new(resources::create(&self.gpu.device, &self.bgl1, space.size, 1, "matte")),
+            _ => Arc::new(resources::create_as(&self.gpu.device, &self.bgl1, self.format, space.size, 1, "matte")),
         };
         let mut cmds = Vec::new();
         self.emit(plan, ctx, mt, space, 1.0, &mut cmds, true, 0);
@@ -2355,7 +2415,14 @@ impl Renderer {
                 _ => {
                     let target = match self.subtree.get(&key) {
                         Some((_, t)) if Arc::strong_count(t) <= 2 => t.clone(),
-                        _ => Arc::new(resources::create(&self.gpu.device, &self.bgl1, inner.size, 1, "isolated")),
+                        _ => Arc::new(resources::create_as(
+                            &self.gpu.device,
+                            &self.bgl1,
+                            self.format,
+                            inner.size,
+                            1,
+                            "isolated",
+                        )),
                     };
                     let mut inner_cmds = Vec::new();
                     for c in Self::depth_sorted(g, &kids[i]) {
@@ -2905,7 +2972,9 @@ impl Renderer {
             _ => {
                 let target = match self.subtree.get(&key) {
                     Some((_, t)) if Arc::strong_count(t) <= 2 => t.clone(),
-                    _ => Arc::new(resources::create(&self.gpu.device, &self.bgl1, [tw, th], 1, "vector")),
+                    _ => {
+                        Arc::new(resources::create_as(&self.gpu.device, &self.bgl1, self.format, [tw, th], 1, "vector"))
+                    }
                 };
                 let clock = std::time::Instant::now();
                 let enc = sr_vector::tile::encode_cached(&scene.transformed(&to_tex), [tw, th], &mut self.tiles);
@@ -3047,7 +3116,14 @@ impl Renderer {
             _ => {
                 let target = match self.subtree.get(&ck) {
                     Some((_, t)) if Arc::strong_count(t) <= 2 => t.clone(),
-                    _ => Arc::new(resources::create(&self.gpu.device, &self.bgl1, size, 1, "vector batch")),
+                    _ => Arc::new(resources::create_as(
+                        &self.gpu.device,
+                        &self.bgl1,
+                        self.format,
+                        size,
+                        1,
+                        "vector batch",
+                    )),
                 };
                 let clock = std::time::Instant::now();
                 let enc = sr_vector::tile::encode_cached(&b.scene, size, &mut self.tiles);
@@ -3332,7 +3408,14 @@ impl Renderer {
                 self.prefix = None;
                 self.prev_root.clear();
                 self.frame = None;
-                let texture = Arc::new(resources::create(&self.gpu.device, &self.bgl1, [1, 1], 1, "invalid frame"));
+                let texture = Arc::new(resources::create_as(
+                    &self.gpu.device,
+                    &self.bgl1,
+                    self.format,
+                    [1, 1],
+                    1,
+                    "invalid frame",
+                ));
                 return Frame { texture, stats: RenderStats { errors: vec![error], ..Default::default() } };
             }
         };
@@ -3350,6 +3433,9 @@ impl Renderer {
         });
         let scale = self.tier.scale;
         let mut plan = Plan::default();
+        if let Some(e) = &self.precision_error {
+            plan.stats.errors.push(e.to_string());
+        }
         // a simulation that could not run leaves the frame without something that was asked for
         for failure in &g.failures {
             if !plan.stats.errors.contains(failure) {
@@ -3376,7 +3462,7 @@ impl Renderer {
         }
         let frame = match &self.frame {
             Some(f) if f.size == size => f.clone(),
-            _ => Arc::new(resources::create(&self.gpu.device, &self.bgl1, size, 1, "frame")),
+            _ => Arc::new(resources::create_as(&self.gpu.device, &self.bgl1, self.format, size, 1, "frame")),
         };
         self.frame = Some(frame.clone());
         // FrameGraph is public: callers may supply links that did not pass compilation.
@@ -3555,7 +3641,9 @@ impl Renderer {
     fn supersample_down(&mut self, plan: &mut Plan, p: &Program, frame: &Arc<Tex>, n: u32, size: [u32; 2]) -> Arc<Tex> {
         let target = match &self.ss_frame {
             Some(t) if t.size == size => t.clone(),
-            _ => Arc::new(resources::create(&self.gpu.device, &self.bgl1, size, 1, "supersampled frame")),
+            _ => {
+                Arc::new(resources::create_as(&self.gpu.device, &self.bgl1, self.format, size, 1, "supersampled frame"))
+            }
         };
         self.ss_frame = Some(target.clone());
         let lanczos = p.scene.project.supersample_filter == m::SupersampleFilter::Lanczos3;
@@ -3747,11 +3835,12 @@ impl Renderer {
                 immediate_size: 0,
             });
             self.mask_coverage_pipelines = Some((
-                compositor_pipeline(d, &module, &layout, "fs_mask_coverage", None, false, true),
+                compositor_pipeline(d, &module, &layout, self.format, "fs_mask_coverage", None, false, true),
                 compositor_pipeline(
                     d,
                     &module,
                     &layout,
+                    self.format,
                     "fs_cached_mask",
                     Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                     false,
@@ -3963,9 +4052,9 @@ impl Renderer {
             }
             if let Some(pj) = &job.parts {
                 let g = &self.gpu;
-                let eng = self
-                    .particles
-                    .get_or_insert_with(|| Box::new(crate::particles::ParticleEngine::new(g.device.clone(), &g.queue)));
+                let eng = self.particles.get_or_insert_with(|| {
+                    Box::new(crate::particles::ParticleEngine::new_as(g.device.clone(), &g.queue, self.format))
+                });
                 eng.record(&mut enc, pj, &job.target.view, job.target.size);
             }
             if !job.draw {
@@ -4144,7 +4233,7 @@ impl Renderer {
     fn snapshot(&mut self, enc: &mut wgpu::CommandEncoder, target: &Tex, prefix: &[u64]) {
         let tex = match self.prefix.take() {
             Some(p) if p.tex.size == target.size => p.tex,
-            _ => Arc::new(resources::create(&self.gpu.device, &self.bgl1, target.size, 1, "prefix")),
+            _ => Arc::new(resources::create_as(&self.gpu.device, &self.bgl1, self.format, target.size, 1, "prefix")),
         };
         Self::copy(enc, target, &tex, [0, 0, target.size[0], target.size[1]]);
         self.prefix = Some(Prefix { hashes: prefix.to_vec(), tex });
@@ -4153,7 +4242,8 @@ impl Renderer {
     /// Reads a texture back as premultiplied RGBA f32 in the working representation.
     pub fn read(&self, t: &Tex) -> Vec<[f32; 4]> {
         let (w, hh) = (t.size[0], t.size[1]);
-        let row = (w * 8).div_ceil(256) * 256;
+        let (format, bytes) = (t.tex.format(), resources::texel_bytes(t.tex.format()));
+        let row = (w * bytes).div_ceil(256) * 256;
         let buf = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("readback"),
             size: (row * hh) as u64,
@@ -4180,10 +4270,9 @@ impl Renderer {
         let data = buf.slice(..).get_mapped_range().expect("mapped");
         let mut out = Vec::with_capacity((w * hh) as usize);
         for y in 0..hh {
-            let line = &data[(y * row) as usize..(y * row + w * 8) as usize];
-            for px in line.as_chunks::<8>().0 {
-                let c = |k: usize| half::f16::from_le_bytes([px[k], px[k + 1]]).to_f32();
-                out.push([c(0), c(2), c(4), c(6)]);
+            let line = &data[(y * row) as usize..(y * row + w * bytes) as usize];
+            for px in line.chunks_exact(bytes as usize) {
+                out.push(resources::texel(format, px));
             }
         }
         out

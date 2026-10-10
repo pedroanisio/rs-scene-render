@@ -3417,6 +3417,21 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
     }
     // SREP 18, I8: nodes the windows above leave outside the composition
     warnings.extend(crate::inert::never_drawn(&b.nodes, duration, scene.project.fps));
+    // SREP 72: precision="f32" makes the 2D working textures 32-bit; the 3D renderer keeps its 16-bit buffers
+    if scene.project.precision == m::Precision::F32 {
+        if let Some(n) = b.nodes.iter().find(|n| draws_in_3d(n.name)) {
+            warnings.push(Diagnostic::info(
+                "E23",
+                format!(
+                    "precision=\"f32\" applies to the 2D working textures; {} {:?} and the rest of the 3D content \
+                     render through 16-bit float buffers",
+                    n.name, n.id
+                ),
+                n.elem.loc(),
+                &*n.id,
+            ));
+        }
+    }
     let zs: Vec<i32> = b.nodes.iter().map(|n| n.z).collect();
     // an animated `z` (keys, expression or link) restacks its siblings every frame
     for i in 0..b.nodes.len() {

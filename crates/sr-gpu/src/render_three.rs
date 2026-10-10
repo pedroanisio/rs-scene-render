@@ -2308,6 +2308,7 @@ impl Renderer {
 
     fn sphere_pipe(&mut self) -> &SpherePipe {
         let d = self.gpu.device.clone();
+        let format = self.format;
         self.sphere.get_or_insert_with(|| {
             let module = d.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("sphere"),
@@ -2368,7 +2369,7 @@ impl Renderer {
                         module: &module,
                         entry_point: Some("fs_main"),
                         compilation_options: Default::default(),
-                        targets: &[Some(resources::FORMAT.into())],
+                        targets: &[Some(format.into())],
                     }),
                     multiview_mask: None,
                     cache: None,
@@ -2456,7 +2457,8 @@ impl Renderer {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: resources::FORMAT,
+            // the frames are copied in: the working format
+            format: self.format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -2532,7 +2534,7 @@ impl Renderer {
         }
         self.view_override = None;
         stats.unsupported.extend(problems);
-        let out = Arc::new(resources::create(&d, &self.bgl1, [w as u32, hgt as u32], 1, "360"));
+        let out = Arc::new(resources::create_as(&d, &self.bgl1, self.format, [w as u32, hgt as u32], 1, "360"));
         let sp = self.sphere_pipe();
         let mut enc = d.create_command_encoder(&Default::default());
         {
@@ -2989,7 +2991,15 @@ impl Renderer {
         self.three_engine();
         self.flush_vec(plan, cmds);
         let snapshot = self.temp(plan, space.size);
-        let out = self.temp(plan, space.size);
+        // the 3D renderer draws at f16 whatever the working precision (SREP 72): its target is f16 then, and is
+        // composited, not copied, into the working textures
+        let out = if self.format == resources::FORMAT {
+            self.temp(plan, space.size)
+        } else {
+            let t = Arc::new(resources::create(&self.gpu.device, &self.bgl1, space.size, 1, "three f16"));
+            plan.fx_temps.push(t.clone());
+            t
+        };
         let ids: String = members.iter().map(|j| &*g.nodes[*j].id).collect::<Vec<_>>().join(" ");
         let hash = h(&[root_hash, ctx.elements, sr_eval::rng::hash_str(&ids), hf(g.time), hf(iso_op), 0x3d3d]);
         let (w, hgt) = (space.size[0] as f64, space.size[1] as f64);
