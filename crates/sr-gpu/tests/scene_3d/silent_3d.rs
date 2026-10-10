@@ -62,7 +62,7 @@ fn a_metal_with_no_environment_is_noted_and_drawn_as_before() {
     let Some(r) = metal(CHROME, "chrome", "") else { return };
     assert_eq!(r.stats.metal_without_environment, [("ball".to_string(), 1.0)]);
     // a directional light alone is no environment either
-    let sun = r#"<light id="sun" type="directional" rotationX="40"/>"#;
+    let sun = r#"<light id="sun" type="directional"/>"#;
     let lit = metal(CHROME, "chrome", sun).unwrap();
     assert_eq!(lit.stats.metal_without_environment.len(), 1);
     // nor is a dome without an image: it lights uniformly, as an ambient light
