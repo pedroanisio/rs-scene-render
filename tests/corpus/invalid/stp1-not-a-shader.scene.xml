@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- expect: STP1 -->
+<scene version="1.6"><project width="64" height="64" fps="10" duration="1"/><composition><shape id="s" shape="rect" width="10" height="10" fill="#FFFFFF" effects="fx"/></composition><effects><effect id="fx" type="blur" stepsPerFrame="2"/></effects></scene>

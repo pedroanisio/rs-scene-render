@@ -1037,6 +1037,9 @@
     "stp1-build-program.scene.xml": [
       "STP1"
     ],
+    "stp1-not-a-shader.scene.xml": [
+      "STP1"
+    ],
     "txt2.scene.xml": [
       "TXT2"
     ],

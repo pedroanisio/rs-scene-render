@@ -817,9 +817,8 @@ impl<'a> Eval<'a> {
         });
     }
 
-    /// p-srep66-gate, p-srep66 and p-srep69-steps (SREPs 66 and 69): programs need version 1.6, their parameter
-    /// names are unique, repeat/@over names only data programs, stepping programs have a size, and only stepping
-    /// programs step.
+    /// p-srep66-gate and p-srep66 (SREPs 66 and 69): programs need version 1.6, their parameter names are unique,
+    /// repeat/@over names only data programs, and stepping programs have a size. STP1 on programs is p-srep68's.
     fn programs(&mut self, n: Node, local: &str) {
         let a = |k: &str| n.attribute(k);
         match local {
@@ -860,11 +859,6 @@ impl<'a> Eval<'a> {
                 if step {
                     self.check(a("width").is_some() && a("height").is_some(), n, "PRG3", || {
                         "a stepping program needs width and height (SREP 69).".into()
-                    });
-                }
-                if a("stepsPerFrame").is_some() || a("prewarm").is_some() {
-                    self.check(step, n, "STP1", || {
-                        "stepsPerFrame and prewarm apply to shader effects and stepping programs (SREP 69) only.".into()
                     });
                 }
             }
@@ -928,6 +922,15 @@ impl<'a> Eval<'a> {
         }) {
             self.check(!attr.value().trim().is_empty(), n, "R53", || {
                 "An ID reference list names at least one id.".into()
+            });
+        }
+        // SREP 68 (p-srep68): stepping applies to shader effects and to stepping programs (SREP 69)
+        let steps = a("stepsPerFrame").is_some() || a("prewarm").is_some();
+        let stepping_effect = local == "effect" && parent_is("effects");
+        if steps && (stepping_effect || local == "program") {
+            let ok = if stepping_effect { a("type") == Some("shader") } else { a("mode") == Some("step") };
+            self.check(ok, n, "STP1", || {
+                "stepsPerFrame and prewarm apply to shader effects and stepping programs (SREP 69) only.".into()
             });
         }
         if local == "audiogram" && parent_is("assets") {

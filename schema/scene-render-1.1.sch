@@ -767,9 +767,9 @@
       <sch:assert id="PRG3" test="@width and @height">a stepping program needs width and height (SREP 69).</sch:assert>
     </sch:rule>
   </sch:pattern>
-  <sch:pattern id="p-srep69-steps">
-    <sch:rule context="program[@stepsPerFrame or @prewarm]">
-      <sch:assert id="STP1" test="@mode='step'">stepsPerFrame and prewarm apply to shader effects and stepping programs (SREP 69) only.</sch:assert>
+  <sch:pattern id="p-srep68">
+    <sch:rule context="effects/effect[@stepsPerFrame or @prewarm] | program[@stepsPerFrame or @prewarm]">
+      <sch:assert id="STP1" test="(self::effect and @type='shader') or (self::program and @mode='step')">stepsPerFrame and prewarm apply to shader effects and stepping programs (SREP 69) only.</sch:assert>
     </sch:rule>
   </sch:pattern>
 </sch:schema>

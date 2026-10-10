@@ -3292,6 +3292,15 @@
         <xs:enumeration value="behind"/><xs:enumeration value="on-top"/><xs:enumeration value="none"/>
       </xs:restriction></xs:simpleType>
     </xs:attribute>
+    <!-- SREP 68 (accepted 2026-10-09; not yet in an sr-core release): steps of persistent shader passes -->
+    <xs:attribute name="stepsPerFrame" default="1">
+      <xs:annotation><xs:documentation>type="shader" with PERSISTENT passes: steps (evaluations of all passes) per frame. SREP 68.</xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="10000"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="prewarm" default="0">
+      <xs:annotation><xs:documentation>Steps run before the node's first active frame, with the inputs of that frame. SREP 68.</xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:nonNegativeInteger"><xs:maxInclusive value="10000000"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
   </xs:complexType>
   <xs:complexType name="effectsType">
     <xs:sequence><xs:element name="effect" type="effectType" maxOccurs="unbounded"/></xs:sequence>
