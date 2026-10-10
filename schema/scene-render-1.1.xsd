@@ -2887,7 +2887,7 @@
       Boids (Reynolds 1987): `count` agents in the width x height box steer by separation,
       alignment and cohesion with neighbours within `perception`, capped at `maxSpeed` and
       `maxForce`, kept in the box by `bounds`, and pushed by the named force fields. Drawn like
-      particles (disc, streak or sprite), oriented to their velocity.
+      particles (disc, streak or sprite), oriented to their velocity unless `orientToVelocity` is false.
     </xs:documentation></xs:annotation>
     <xs:choice minOccurs="0" maxOccurs="unbounded">
       <xs:group ref="nodeBehaviour"/>
@@ -2928,6 +2928,10 @@
       </xs:restriction></xs:simpleType>
     </xs:attribute>
     <xs:attribute name="sprite" type="xs:IDREF"/>
+    <xs:attribute name="orientToVelocity" type="xs:boolean" default="true">
+      <xs:annotation><xs:documentation>true (the default): each agent's disc or sprite is turned to point along its velocity.
+      false: it keeps rotation 0 in the flock's space. Streaks always follow the velocity. SREP 73.</xs:documentation></xs:annotation>
+    </xs:attribute>
     <xs:attribute name="trail" type="nonNegativeDecimal" default="0"/>
     <xs:attribute name="blend" type="blendType" default="normal"/>
     <xs:attribute name="effects" type="xs:IDREFS"/>
@@ -4250,7 +4254,7 @@
       </xs:sequence>
       <xs:attribute name="version" use="required">
         <xs:simpleType><xs:restriction base="xs:string">
-          <xs:enumeration value="1.0"/><xs:enumeration value="1.1"/><xs:enumeration value="1.2"/><xs:enumeration value="1.3"/><xs:enumeration value="1.4"/><xs:enumeration value="1.5"/>
+          <xs:enumeration value="1.0"/><xs:enumeration value="1.1"/><xs:enumeration value="1.2"/><xs:enumeration value="1.3"/><xs:enumeration value="1.4"/><xs:enumeration value="1.5"/><xs:enumeration value="1.6"/>
         </xs:restriction></xs:simpleType>
       </xs:attribute>
     </xs:complexType>
