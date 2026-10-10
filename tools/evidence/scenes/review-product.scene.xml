@@ -17,6 +17,8 @@
     <shape id="line" shape="rect" x="36" y="73" width="100" height="3" fill="#2CC3AE"/>
   </composition>
   <lights>
+    <!-- the metal accent reflects this studio image; without one it shades as a uniform colour (3D-METAL-NO-ENVIRONMENT) -->
+    <light id="studio" type="dome" environment="{MEDIA}/studio.hdr" intensity="0.5"/>
     <light id="ambient" type="ambient" intensity="0.2"/>
     <light id="key" type="point" x="160" y="-180" z="-180" intensity="45" range="3000" castShadow="true" shadowMapSize="512"/>
     <light id="fill" type="point" x="560" y="50" z="-80" intensity="20" range="2000"/>
