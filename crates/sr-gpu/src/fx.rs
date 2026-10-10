@@ -479,6 +479,8 @@ pub(crate) type BuiltEffect = (crate::glsl::Program, std::path::PathBuf, u64);
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct PipelineKey {
     entry: Entry,
+    /// The format of the texture the pass writes (SREP 72: the working format, or f16 for an output-stage target).
+    format: wgpu::TextureFormat,
     additive: bool,
     operation: u32,
     transfer: u32,
@@ -486,10 +488,11 @@ struct PipelineKey {
 }
 
 impl PipelineKey {
-    fn new(entry: Entry, additive: bool, params: &Params) -> Self {
+    fn new(entry: Entry, format: wgpu::TextureFormat, additive: bool, params: &Params) -> Self {
         let specialize = matches!(entry, Entry::Combine | Entry::Color);
         Self {
             entry,
+            format,
             additive,
             operation: if specialize { params.i[0] } else { u32::MAX },
             transfer: if specialize { params.i[3] } else { u32::MAX },
@@ -681,7 +684,7 @@ impl FxEngine {
                             ..Default::default()
                         },
                         targets: &[Some(wgpu::ColorTargetState {
-                            format: self.format,
+                            format: key.format,
                             blend,
                             write_mask: wgpu::ColorWrites::ALL,
                         })],
@@ -909,7 +912,9 @@ impl FxEngine {
                 })
             });
             let bg = bg.clone();
-            let Some(pipe) = self.pipeline(PipelineKey::new(p.entry, p.additive, &p.params)) else { continue };
+            let Some(pipe) = self.pipeline(PipelineKey::new(p.entry, p.out.tex.format(), p.additive, &p.params)) else {
+                continue;
+            };
             let pipe = pipe.clone();
             let stamp = self.timer.as_mut().and_then(|t| {
                 let a = t.pair()?;
@@ -3520,9 +3525,10 @@ mod tests {
                     pass.params.ops[k] = [op, 17, 31, 0];
                     pass.params.x[k * 8..k * 8 + 8].copy_from_slice(&pass.params.v);
                 }
-                let key = PipelineKey::new(entry, false, &pass.params);
+                let key = PipelineKey::new(entry, FORMAT, false, &pass.params);
                 let general_key = PipelineKey {
                     entry,
+                    format: FORMAT,
                     additive: false,
                     operation: u32::MAX,
                     transfer: u32::MAX,
