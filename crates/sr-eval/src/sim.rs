@@ -396,6 +396,9 @@ struct BodyNode {
     id: Arc<str>,
     center: [f64; 2],
     scale: [f64; 2],
+    /// Not in the frame at the world's start (its group starts later): in the world only while its node is in the
+    /// frame.
+    late: bool,
 }
 
 struct SoftNode {
@@ -555,6 +558,10 @@ struct PDriver<'a, 'b> {
 }
 
 impl Driver for PDriver<'_, '_> {
+    fn enabled(&mut self, t: f64, which: usize) -> bool {
+        let b = &self.bodies[which];
+        !b.late || index_of(&self.graphs.at(t), &b.id).is_some()
+    }
     fn kinematic(&mut self, t: f64, which: &[usize]) -> Vec<PxPose> {
         let g = self.graphs.at(t);
         which
@@ -629,7 +636,11 @@ fn build_physics(
     let mut soft_specs = Vec::new();
     let step = ph.map(|p| p.fixed_step.get()).unwrap_or(1.0 / 120.0);
     let start = ph.map(|p| p.start).unwrap_or(0.0);
-    for n in &g0.nodes {
+    // The nodes in the frame at the start, then those that are not yet (a group that starts later): their bodies join
+    // the world when their node enters the frame, instead of being left out.
+    let all = crate::eval::evaluate_for_physics(p, g0.time);
+    let late: Vec<&crate::eval::FrameNode> = all.nodes.iter().filter(|n| index_of(g0, &n.id).is_none()).collect();
+    for (n, is_late) in g0.nodes.iter().map(|n| (n, false)).chain(late.into_iter().map(|n| (n, true))) {
         for c in children(&*n.elem) {
             match c.element_name() {
                 "rigidBody" => {
@@ -665,8 +676,12 @@ fn build_physics(
                         activate_at: num(c, "activateAt", 0.0),
                         start: pose_of(&n.world, centre),
                     });
-                    bodies.push(BodyNode { id: n.id.clone(), center: centre, scale: sc });
+                    bodies.push(BodyNode { id: n.id.clone(), center: centre, scale: sc, late: is_late });
                 }
+                "softBody" if is_late => problems.push(format!(
+                    "{}: softBody: its node is not in the frame at physics@start ({start} s), and a soft body joins the world only there: it is not simulated",
+                    n.id
+                )),
                 "softBody" => {
                     let size = n.size.unwrap_or([100.0, 100.0]);
                     let kind = match text(c, "kind").as_deref() {
@@ -934,6 +949,11 @@ fn identity(
                 .collect();
             if !follow.is_empty() {
                 id.value("poses2", &drv.kinematic(t + ph.step, &follow));
+            }
+            // which bodies of groups that start later are in the world (none: the identity of earlier versions)
+            if ph.bodies.iter().any(|b| b.late) {
+                let present: Vec<bool> = (0..ph.bodies.len()).map(|k| drv.enabled(t, k)).collect();
+                id.value("present2", &present);
             }
             id.value("fields2", &drv.fields(t));
         }
