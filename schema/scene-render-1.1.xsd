@@ -3162,7 +3162,12 @@
       (slope/offset/power "r,g,b", saturation; ASC CDL), lut (@src .cube/.clf/
       .3dl, @space), curves (@curve "x,y x,y ..." per @channel), levels,
       white-balance (temperature/tint), exposure, hue-saturation, tonemap.
-      shader: GLSL fragment at @src with param children as uniforms.
+      shader: GLSL fragment at @src with param children as uniforms. It runs on a tile: the node's pixels, for a
+      layer or shape without children, with a margin of 2 px plus the outward rounding of its box to whole pixels
+      (up to 64 px past the frame); for any other node, the frame. sr_ContentRect (vec4: left, top, width, height
+      of the node's content box in tile pixels from the tile's top-left, exact) and sr_PixelCoord (vec2: the
+      fragment's centre relative to that corner) locate the content within it (SREP 72); the sr_ prefix is the
+      engine's.
       selective-color: @hue (degrees) or @color (its hue) centres a window of width @tolerance; inside it @saturation
       scales and @brightness adds; @amount mixes the result with the original. @channel is not read.
       halftone: @size is the cell, @angle the screen's angle (default 0), @color the ink (default black) and
