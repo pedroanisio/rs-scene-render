@@ -183,8 +183,13 @@ fn storage<T: Pod>(d: &wgpu::Device, data: &[T], label: &str) -> wgpu::Buffer {
 }
 
 impl Raster {
-    /// Builds the pipeline.
+    /// Builds the pipeline for [`crate::resources::FORMAT`] targets.
     pub fn new(d: &wgpu::Device) -> Raster {
+        Self::new_as(d, crate::resources::FORMAT)
+    }
+
+    /// Builds the pipeline for targets of `format` (a working format of SREP 72).
+    pub fn new_as(d: &wgpu::Device, format: wgpu::TextureFormat) -> Raster {
         let st = |b: u32| wgpu::BindGroupLayoutEntry {
             binding: b,
             visibility: wgpu::ShaderStages::COMPUTE,
@@ -222,7 +227,7 @@ impl Raster {
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::StorageTexture {
                         access: wgpu::StorageTextureAccess::WriteOnly,
-                        format: crate::resources::FORMAT,
+                        format,
                         view_dimension: wgpu::TextureViewDimension::D2,
                     },
                     count: None,
@@ -231,7 +236,15 @@ impl Raster {
         });
         let module = d.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("raster"),
-            source: wgpu::ShaderSource::Wgsl(concat!(include_str!("common.wgsl"), include_str!("raster.wgsl")).into()),
+            source: wgpu::ShaderSource::Wgsl({
+                let src = concat!(include_str!("common.wgsl"), include_str!("raster.wgsl"));
+                if format == crate::resources::FORMAT_F32 {
+                    src.replace("texture_storage_2d<rgba16float, write>", "texture_storage_2d<rgba32float, write>")
+                        .into()
+                } else {
+                    src.into()
+                }
+            }),
         });
         let layout = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("raster"),

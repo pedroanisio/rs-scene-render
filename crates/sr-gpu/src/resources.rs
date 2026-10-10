@@ -9,8 +9,33 @@ use sr_model::model::{AlphaMode, ColorSpace, Transfer};
 
 use crate::color::{self, Working};
 
-/// Frame and offscreen format.
+/// Frame and offscreen format by default (`project/@precision="f16"`), and the format of decoded media and of the 3D
+/// renderer's buffers whatever the precision.
 pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
+/// The working format at `project/@precision="f32"` (SREP 72): offscreens, effect passes and the frame.
+pub const FORMAT_F32: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
+
+/// What a device needs for [`FORMAT_F32`] working textures: the compositor blends into them and samples them filtered.
+pub const F32_FEATURES: wgpu::Features = wgpu::Features::FLOAT32_BLENDABLE.union(wgpu::Features::FLOAT32_FILTERABLE);
+
+/// Bytes of one texel of a working format.
+pub fn texel_bytes(format: wgpu::TextureFormat) -> u32 {
+    if format == FORMAT_F32 {
+        16
+    } else {
+        8
+    }
+}
+
+/// One texel of a working format from its bytes (`texel_bytes` of them).
+pub fn texel(format: wgpu::TextureFormat, px: &[u8]) -> [f32; 4] {
+    if format == FORMAT_F32 {
+        std::array::from_fn(|k| f32::from_le_bytes([px[4 * k], px[4 * k + 1], px[4 * k + 2], px[4 * k + 3]]))
+    } else {
+        std::array::from_fn(|k| half::f16::from_le_bytes([px[2 * k], px[2 * k + 1]]).to_f32())
+    }
+}
 
 /// A texture with its view and source bind group.
 #[derive(Debug)]
@@ -45,15 +70,27 @@ pub fn source_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     })
 }
 
-/// Creates a texture usable as render target, source and copy endpoint.
+/// Creates a texture of [`FORMAT`] usable as render target, source and copy endpoint.
 pub fn create(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, size: [u32; 2], mips: u32, label: &str) -> Tex {
+    create_as(device, layout, FORMAT, size, mips, label)
+}
+
+/// Creates a texture of `format` usable as render target, source and copy endpoint.
+pub fn create_as(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    format: wgpu::TextureFormat,
+    size: [u32; 2],
+    mips: u32,
+    label: &str,
+) -> Tex {
     let tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
         size: wgpu::Extent3d { width: size[0].max(1), height: size[1].max(1), depth_or_array_layers: 1 },
         mip_level_count: mips.max(1),
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: FORMAT,
+        format,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
             | wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::COPY_SRC
@@ -76,9 +113,10 @@ pub fn create(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, size: [u32;
 /// Frames a size may go unrequested, or a free texture untaken, before it is released.
 const KEEP_FRAMES: u64 = 8;
 
-/// Reuses offscreen textures by size between frames.
-#[derive(Default)]
+/// Reuses offscreen textures by size between frames, all of one working format.
 pub struct Pool {
+    /// The format of every texture the pool hands out.
+    pub format: wgpu::TextureFormat,
     /// Free textures by size, each with the frame it was returned in, oldest first.
     free: HashMap<[u32; 2], Vec<(Arc<Tex>, u64)>>,
     /// The frame (count of `trim` calls) each size was last requested in.
@@ -91,7 +129,18 @@ pub struct Pool {
     pub released: usize,
 }
 
+impl Default for Pool {
+    fn default() -> Self {
+        Pool::of(FORMAT)
+    }
+}
+
 impl Pool {
+    /// An empty pool of `format` textures.
+    pub fn of(format: wgpu::TextureFormat) -> Pool {
+        Pool { format, free: HashMap::new(), wanted: HashMap::new(), frame: 0, created: 0, released: 0 }
+    }
+
     /// A texture of `size`, reused when one is free.
     pub fn get(&mut self, device: &wgpu::Device, layout: &wgpu::BindGroupLayout, size: [u32; 2]) -> Arc<Tex> {
         self.wanted.insert(size, self.frame);
@@ -99,7 +148,7 @@ impl Pool {
             return t;
         }
         self.created += 1;
-        Arc::new(create(device, layout, size, 1, "offscreen"))
+        Arc::new(create_as(device, layout, self.format, size, 1, "offscreen"))
     }
 
     /// Ends a frame: frees the textures of every size not requested in the last `KEEP_FRAMES`
@@ -142,7 +191,8 @@ impl Pool {
 
     /// Returns a texture to the pool.
     pub fn put(&mut self, t: Arc<Tex>) {
-        if Arc::strong_count(&t) == 1 {
+        // a texture of another format (a 3D target kept at f16 under f32 precision) is not one the pool hands out
+        if Arc::strong_count(&t) == 1 && t.tex.format() == self.format {
             self.free.entry(t.size).or_default().push((t, self.frame));
         }
     }

@@ -583,6 +583,15 @@ pub fn build_effect(code: &str) -> Result<Program, String> {
         }
         Kind::Transition => unreachable!(),
     }
+    // SREP 72: the content box in tile pixels from the top-left, and each fragment's position in it. Declared only
+    // for a program that reads them, so other programs keep their uniform block.
+    let pixel_coord = used(&code, "sr_PixelCoord");
+    if pixel_coord || used(&code, "sr_ContentRect") {
+        push(&mut decls, "vec4", "sr_ContentRect", 0);
+    }
+    if pixel_coord {
+        push(&mut decls, "vec2", "sr_TileSize", 0);
+    }
     let mut defs = defaults_comment;
     defs.extend(defaults);
     let (samplers, loose): (Vec<Decl>, Vec<Decl>) = decls.into_iter().partition(|d| is_sampler(&d.ty));
@@ -630,7 +639,12 @@ pub fn build_effect(code: &str) -> Result<Program, String> {
     for n in &uv_names {
         pre.push_str(&format!("vec2 {n};\n"));
     }
-    let assign: String = uv_names.iter().map(|n| format!("{n} = sr_vuv; ")).collect();
+    let mut assign: String = uv_names.iter().map(|n| format!("{n} = sr_vuv; ")).collect();
+    if pixel_coord {
+        // gl_FragCoord is in GL order (rows from the bottom): the row from the tile's top is height − y
+        pre.push_str("vec2 sr_PixelCoord;\n");
+        assign.push_str("sr_PixelCoord = vec2(gl_FragCoord.x, sr_TileSize.y - gl_FragCoord.y) - sr_ContentRect.xy; ");
+    }
     let prelude_lines = pre.lines().count() as u32 + 1;
     let init = if globals.is_empty() { "" } else { "sr_globals(); " };
     let glsl = format!("{pre}#line 1\n{code}{globals}\nvoid main() {{ {assign}{init}{call} sr_out = {result}; }}\n");

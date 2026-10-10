@@ -463,9 +463,12 @@ impl Gpu {
         );
         let info = adapter.get_info();
         let limits = device_limits(&adapter.limits());
-        // timestamp queries, where the adapter has them, so renders can report GPU time
-        let features =
-            adapter.features() & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
+        // timestamp queries, where the adapter has them, so renders can report GPU time; and blending into and
+        // filtering 32-bit float textures, where it has them, for project/@precision="f32" (SREP 72)
+        let features = adapter.features()
+            & (wgpu::Features::TIMESTAMP_QUERY
+                | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS
+                | crate::resources::F32_FEATURES);
         let _creation = creation_lock();
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("scene-render"),

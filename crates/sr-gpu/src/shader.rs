@@ -20,7 +20,7 @@ use sr_model::model as m;
 use crate::color::{self, Working};
 use crate::fx::{Builder, Cx, FxEngine, Pass};
 use crate::glsl::{self, Program};
-use crate::resources::{Tex, FORMAT};
+use crate::resources::Tex;
 use crate::vector::Attrs;
 
 /// A compiled custom program.
@@ -116,7 +116,7 @@ impl FxEngine {
                     entry_point: Some("main"),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
-                        format: FORMAT,
+                        format: self.format,
                         blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
@@ -420,6 +420,55 @@ void main() {
 
 const RESIZE: &str = "uniform sampler2D src;\nvoid main() { fragColor = texture(src, uv); }\n";
 
+/// One axis of the supersampling filter (SREP 72 §4): output pixel o along `axis` (0 = x, 1 = y) is the weighted mean
+/// of the samples k = o·n + first + t, t < taps, with weight `wts[t]`, over the samples that exist, clamped to [0, 1].
+/// Rows and columns are read and written in memory order, so the pass needs no flip.
+const SUPERSAMPLE: &str = "uniform sampler2D src;
+uniform float n;
+uniform float axis;
+uniform float taps;
+uniform float first;
+uniform float wts[32];
+void main() {
+    ivec2 size = textureSize(src, 0);
+    ivec2 o = ivec2(gl_FragCoord.xy);
+    int ax = int(axis);
+    int lim = ax == 0 ? size.x : size.y;
+    int base = (ax == 0 ? o.x : o.y) * int(n) + int(first);
+    vec4 sum = vec4(0.0);
+    float ws = 0.0;
+    for (int t = 0; t < 32; t++) {
+        if (t >= int(taps)) { break; }
+        int k = base + t;
+        if (k >= 0 && k < lim) {
+            ivec2 q = ax == 0 ? ivec2(k, o.y) : ivec2(o.x, k);
+            sum += wts[t] * texelFetch(src, q, 0);
+            ws += wts[t];
+        }
+    }
+    fragColor = clamp(sum / ws, 0.0, 1.0);
+}
+";
+
+/// The taps of the supersampling filter at `n` samples per output pixel (SREP 72 §4): the first sample offset d from
+/// o·n and the weight of each offset from there. Sample k = o·n + d has its centre at (k + 0.5)/n output pixels, so it
+/// lies x = (d + 0.5)/n − 0.5 output pixels from the centre of pixel o. `box` weighs the n samples inside the pixel
+/// (0 ≤ d < n) by 1; `lanczos3` weighs every sample with |x| < 3 by sinc(x)·sinc(x/3).
+pub fn supersample_taps(n: u32, lanczos: bool) -> (i32, Vec<f64>) {
+    let n = n.max(1) as i32;
+    if !lanczos {
+        return (0, vec![1.0; n as usize]);
+    }
+    let sinc = |x: f64| if x == 0.0 { 1.0 } else { (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x) };
+    let taps: Vec<(i32, f64)> = (-4 * n..=4 * n)
+        .filter_map(|d| {
+            let x = (d as f64 + 0.5) / n as f64 - 0.5;
+            (x.abs() < 3.0).then(|| (d, sinc(x) * sinc(x / 3.0)))
+        })
+        .collect();
+    (taps[0].0, taps.into_iter().map(|t| t.1).collect())
+}
+
 /// Built-in and parameter inputs of a shader run.
 struct Run<'r> {
     e: &'r dyn Element,
@@ -613,6 +662,31 @@ pub struct Feedback {
 }
 
 impl Builder<'_> {
+    /// Filters a frame rendered at `n` times the size down to `size` (SREP 72 §4), x then y, with the box or the
+    /// Lanczos-3 kernel of [`supersample_taps`].
+    pub fn supersample_down(&mut self, src: &Arc<Tex>, n: u32, lanczos: bool, size: [u32; 2]) -> Arc<Tex> {
+        let pipe = self.internal("supersample", SUPERSAMPLE);
+        let (first, wts) = supersample_taps(n, lanczos);
+        let run = |b: &mut Self, input: &Arc<Tex>, axis: usize, out: [u32; 2]| {
+            let p = &pipe.program;
+            let mut block = p.block();
+            let mut set = |name: &str, v: &[f64]| {
+                if let Some(u) = p.uniform(name) {
+                    p.write(&mut block, u, v);
+                }
+            };
+            set("n", &[n as f64]);
+            set("axis", &[axis as f64]);
+            set("taps", &[wts.len() as f64]);
+            set("first", &[first as f64]);
+            set("wts", &wts);
+            let textures = p.samplers.iter().map(|_| input.clone()).collect();
+            b.custom(&pipe, block, textures, out)
+        };
+        let across = run(self, src, 0, [size[0], src.size[1]]);
+        run(self, &across, 1, size)
+    }
+
     fn custom(&mut self, pipe: &Arc<CustomPipe>, block: Vec<u8>, textures: Vec<Arc<Tex>>, size: [u32; 2]) -> Arc<Tex> {
         let out = self.tex(size);
         self.passes.push(Pass::custom(CustomBind { pipe: pipe.clone(), block, textures }, out.clone()));
@@ -823,6 +897,12 @@ impl Builder<'_> {
         put("resolution", vec![w as f64, h as f64]);
         put("frameResolution", vec![cx.frame_size[0], cx.frame_size[1]]);
         put("tileOffset", vec![cx.offset[0], cx.offset[1]]);
+        // SREP 72: the node's content box in tile pixels (left, top, width, height), from the top-left; the whole
+        // tile when the content's extent is unknown
+        let content =
+            cx.content.map(|c| [c[0], c[1], c[2] - c[0], c[3] - c[1]]).unwrap_or([0.0, 0.0, w as f64, h as f64]);
+        put("sr_ContentRect", content.to_vec());
+        put("sr_TileSize", vec![w as f64, h as f64]);
         put("time", vec![now]);
         put("localTime", vec![cx.local_time]);
         put("timeDelta", vec![1.0 / fps]);

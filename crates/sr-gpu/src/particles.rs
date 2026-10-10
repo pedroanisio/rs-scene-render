@@ -40,6 +40,11 @@ pub struct ParticleEngine {
 
 impl ParticleEngine {
     pub fn new(device: Arc<wgpu::Device>, queue: &wgpu::Queue) -> ParticleEngine {
+        Self::new_as(device, queue, FORMAT)
+    }
+
+    /// The engine for targets of `format` (a working format of SREP 72).
+    pub fn new_as(device: Arc<wgpu::Device>, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> ParticleEngine {
         let d = &*device;
         let module = d.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("particles"),
@@ -119,7 +124,7 @@ impl ParticleEngine {
                     entry_point: Some("fs_main"),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
-                        format: FORMAT,
+                        format,
                         blend: Some(premul),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],

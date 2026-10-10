@@ -379,7 +379,7 @@ impl Renderer {
         t
     }
 
-    fn builder<'b>(&'b mut self, _plan: &Plan) -> Builder<'b> {
+    pub(super) fn builder<'b>(&'b mut self, _plan: &Plan) -> Builder<'b> {
         let store = if self.working.linear {
             0
         } else {
@@ -1037,7 +1037,7 @@ impl Renderer {
                     Some((_, t)) if t.size == size && Arc::strong_count(t) <= 2 => t.clone(),
                     _ => {
                         self.pool.created += 1;
-                        Arc::new(resources::create(&self.gpu.device, &self.bgl1, size, 1, "effects"))
+                        Arc::new(resources::create_as(&self.gpu.device, &self.bgl1, self.format, size, 1, "effects"))
                     }
                 };
                 plan.stats.effect_pixels += size[0] as u64 * size[1] as u64;
@@ -1973,7 +1973,7 @@ impl Renderer {
 
     /// A texture of `size` the caller keeps across renders (the placed sides of a join).
     pub fn texture(&self, size: [u32; 2]) -> Arc<Tex> {
-        Arc::new(resources::create(&self.gpu.device, &self.bgl1, size, 1, "kept"))
+        Arc::new(resources::create_as(&self.gpu.device, &self.bgl1, self.format, size, 1, "kept"))
     }
 
     /// Combines two finished, frame-sized pictures with a transition element into `into`: the join

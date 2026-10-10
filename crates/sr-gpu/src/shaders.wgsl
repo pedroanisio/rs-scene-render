@@ -309,10 +309,26 @@ fn blend_fn(mode: u32, cb: vec3<f32>, cs: vec3<f32>) -> vec3<f32> {
   }
 }
 
+// SREP 72 edgeBlend: source-over of premultiplied stored `s` on `bd` computed in the other space than the stored one:
+// on sRGB-encoded values when `encoded` (the frame stores linear ones), else on linear values (it stores encoded
+// ones). Alpha composites as usual; the colour mixes in that space and returns to the stored one.
+fn over_in(encoded: bool, bd: vec4<f32>, s: vec4<f32>) -> vec4<f32> {
+  let cb = select(vec3(0.0), bd.rgb / bd.a, bd.a > 0.0);
+  let cs = select(vec3(0.0), s.rgb / s.a, s.a > 0.0);
+  let xb = select(srgb_decode(cb), srgb_encode(cb), encoded);
+  let xs = select(srgb_decode(cs), srgb_encode(cs), encoded);
+  let a = s.a + bd.a * (1.0 - s.a);
+  let x = select(vec3(0.0), (xs * s.a + xb * bd.a * (1.0 - s.a)) / a, a > 0.0);
+  let c = select(srgb_encode(x), srgb_decode(x), encoded);
+  return vec4(c * a, a);
+}
+
 // Composites premultiplied source `s` over premultiplied backdrop `bd` with `mode`.
 fn composite(mode: u32, bd: vec4<f32>, s: vec4<f32>) -> vec4<f32> {
   let ab = bd.a; let as_ = s.a;
   switch (mode) {
+    case 36u: { return over_in(true, bd, s); }                          // edgeBlend encoded over linear storage
+    case 37u: { return over_in(false, bd, s); }                         // edgeBlend linear over encoded storage
     case 3u: { return min(bd + s, vec4(1.0)); }                         // plus-lighter
     case 29u: { return bd * as_; }                                      // stencil-alpha
     case 30u: {                                                         // stencil-luma

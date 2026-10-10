@@ -527,6 +527,8 @@ pub struct FxEngine {
     pub(crate) checkpoints: std::collections::BTreeMap<i64, HashMap<String, crate::shader::Feedback>>,
     /// Images uploaded for shader samplers, by path.
     pub(crate) images: HashMap<std::path::PathBuf, Arc<Tex>>,
+    /// The format of the textures the passes draw into (SREP 72 working format); set before the first pass.
+    pub format: wgpu::TextureFormat,
 }
 
 impl FxEngine {
@@ -629,6 +631,7 @@ impl FxEngine {
             feedback_frame: (i64::MIN, HashMap::new()),
             checkpoints: std::collections::BTreeMap::new(),
             images: HashMap::new(),
+            format: FORMAT,
         }
     }
 
@@ -678,7 +681,7 @@ impl FxEngine {
                             ..Default::default()
                         },
                         targets: &[Some(wgpu::ColorTargetState {
-                            format: FORMAT,
+                            format: self.format,
                             blend,
                             write_mask: wgpu::ColorWrites::ALL,
                         })],
