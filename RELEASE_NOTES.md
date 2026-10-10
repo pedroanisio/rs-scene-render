@@ -1,18 +1,17 @@
-# scene-render v0.2.1
+# scene-render v0.3.0
 
-This patch release fixes scene evaluation, asset resolution and encode finalization.
+This release adds scene document version 1.6 and integrates the following rendering features:
 
-- Motion paths now update camera and object3D positions. Camera paths with unsupported automatic orientation report a validation error.
-- Rigid bodies in groups that start later enter the simulation when their group starts. Late-starting soft bodies report that they are unsupported.
-- Flock sprites resolve their image assets without needing a separate image layer.
-- Software H.264 and H.265 encoders use fixed thread counts so CPU core counts do not change their output. Encoded bytes can differ from earlier releases.
-- Contrast analysis shares a bounded probe budget per output and runs after the encoded file is closed.
-- Fuzz crash reports identify panicking worker locations and cover nonfinite ocean body inputs.
+- Build-time and stepping WebAssembly programs with deterministic host functions, fuel limits and pinned output hashes.
+- Compute histograms, density tonemapping, iterated effects, error diffusion and segmented sorting.
+- Node-local shader stepping, prewarming and checkpoints.
+- Parametric paths, parametric surfaces and heightfields.
+- Shader content rectangles, supersampling, per-node edge blending and optional float32 working textures.
+- Upright flock sprites through `orientToVelocity="false"`.
+- Faster bounded texture-coordinate conversion in the depth-of-field shader, checked against the original shader.
 
-The Linux archive contains the executable, source commit identifier, capability manifest, README, license and third-party notices. Its executable is taken from the successful CI run for the release commit, checksum-verified and smoke-tested before packaging.
+The schema retains the vendored sr-core 1.5.0 base with the local 1.6 extensions documented in `schema/UPSTREAM`. The compute histogram carry tests use llvmpipe; discrete-GPU carry remains unverified.
 
-Verify the download with `sha256sum -c scene-render-v0.2.1-linux-x86_64.tar.gz.sha256`, extract it, then run `./scene-render --help`.
+The Linux archive contains the executable, source commit identifier, capability manifest, README, license and third-party notices. Its executable comes from the successful CI run for the release commit and is checksum-verified and smoke-tested before packaging.
 
-Requirements: Linux x86-64, glibc 2.39 or newer, Vulkan (including Mesa software Vulkan), FFmpeg and ffprobe 5.1 or newer, and suitable fonts. On Ubuntu 24.04: `sudo apt install ffmpeg libvulkan1 mesa-vulkan-drivers fonts-dejavu-core`. HEIC decoding additionally requires `libheif-examples libheif-plugin-libde265`.
-
-Windows and macOS are checked for portability; rendering equivalence across different CPUs or GPU drivers is not guaranteed. Multiple scattering is bounded by the requested collision limit and the volume quadrature resolution; its indirect walk terminates at surfaces rather than adding surface-volume interreflection.
+Verify the download with `sha256sum -c scene-render-v0.3.0-linux-x86_64.tar.gz.sha256`, extract it, then run `./scene-render --help`.

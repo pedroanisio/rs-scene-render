@@ -23,9 +23,8 @@ release of sr-core that takes these in replaces them; until then a vendoring kee
 vendoring is theirs, every one that only this repository changed is ours, and nothing was changed by both).
 
 Local addition ahead of an sr-core release: document version 1.6 (scene/@version gains "1.6"; sr_model::SCHEMA_VERSION
-is "1.6"), with no 1.6 syntax. It is the base on which the branches of the SREPs accepted on 2026-10-09 (66 to 75) add
-their own syntax and version rules; a 1.6 document holding 1.5 content validates and renders as the same document at
-1.5. The capability manifest still names the vendored release 1.5.0. A vendoring of sr-core 1.6.0 replaces this.
+is "1.6"), with the implemented extensions below. A 1.6 document holding 1.5 content validates and renders as the
+same document at 1.5. The capability manifest still names the vendored release 1.5.0. A vendoring of sr-core 1.6.0 replaces this.
 
 Added here ahead of an sr-core release: SREP 67 (accepted 2026-10-09). This covers compute, iterate and tonemap
 (computeType, densityTonemapType, iterateType), the effect types error-diffusion and segmented-sort with their attributes,
@@ -38,10 +37,16 @@ of the model generator of sr-model:
 Every document valid under the SREP is valid here.
 Added here ahead of an sr-core release: SREP 68 (accepted 2026-10-09), effectType/@stepsPerFrame and @prewarm, and the
 Schematron pattern p-srep68 with STP1, with the syntax of srep/srep-0068.md in sr-core branch srep/drafts-2026-10. The
-pattern's context leaves out program[@mode='step'] (SREP 69, not in this schema). A vendoring of the sr-core release that
+pattern includes shader effects and program[@mode='step'] (SREP 69). A vendoring of the sr-core release that
 contains SREP 68 replaces these.
 Unverified for SREP 67 in this engine:
 - Real-GPU carry is unverified, because there is no discrete GPU we may use. The two-word 64-bit cells are tested on
   llvmpipe only, in CI and on the prod VM (raster_effects::srep67_compute).
 - The error-diffusion kernel weights are checked against the SREP's table and against the commonly republished values,
   not against the original publications, which could not be read from here.
+
+Additional local extensions accepted on 2026-10-09:
+- SREPs 66 and 69: build-time and stepping WebAssembly programs, with V12, PRG1 to PRG3 and program diagnostics.
+- SREP 70: parametric paths, surfaces and heightfields, with V14, PAR1 and PAR2.
+- SREP 72: shader content rectangles, supersampling, edge blending and float32 working textures.
+- SREP 73: flock/@orientToVelocity and the INERT-I16 diagnostic for streak flocks.
