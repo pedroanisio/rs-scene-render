@@ -30,7 +30,9 @@ fn uvs(n: usize) -> Vec<[f32; 2]> {
 /// The geometric normal (b − a) × (c − a) of every triangle, which the renderer treats as its front.
 fn faces(m: &sr_3d::Primitive) -> Vec<Vec3> {
     m.indices
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|t| {
             let p = |k: u32| Vec3::from(m.vertices[k as usize].pos);
             (p(t[1]) - p(t[0])).cross(p(t[2]) - p(t[0])).normalize()
