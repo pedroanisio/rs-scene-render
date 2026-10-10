@@ -174,6 +174,17 @@ fn flocks_fluids_slime_and_erosion_draw_and_seek_deterministically() {
     }
 }
 
+/// A flock's sprite is an image asset of the program by itself: v0.1.4 failed every frame with "sprite iaChip is not
+/// an image asset" unless a layer also referenced the image (Inova probe C).
+#[test]
+fn a_flock_draws_its_sprite_without_a_layer_that_references_it() {
+    let d =
+        scene(r#"<flock id="s" width="64" height="64" count="40" seed="2" size="8" shape="sprite" sprite="red"/>"#, "");
+    let Some(r) = render_times(&d, &[0.5]) else { return };
+    assert!(problems(&r).is_empty(), "{:?}", problems(&r));
+    assert!(r.px.iter().any(|p| p[0] > 0.5 && p[1] < 0.2 && p[3] > 0.5), "no red sprite drawn");
+}
+
 #[test]
 fn simulated_content_inside_isolated_groups_follows_the_frame() {
     // an isolated group caches its content by hash: particles and simulation pictures change

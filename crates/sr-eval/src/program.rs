@@ -1383,8 +1383,8 @@ impl Builder {
                 self.assets.insert(key.clone(), (ctx.doc, a));
                 key
             });
-            if matches!(name, "particleEmitter" | "particles3D") {
-                // sprites and emission masks are image assets too
+            if matches!(name, "particleEmitter" | "particles3D" | "flock") {
+                // sprites and emission masks are image assets too (a flock's sprite as well, with no layer naming it)
                 for r in [attr_str(e, "sprite"), attr_str(e, "emitterAsset"), attr_str(e, "emitterMesh")]
                     .into_iter()
                     .flatten()
