@@ -246,7 +246,9 @@ pub fn run(device: &wgpu::Device, queue: &wgpu::Queue, program: &Program, job: &
     let _ = device.poll(wgpu::PollType::wait_indefinitely());
     let data = read.slice(..).get_mapped_range().map_err(|e| format!("compute histogram: {e:?}"))?;
     Ok(data
-        .chunks_exact(8)
+        .as_chunks::<8>()
+        .0
+        .iter()
         .take(cells as usize)
         .map(|c| {
             let lo = u32::from_le_bytes([c[0], c[1], c[2], c[3]]) as u64;
