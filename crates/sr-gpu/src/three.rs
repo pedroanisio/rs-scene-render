@@ -562,6 +562,7 @@ struct PipeKey {
     blend: bool,
     plain: bool,
     global_lights: bool,
+    light_signature: u32,
     alpha_mask: bool,
 }
 
@@ -1315,6 +1316,7 @@ impl ThreeEngine {
                             constants: &[
                                 ("PLAIN_MATERIAL", key.plain as u32 as f64),
                                 ("ALL_GLOBAL_LIGHTS", key.global_lights as u32 as f64),
+                                ("LIGHT_SIGNATURE", key.light_signature as f64),
                                 ("ALPHA_MASK", key.alpha_mask as u32 as f64),
                             ],
                             ..Default::default()
@@ -1897,6 +1899,18 @@ impl ThreeEngine {
         // original 63-light cap and overflow diagnostic without a repeated list.
         let global_lights = self.specialize_global_lights
             && scene.lights.iter().all(|l| matches!(l.kind, LightKind::Ambient | LightKind::Directional));
+        // A small global-light list can preserve order while exposing each kind
+        // and index to the shader compiler. Longer lists retain the tiled/general path.
+        let light_signature = if global_lights && scene.lights.len() <= 4 {
+            ((scene.lights.len() as u32) << 8)
+                | scene
+                    .lights
+                    .iter()
+                    .enumerate()
+                    .fold(0, |mask, (k, light)| mask | ((matches!(light.kind, LightKind::Directional) as u32) << k))
+        } else {
+            u32::MAX
+        };
         let tile_data = if global_lights {
             stats.tile_overflow = scene.lights.len() > MAX_PER_TILE;
             vec![0u32]
@@ -2028,7 +2042,14 @@ impl ThreeEngine {
                     key: [0; 6],
                     vbuf: None,
                     depth: 0.0,
-                    pipe: PipeKey { cull: false, blend: false, plain: false, global_lights: false, alpha_mask: true },
+                    pipe: PipeKey {
+                        cull: false,
+                        blend: false,
+                        plain: false,
+                        global_lights: false,
+                        light_signature: u32::MAX,
+                        alpha_mask: true,
+                    },
                     visible: false,
                     active: false,
                 });
@@ -2077,6 +2098,7 @@ impl ThreeEngine {
                 blend: kind == Kind::Blend,
                 plain,
                 global_lights,
+                light_signature,
                 alpha_mask,
             };
             self.pipe(pipe);
@@ -3132,15 +3154,19 @@ mod tests {
         scene.draws[0].material = MaterialParams::default();
         assert!(plain_material(&scene.draws[0]));
         // Exact reference uses the original tiled list and local-light branches.
-        // Include the tile cap, empty lists, local-light fallback and shadow paths.
+        // Include every supported small-light order, the tile cap, local-light
+        // fallback and shadow paths. Both opaque and blended pipelines are checked.
         let template = scene.lights[0].clone();
-        for (count, mixed) in [(0usize, false), (1, false), (3, false), (63, false), (64, false), (3, true)] {
+        let scenarios = [(5usize, false, None), (63, false, None), (64, false, None), (3, true, None)]
+            .into_iter()
+            .chain((0..=4).flat_map(|count| (0..(1u32 << count)).map(move |kinds| (count, false, Some(kinds)))));
+        for (count, mixed, kinds) in scenarios {
             scene.lights = (0..count)
                 .map(|k| {
                     let mut light = template.clone();
                     light.kind = if mixed && k == 1 {
                         LightKind::Point
-                    } else if k % 3 == 0 {
+                    } else if kinds.map_or(k % 3 == 0, |mask| mask & (1 << k) == 0) {
                         LightKind::Ambient
                     } else {
                         LightKind::Directional
@@ -3169,13 +3195,23 @@ mod tests {
                 let actual_stats = engine.stats;
                 engine.specialize_global_lights = false;
                 let expected = engine.render_now(&scene, None);
-                assert_eq!(actual, expected, "global count={count}, mixed={mixed}, transparent={transparent}");
+                assert_eq!(
+                    actual, expected,
+                    "global count={count}, kinds={kinds:?}, mixed={mixed}, transparent={transparent}"
+                );
                 assert_eq!(actual_stats, engine.stats, "lighting statistics and overflow stay unchanged");
                 assert_eq!(actual_stats.tile_overflow, count > MAX_PER_TILE);
             }
         }
         assert!(engine.pipes.keys().any(|key| key.global_lights));
         assert!(engine.pipes.keys().any(|key| !key.global_lights));
+        let signatures: std::collections::HashSet<_> = engine
+            .pipes
+            .keys()
+            .filter(|key| key.global_lights && key.light_signature != u32::MAX)
+            .map(|key| key.light_signature)
+            .collect();
+        assert_eq!(signatures.len(), 31, "all light orders through four lights must activate specialization");
         scene.draws[0].material = MaterialParams::default();
         let m = &mut scene.draws[0].material;
         m.clearcoat = 0.5;

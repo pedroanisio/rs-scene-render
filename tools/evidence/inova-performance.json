@@ -280,6 +280,144 @@
         }
       },
       "full_package_verified": false
+    },
+    "small_global_light_signature_v030": {
+      "measured_on": "2026-10-10",
+      "baseline_revision": "c22a1b8a9f8430b641a011943bcc764e6ef3df14",
+      "baseline_binary_sha256": "02acae90fc55f564cb17cacfd6ba3f8cf09840e7cada78fbcf3b8ac064b59040",
+      "candidate_binary_sha256": "cb3b685833d09a1ee463f083c53df4b2750507378b63e4b67484afe3f63a8a85",
+      "scene_sha256": "b294763f5985f59cc516c6eac59334dcb1d46a2a105f957bcb074a920eac85d3",
+      "environment": "FIX VM; same Rust release profile/toolchain for both binaries; Vulkan llvmpipe; serialized with heavy.lock",
+      "scope": "Two 24-frame ABBA render windows and two 6-frame encoded windows; not a full-package speedup",
+      "benchmarks": {
+        "600": {
+          "baseline_mean_median_ms": 1053.3525,
+          "candidate_mean_median_ms": 986.7629999999999,
+          "diagnostic_speedup": 1.0674827694187967,
+          "rows": [
+            {
+              "run": 1,
+              "variant": "cast",
+              "wall_seconds": 32.603774340997916,
+              "exit_code": 0,
+              "cpu_steal_percent": 3.513142508515939,
+              "median_ms": 1041.352,
+              "p95_ms": 1686.577
+            },
+            {
+              "run": 2,
+              "variant": "light",
+              "wall_seconds": 30.90403583899024,
+              "exit_code": 0,
+              "cpu_steal_percent": 3.3230835626045208,
+              "median_ms": 991.131,
+              "p95_ms": 1572.657
+            },
+            {
+              "run": 3,
+              "variant": "light",
+              "wall_seconds": 29.354326627973933,
+              "exit_code": 0,
+              "cpu_steal_percent": 1.5297998180163785,
+              "median_ms": 982.395,
+              "p95_ms": 1228.361
+            },
+            {
+              "run": 4,
+              "variant": "cast",
+              "wall_seconds": 33.70377513600397,
+              "exit_code": 0,
+              "cpu_steal_percent": 4.1132505073503935,
+              "median_ms": 1065.353,
+              "p95_ms": 1731.688
+            }
+          ]
+        },
+        "900": {
+          "baseline_mean_median_ms": 1052.5115,
+          "candidate_mean_median_ms": 948.9685,
+          "diagnostic_speedup": 1.109111103266336,
+          "rows": [
+            {
+              "run": 1,
+              "variant": "cast",
+              "wall_seconds": 32.77776223100955,
+              "exit_code": 0,
+              "cpu_steal_percent": 4.09178596811859,
+              "median_ms": 1061.158,
+              "p95_ms": 1624.397
+            },
+            {
+              "run": 2,
+              "variant": "light",
+              "wall_seconds": 30.74000170698855,
+              "exit_code": 0,
+              "cpu_steal_percent": 4.486416278818054,
+              "median_ms": 953.283,
+              "p95_ms": 1509.47
+            },
+            {
+              "run": 3,
+              "variant": "light",
+              "wall_seconds": 28.54684454802191,
+              "exit_code": 0,
+              "cpu_steal_percent": 1.6272102449626975,
+              "median_ms": 944.654,
+              "p95_ms": 1250.193
+            },
+            {
+              "run": 4,
+              "variant": "cast",
+              "wall_seconds": 31.75197348999791,
+              "exit_code": 0,
+              "cpu_steal_percent": 2.6264642538215055,
+              "median_ms": 1043.865,
+              "p95_ms": 1533.624
+            }
+          ]
+        }
+      },
+      "encoded_windows": {
+        "20": {
+          "equivalent": true,
+          "encoded_identical": true,
+          "checks": {
+            "frames": true,
+            "quality": true,
+            "render_adapter": true,
+            "accessibility": true,
+            "unsupported": true,
+            "evaluation_warnings": true,
+            "warnings": true,
+            "loudness": true,
+            "true_peak": true,
+            "decoded_video_audio_identical": true,
+            "exit_status_identical": true
+          }
+        },
+        "28.8": {
+          "equivalent": true,
+          "encoded_identical": true,
+          "checks": {
+            "frames": true,
+            "quality": true,
+            "render_adapter": true,
+            "accessibility": true,
+            "unsupported": true,
+            "evaluation_warnings": true,
+            "warnings": true,
+            "loudness": true,
+            "true_peak": true,
+            "decoded_video_audio_identical": true,
+            "exit_status_identical": true
+          }
+        }
+      },
+      "full_package_verified": false,
+      "commands": [
+        "scene-render render film.scene.xml --frames 600..624 --bench --strict",
+        "scene-render render film.scene.xml --frames 900..924 --bench --strict"
+      ]
     }
   },
   "current_binary_sha256": "fb35020f3201accce67bb678e39cbaaa3c650861ee4f991d474404a81e9558cf",

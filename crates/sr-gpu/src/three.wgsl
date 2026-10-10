@@ -1,6 +1,7 @@
 // Optional surface features are removed only for materials that do not use them.
 override PLAIN_MATERIAL: bool = false;
 override ALL_GLOBAL_LIGHTS: bool = false;
+override LIGHT_SIGNATURE: u32 = 0xffffffffu;
 override ALPHA_MASK: bool = true;
 
 struct Material {
@@ -289,8 +290,7 @@ fn luma(c: vec3<f32>) -> f32 {
     return dot(c, vec3(0.2126, 0.7152, 0.0722));
 }
 
-fn shade_light(li: Light, s: Surface) -> vec3<f32> {
-    let ty = u32(li.pos.w);
+fn shade_light(li: Light, s: Surface, ty: u32) -> vec3<f32> {
     var l = vec3(0.0);
     var radiance = li.color.rgb;
     var a = s.rough * s.rough;
@@ -574,29 +574,124 @@ fn fs_main(i: VOut, @builtin(front_facing) front: bool) -> FOut {
         base = (tile.y * tiles_x + tile.x) * (MAX_PER_TILE + 1u);
         count = min(tiles[base], MAX_PER_TILE);
     }
-    for (var k = 0u; k < count; k++) {
-        var index = k;
-        if (!ALL_GLOBAL_LIGHTS) { index = tiles[base + 1u + k]; }
-        let li = lights[index];
-        let ty = u32(li.pos.w);
-        let contribution = shade_light(li, s);
-        var sh = 1.0;
-        // Shadowing cannot change a zero contribution (back-facing or unlit
-        // pixels, for example), so avoid its texture comparisons there.
-        if (ty != 0u && any(contribution != vec3(0.0))) {
-            sh = shadow_factor(li, s.world, s.n);
-            if (li.right.w > 0.0 && sh > 0.0) {
-                var l = -li.dir.xyz;
-                if (!ALL_GLOBAL_LIGHTS && ty != 1u) { l = normalize(li.pos.xyz - s.world); }
-                sh = sh * contact_shadow(s.world + s.n * 0.5, l, li.right.w);
+    if (LIGHT_SIGNATURE != 0xffffffffu) {
+        if ((LIGHT_SIGNATURE >> 8u) > 0u) {
+            let li = lights[0u];
+            let ty = (LIGHT_SIGNATURE >> 0u) & 1u;
+            let contribution = shade_light(li, s, ty);
+            var sh = 1.0;
+            // Shadowing cannot change a zero contribution (back-facing or unlit
+            // pixels, for example), so avoid its texture comparisons there.
+            if (ty != 0u && any(contribution != vec3(0.0))) {
+                sh = shadow_factor(li, s.world, s.n);
+                if (li.right.w > 0.0 && sh > 0.0) {
+                    var l = -li.dir.xyz;
+                    if (!ALL_GLOBAL_LIGHTS && ty != 1u) { l = normalize(li.pos.xyz - s.world); }
+                    sh = sh * contact_shadow(s.world + s.n * 0.5, l, li.right.w);
+                }
+            } else if (ty == 0u) {
+                sh = ao;
             }
-        } else if (ty == 0u) {
-            sh = ao;
+            col += contribution * sh;
+            if (catcher) {
+                lit_un += luma(contribution * select(1.0, ao, ty == 0u));
+                lit_sh += luma(contribution * sh);
+            }
         }
-        col += contribution * sh;
-        if (catcher) {
-            lit_un += luma(contribution * select(1.0, ao, ty == 0u));
-            lit_sh += luma(contribution * sh);
+        if ((LIGHT_SIGNATURE >> 8u) > 1u) {
+            let li = lights[1u];
+            let ty = (LIGHT_SIGNATURE >> 1u) & 1u;
+            let contribution = shade_light(li, s, ty);
+            var sh = 1.0;
+            // Shadowing cannot change a zero contribution (back-facing or unlit
+            // pixels, for example), so avoid its texture comparisons there.
+            if (ty != 0u && any(contribution != vec3(0.0))) {
+                sh = shadow_factor(li, s.world, s.n);
+                if (li.right.w > 0.0 && sh > 0.0) {
+                    var l = -li.dir.xyz;
+                    if (!ALL_GLOBAL_LIGHTS && ty != 1u) { l = normalize(li.pos.xyz - s.world); }
+                    sh = sh * contact_shadow(s.world + s.n * 0.5, l, li.right.w);
+                }
+            } else if (ty == 0u) {
+                sh = ao;
+            }
+            col += contribution * sh;
+            if (catcher) {
+                lit_un += luma(contribution * select(1.0, ao, ty == 0u));
+                lit_sh += luma(contribution * sh);
+            }
+        }
+        if ((LIGHT_SIGNATURE >> 8u) > 2u) {
+            let li = lights[2u];
+            let ty = (LIGHT_SIGNATURE >> 2u) & 1u;
+            let contribution = shade_light(li, s, ty);
+            var sh = 1.0;
+            // Shadowing cannot change a zero contribution (back-facing or unlit
+            // pixels, for example), so avoid its texture comparisons there.
+            if (ty != 0u && any(contribution != vec3(0.0))) {
+                sh = shadow_factor(li, s.world, s.n);
+                if (li.right.w > 0.0 && sh > 0.0) {
+                    var l = -li.dir.xyz;
+                    if (!ALL_GLOBAL_LIGHTS && ty != 1u) { l = normalize(li.pos.xyz - s.world); }
+                    sh = sh * contact_shadow(s.world + s.n * 0.5, l, li.right.w);
+                }
+            } else if (ty == 0u) {
+                sh = ao;
+            }
+            col += contribution * sh;
+            if (catcher) {
+                lit_un += luma(contribution * select(1.0, ao, ty == 0u));
+                lit_sh += luma(contribution * sh);
+            }
+        }
+        if ((LIGHT_SIGNATURE >> 8u) > 3u) {
+            let li = lights[3u];
+            let ty = (LIGHT_SIGNATURE >> 3u) & 1u;
+            let contribution = shade_light(li, s, ty);
+            var sh = 1.0;
+            // Shadowing cannot change a zero contribution (back-facing or unlit
+            // pixels, for example), so avoid its texture comparisons there.
+            if (ty != 0u && any(contribution != vec3(0.0))) {
+                sh = shadow_factor(li, s.world, s.n);
+                if (li.right.w > 0.0 && sh > 0.0) {
+                    var l = -li.dir.xyz;
+                    if (!ALL_GLOBAL_LIGHTS && ty != 1u) { l = normalize(li.pos.xyz - s.world); }
+                    sh = sh * contact_shadow(s.world + s.n * 0.5, l, li.right.w);
+                }
+            } else if (ty == 0u) {
+                sh = ao;
+            }
+            col += contribution * sh;
+            if (catcher) {
+                lit_un += luma(contribution * select(1.0, ao, ty == 0u));
+                lit_sh += luma(contribution * sh);
+            }
+        }
+    } else {
+        for (var k = 0u; k < count; k++) {
+            var index = k;
+            if (!ALL_GLOBAL_LIGHTS) { index = tiles[base + 1u + k]; }
+            let li = lights[index];
+            let ty = u32(li.pos.w);
+            let contribution = shade_light(li, s, ty);
+            var sh = 1.0;
+            // Shadowing cannot change a zero contribution (back-facing or unlit
+            // pixels, for example), so avoid its texture comparisons there.
+            if (ty != 0u && any(contribution != vec3(0.0))) {
+                sh = shadow_factor(li, s.world, s.n);
+                if (li.right.w > 0.0 && sh > 0.0) {
+                    var l = -li.dir.xyz;
+                    if (!ALL_GLOBAL_LIGHTS && ty != 1u) { l = normalize(li.pos.xyz - s.world); }
+                    sh = sh * contact_shadow(s.world + s.n * 0.5, l, li.right.w);
+                }
+            } else if (ty == 0u) {
+                sh = ao;
+            }
+            col += contribution * sh;
+            if (catcher) {
+                lit_un += luma(contribution * select(1.0, ao, ty == 0u));
+                lit_sh += luma(contribution * sh);
+            }
         }
     }
     // image-based lighting from the dome
