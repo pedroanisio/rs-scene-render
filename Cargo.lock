@@ -3115,6 +3115,7 @@ dependencies = [
  "glam 0.30.10",
  "image",
  "libm",
+ "num-bigint",
  "rayon",
  "regex",
  "serde",
