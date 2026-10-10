@@ -50,9 +50,11 @@ fn sss_ring(c: f32, alpha: f32) -> f32 {
     return (a * acos(clamp(-a / b, -1.0, 1.0)) + sqrt(max(b * b - a * a, 0.0))) * 0.318309886183791;
 }
 fn sss_lobe(c: f32, curvature: f32, d: f32) -> f32 {
+    // a variable, which may be indexed by a value that is not constant
+    var q = SSS_Q;
     var e = 0.0;
     for (var k = 0u; k < 16u; k++) {
-        let half = min(SSS_Q[k] * d * curvature * 0.5, 1.0);
+        let half = min(q[k] * d * curvature * 0.5, 1.0);
         e += sss_ring(c, 2.0 * asin(half));
     }
     return e / 16.0;
