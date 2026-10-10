@@ -50,5 +50,7 @@ pub use document::{
     ResolvedPaint, Target, Version,
 };
 
-/// Schema version implemented by this crate.
-pub const SCHEMA_VERSION: &str = "1.5";
+/// Schema version implemented by this crate: the newest document version it accepts. 1.6 is a local base for the
+/// SREPs accepted on 2026-10-09 (66 to 75) ahead of an sr-core release (schema/UPSTREAM); with no 1.6 syntax yet, a
+/// 1.6 document holds 1.5 content and means what it means as 1.5.
+pub const SCHEMA_VERSION: &str = "1.6";
