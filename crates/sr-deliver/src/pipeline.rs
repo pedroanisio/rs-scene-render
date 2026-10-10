@@ -1142,9 +1142,11 @@ fn run_delivery(
         report.segments = 1;
         // llvmpipe already spreads one device over every core, so automatic parallelism would only add
         // devices competing for them; an explicit worker count is still honoured
-        let host = if gpu.is_software() { 1 } else { host_workers(codec, opts) };
+        let can_split = splittable(output, codec, &ev);
+        let auto = matches!(opts.parallel, Parallel::Auto);
+        let host = if can_split && auto && !gpu.is_software() { host_workers(codec, opts) } else { 1 };
         let observe = checks.flash_on() || checks.contrast_on();
-        let mut plan = segment_plan(opts.parallel, splittable(output, codec, &ev), host, end - start, n, observe);
+        let mut plan = segment_plan(opts.parallel, can_split, host, end - start, n, observe);
         // the debug layers name every object through the Vulkan loader, which is not safe from several devices at
         // once: one worker renders the same chunks on the caller's device
         if sr_gpu::gpu::debug_layers() && plan.workers > 1 {
