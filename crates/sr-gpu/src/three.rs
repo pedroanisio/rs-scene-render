@@ -3200,10 +3200,45 @@ mod tests {
             wgpu::TextureFormat::Rgba32Float,
             gpu.scalar_target,
         );
+        // Compare the conversion with the original WGSL cast on the GPU, including
+        // adjacent float values at powers of two, nonfinite values, and both axes
+        // of the large-dimension fallback. Pixel coordinates select runtime inputs.
+        let mut bits = vec![0u32, 0x80000000, 0x7f800000, 0xff800000, 0x7fc00000, 0xffc00000, 0x7f7fffff, 0xff7fffff];
+        for exponent in -24..=31 {
+            let power = 2.0f32.powi(exponent).to_bits();
+            for value in [power - 1, power, power + 1] {
+                bits.extend([value, value ^ 0x80000000]);
+            }
+        }
+        let bit_literals = bits.iter().map(|b| format!("0x{b:08x}u")).collect::<Vec<_>>().join(",");
+        let conversion_probe = format!(
+            r#"
+const CAST_BITS: array<u32, {count}> = array<u32, {count}>({bit_literals});
+const CAST_DIMS: array<f32, 11> = array<f32, 11>(1.0, 2.0, 97.0, 8192.0, 16384.0, 8388607.0, 8388608.0, 8388609.0, 16777216.0, 2147483648.0, 4294967296.0);
+@fragment
+fn fs_conversion_probe(i: PostOut) -> @location(0) vec4<f32> {{
+    let pixel = u32(i.pos.y) * 97u + u32(i.pos.x);
+    let index = pixel % ({count}u * 11u);
+    let value = bitcast<f32>(CAST_BITS[index % {count}u]);
+    let dim = CAST_DIMS[index / {count}u];
+    let dims = select(vec2(dim, 97.0), vec2(97.0, dim), pixel >= {count}u * 11u);
+    let position = vec2(value, -value);
+    let expected = vec2<i32>(clamp(position, vec2(0.0), dims - 1.0));
+    let actual = clamped_texel(position, dims);
+    return vec4(select(0.0, 1.0, all(actual == expected)));
+}}
+"#,
+            count = bits.len(),
+        );
         let shader = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("original-dof-oracle"),
             source: wgpu::ShaderSource::Wgsl(
-                format!("{}\n{}", post_src(), include_str!("../tests/fixtures/three_dof_reference.wgsl")).into(),
+                format!(
+                    "{}\n{}\n{conversion_probe}",
+                    post_src(),
+                    include_str!("../tests/fixtures/three_dof_reference.wgsl")
+                )
+                .into(),
             ),
         });
         let layout = gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -3237,6 +3272,7 @@ mod tests {
         };
         let mut reference = dof_pipeline("fs_dof_reference");
         let mut classification = dof_pipeline("fs_uniform_coc_classification");
+        let mut conversion = dof_pipeline("fs_conversion_probe");
         let plane = sr_3d::prim::plane(25.0, 19.0, 1);
         let mesh = engine.upload_mesh(&plane.vertices, &plane.indices);
         let draws = [
@@ -3280,6 +3316,16 @@ mod tests {
             path: None,
             geodesic: None,
         };
+        scene.size = [97, 79];
+        assert!(scene.size[0] as usize * scene.size[1] as usize >= bits.len() * 11 * 2);
+        scene.dof = Some(Dof { coc_scale: 24000.0, focus: 100.0, max_coc: 9.1, blades: 7 });
+        std::mem::swap(&mut engine.dof_pipe, &mut conversion);
+        let mask = engine.render_now(&scene, None);
+        std::mem::swap(&mut engine.dof_pipe, &mut conversion);
+        for (pixel, color) in mask.iter().enumerate() {
+            assert_eq!(*color, [1.0; 4], "clamped texture-coordinate conversion at probe pixel {pixel}");
+        }
+        scene.size = [97, 61];
         // Cross ring-count thresholds, circular and polygonal apertures, transparent
         // edges, HDR colour, lens distortion and encoded/linear working spaces.
         for blades in [0, 3, 7, 11] {

@@ -62,6 +62,17 @@ fn uniform_coc(tile: vec4<f32>, center: f32, search: f32) -> bool {
     return pfr.fx.w > 0.5 && center == search && tile.g == search;
 }
 
+// Coordinates are clamped before conversion. In [0, 2^23), adding 2^23
+// to an integral f32 is exact; its mantissa then stores that integer. This
+// avoids a saturating float-to-int conversion per lane in software shaders.
+fn clamped_texel(position: vec2<f32>, dims: vec2<f32>) -> vec2<i32> {
+    let p = clamp(position, vec2(0.0), dims - 1.0);
+    if (any(dims > vec2(8388608.0))) { return vec2<i32>(p); }
+    let bits = bitcast<vec2<u32>>(floor(p) + vec2(8388608.0)) - vec2(0x4b000000u);
+    // Keep the backend's NaN-to-zero conversion if clamp leaves a NaN.
+    return select(bitcast<vec2<i32>>(bits), vec2(0), p != p);
+}
+
 // Depth of field (gather with polygonal blades), lens distortion and exposure.
 @fragment
 fn fs_dof(i: PostOut) -> @location(0) vec4<f32> {
@@ -74,7 +85,7 @@ fn fs_dof(i: PostOut) -> @location(0) vec4<f32> {
     }
     let exposure = pfr.params.x;
     let encode = pfr.lens.y > 0.5;
-    let dq = vec2<i32>(clamp(uv * dims, vec2(0.0), dims - 1.0));
+    let dq = clamped_texel(uv * dims, dims);
     let depth0 = textureLoad(post_depth, dq, 0);
     let d0 = depth0.r;
     let r0 = select(0.0, sample_coc(depth0), pfr.post.y > 0.5 && d0 > 0.0);
@@ -100,7 +111,7 @@ fn fs_dof(i: PostOut) -> @location(0) vec4<f32> {
             let suv = uv + o / dims;
             var w = ring_weight;
             if (!same_reach) {
-                let q = vec2<i32>(clamp(suv * dims, vec2(0.0), dims - 1.0));
+                let q = clamped_texel(suv * dims, dims);
                 let depth_s = textureLoad(post_depth, q, 0);
                 let ds = depth_s.r;
                 let rs = select(0.0, sample_coc(depth_s), ds > 0.0);
