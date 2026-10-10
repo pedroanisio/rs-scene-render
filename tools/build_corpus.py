@@ -743,6 +743,15 @@ CASES += [
 FLOCK_UPRIGHT = ('<scene version="1.6"><project width="64" height="64" fps="24" duration="1"/>'
     '<composition><flock id="f" width="32" height="32" count="4" seed="2" shape="disc" orientToVelocity="false"/></composition></scene>\n')
 VALID["flock-upright"] = FLOCK_UPRIGHT
+# Two 3D mistakes that validate cannot see and the render report finds over the frames rendered: an object3D never inside
+# the camera's view ("behind" sits behind the default camera; "seen" is in front of it), and a metal with no environment
+# image to reflect. Valid documents: their findings are the render report's (crates/sr-deliver/tests/silent_3d.rs).
+VALID["object3d-off-camera"] = ('<scene version="1.1"><project width="64" height="64" fps="10" duration="1"/><composition>'
+    '<object3D id="seen" primitive="box" width="20" height="20" depth="20" x="32" y="32"/>'
+    '<object3D id="behind" primitive="sphere" radius="10" x="32" y="32" z="-1000"/></composition></scene>\n')
+VALID["metal-without-environment"] = ('<scene version="1.1"><project width="64" height="64" fps="10" duration="1"/>'
+    '<materials><material id="chrome" baseColor="#D0D0D0" metallic="1" roughness="0.15"/></materials><composition>'
+    '<object3D id="ball" primitive="sphere" radius="20" x="32" y="32" material="chrome"/></composition></scene>\n')
 WARN_CASES += [
     ("inert-i16-streak-flock", ["INERT-I16"], lambda _: FLOCK_UPRIGHT.replace(' shape="disc"', '')),
 ]

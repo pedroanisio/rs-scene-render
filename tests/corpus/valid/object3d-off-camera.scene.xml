@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- expect: valid -->
+<scene version="1.1"><project width="64" height="64" fps="10" duration="1"/><composition><object3D id="seen" primitive="box" width="20" height="20" depth="20" x="32" y="32"/><object3D id="behind" primitive="sphere" radius="10" x="32" y="32" z="-1000"/></composition></scene>

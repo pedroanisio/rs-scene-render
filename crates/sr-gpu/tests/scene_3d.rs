@@ -30,6 +30,8 @@ mod safe_audit;
 mod scene3d;
 #[path = "scene_3d/shadow_catcher_doc.rs"]
 mod shadow_catcher_doc;
+#[path = "scene_3d/silent_3d.rs"]
+mod silent_3d;
 #[path = "scene_3d/sim.rs"]
 mod sim;
 #[path = "scene_3d/text3d_tracking.rs"]
