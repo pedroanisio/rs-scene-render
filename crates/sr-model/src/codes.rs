@@ -98,6 +98,7 @@ const FIXED: &[(&str, &str, &str)] = &[
     ("P04", "rules", "An expression or condition nests brackets deeper than the supported limit of 62 levels, the depth the evaluator compiles."),
     ("P05", "rules", "Matte dependencies form a cycle through mattes or contained children, including after composition expansion."),
     ("SA01", "rules", "Text, a burned caption, or a node tagged cta or logo reaches outside the safe region its safeArea leaves, at some time of the timeline. A warning when safeArea@enforce is warn, an error when it is error. Move the content inside the region or lower enforce. Validation and encode audit every frame of a short range and at most 240 frames of a long one, and say how many they sampled."),
+    ("OUT1", "rules", "An H.264 or H.265 output has a frame of odd width or height where its pixel format halves the chroma (4:2:0: both sides; 4:2:2: the width): libx264 and libx265 refuse it when the encode starts, after the first frame is rendered. The frame is the output's width and height, else scene360's, else its layout's, else the project's. Make the size even, on the output or where it comes from; encode -o outputs are checked before rendering."),
     ("M01", "model", "Internal error: the validated document could not be converted to the typed model."),
 ];
 

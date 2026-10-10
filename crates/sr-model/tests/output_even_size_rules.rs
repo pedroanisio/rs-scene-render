@@ -24,7 +24,7 @@ const ODD: &str = r#"width="821" height="442""#;
 
 #[test]
 fn an_odd_h264_frame_in_420_is_an_error_that_says_how_to_fix_it() {
-    // the owner's case: an 821×442 project and an H.264 output with the default pixel format (yuv420p)
+    // the reported case: an 821×442 project and an H.264 output with the default pixel format (yuv420p)
     let (codes, message) = check(ODD, r#"<output id="web" path="web.mp4" codec="h264"/>"#, "");
     assert_eq!(codes, [("OUT1".to_string(), Severity::Error)], "{codes:?}");
     for words in ["web", "821", "442", "yuv420p", "even", r#"width="822""#] {
@@ -71,6 +71,7 @@ fn the_size_is_the_outputs_else_its_layouts_else_the_projects() {
     let layouts = r#"<layouts><layout id="sq" width="1081" height="1080"/><layout id="even" width="1080" height="1080"/></layouts>"#;
     assert!(out1(r#"width="1920" height="1080""#, r#"<output path="a.mp4" codec="h264" layout="sq"/>"#, layouts));
     assert!(!out1(ODD, r#"<output path="a.mp4" codec="h264" layout="even"/>"#, layouts));
-    let (_, message) = check(r#"width="1920" height="1080""#, r#"<output path="a.mp4" codec="h264" layout="sq"/>"#, layouts);
+    let (_, message) =
+        check(r#"width="1920" height="1080""#, r#"<output path="a.mp4" codec="h264" layout="sq"/>"#, layouts);
     assert!(message.contains("sq"), "the message names the layout the size comes from: {message}");
 }

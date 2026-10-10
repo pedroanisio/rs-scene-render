@@ -4,7 +4,8 @@
 * valid/kitchen-sink.scene.xml — the template with SHA-256 digests filled in;
 * valid/*.scene.xml — small documents for version and edge semantics;
 * invalid/<case>.scene.xml — one mutation of the kitchen sink per assert id
-  and per structural/asset code, headed by `<!-- expect: CODES -->`;
+  and per structural/asset code, and a document per error of the engine's own
+  rules, headed by `<!-- expect: CODES -->`;
 * manifest.json — file -> expected codes.
 
 Every document's XSD and Schematron verdict is checked against lxml
@@ -538,6 +539,11 @@ ASSET_CASES = [
     ("prg10-program-hash", ["PRG10"], lambda _: PROGRAMS.replace(PROGRAM_SHA["rect"], "0" * 64)),
     ("prg10-program-missing", ["PRG10"], lambda _: PROGRAMS.replace("../media/rect.wasm", "../media/missing.wasm")),
 ]
+# Errors of the engine's own rules (rules.rs), outside XSD and Schematron: the oracle accepts these documents.
+RULE_CASES = [
+    # an 821×442 H.264 output in yuv420p: libx264 refuses an odd 4:2:0 frame when the encode starts
+    ("out1-odd-h264-frame", ["OUT1"], lambda _: MINIMAL.replace('width="1920" height="1080" fps="30" duration="5"/>', 'width="821" height="442" fps="30" duration="1"/><output id="web" path="out/web.mp4" codec="h264"/>')),
+]
 WARN_CASES = [
     ("a03-remote", ["A03"], sub('src="../media/clip.mp4"', 'src="https://cdn.example.com/clip.mp4"')),
     ("a04-sequence-hold", ["A04"], sub('first="1" last="5"', 'first="1" last="9" missingFrame="hold"')),
@@ -818,7 +824,7 @@ def main():
             ok = False
             print(f"invalid/{name}: expected {want}, oracle says {got}: {xsd[:2]}")
         manifest["invalid"][f"{name}.scene.xml"] = expect
-    for name, expect, fn in ASSET_CASES + WARN_CASES:
+    for name, expect, fn in ASSET_CASES + RULE_CASES + WARN_CASES:
         is_warn = (name, expect, fn) in WARN_CASES
         text = fn(base)
         expect = with_small_cells(text, expect)

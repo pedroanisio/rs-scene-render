@@ -569,6 +569,9 @@
     "openvdb-format.scene.xml": [
       "S06"
     ],
+    "out1-odd-h264-frame.scene.xml": [
+      "OUT1"
+    ],
     "p3d1.scene.xml": [
       "P3D1"
     ],

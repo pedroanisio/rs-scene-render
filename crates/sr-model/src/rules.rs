@@ -2665,6 +2665,93 @@ pub fn validate(doc: &Document<'_>, out: &mut Vec<Diagnostic>) {
     symbol_cycles(root, out);
     matte_cycles(root, out);
     expression_depths(root, out);
+    odd_output_sizes(root, out);
+}
+
+/// The axes (width, height) along which an output's encoder needs an even frame size, from its codec and its pixel
+/// format (FFmpeg's names). libx264 and libx265 refuse an odd size along an axis that chroma subsampling halves: both
+/// for 4:2:0, the width for 4:2:2, neither for 4:4:4 and RGB. Measured with FFmpeg 7.1 (2026-10-10) by piping raw
+/// frames, as sr-media does, to each encoder at 256×144, 257×144, 256×145 and 257×145: libx264 ("width not divisible
+/// by 2") and libx265 ("Picture width must be an integer multiple of the specified chroma subsampling") in yuv420p,
+/// yuv420p10le, nv12, yuv422p and yuv422p10le; the other 4:2:0 and 4:2:2 names follow from their subsampling. libvpx-vp9,
+/// ffv1, prores_ks, dnxhd, libwebp, mjpeg, libaom-av1 and librav1e encode all four sizes; SVT-AV1 does not, and
+/// sr-media gives an odd AV1 frame to libaom.
+pub fn even_axes(codec: &str, pixel_format: &str) -> [bool; 2] {
+    if !matches!(codec, "h264" | "h265") {
+        return [false, false];
+    }
+    let f = pixel_format.trim();
+    let any = |prefixes: &[&str]| prefixes.iter().any(|p| f.starts_with(p));
+    if any(&["yuv420p", "yuvj420p", "yuva420p", "nv12", "nv21", "p010", "p012", "p016"]) {
+        [true, true]
+    } else if any(&[
+        "yuv422p", "yuvj422p", "yuva422p", "nv16", "nv20", "p210", "p212", "p216", "yuyv422", "uyvy422", "yvyu422",
+        "y210", "y212",
+    ]) {
+        [true, false]
+    } else {
+        [false, false]
+    }
+}
+
+/// OUT1's message for a frame of `size` that is odd along an axis [`even_axes`] needs even, else none. `source` says
+/// where the size comes from ("the project", "layout \"square\"", "the output").
+pub fn odd_frame_message(codec: &str, pixel_format: &str, size: [u64; 2], source: &str) -> Option<String> {
+    let even = even_axes(codec, pixel_format);
+    let odd = [even[0] && size[0] % 2 == 1, even[1] && size[1] % 2 == 1];
+    let sides = match odd {
+        [true, true] => "width and height",
+        [true, false] => "width",
+        [false, true] => "height",
+        [false, false] => return None,
+    };
+    let name = if codec == "h264" { "H.264" } else { "H.265" };
+    let chroma = if even[1] { "4:2:0" } else { "4:2:2" };
+    let fixed = [0, 1].map(|i| size[i] + u64::from(odd[i]));
+    let elsewhere = if source == "the output" { String::new() } else { format!(", or give {source} an even size") };
+    Some(format!(
+        "{name} in {pixel_format} ({chroma} chroma) needs an even {sides}, and the frame is {}×{} ({source}): the encoder \
+         refuses it when the encode starts, after the first frame is rendered. Set width=\"{}\" height=\"{}\" on the \
+         output{elsewhere}; a 4:4:4 pixelFormat takes odd sizes, but many players do not decode it.",
+        size[0], size[1], fixed[0], fixed[1]
+    ))
+}
+
+/// OUT1: an output whose frame is odd along an axis its encoder needs even ([`even_axes`]). Per axis, the frame is the
+/// output's own size, else scene360's, else its layout's, else the project's, as delivery takes it.
+fn odd_output_sizes(root: Node, out: &mut Vec<Diagnostic>) {
+    let Some(project) = kids(root, "project").next() else { return };
+    let int = |n: Node, k: &str| n.attribute(k).and_then(|v| v.trim().parse::<u64>().ok());
+    let s360 = kids(root, "scene360").next();
+    for o in kids(root, "output") {
+        let Some(codec) = o.attribute("codec") else { continue };
+        let pixel_format = o.attribute("pixelFormat").map_or("yuv420p", str::trim);
+        let layout = o.attribute("layout").and_then(|id| {
+            kids(root, "layouts").flat_map(|ls| kids(ls, "layout")).find(|l| l.attribute("id") == Some(id))
+        });
+        // (size, where it comes from); scene360 sizes default to 3840×1920
+        let axis = |k: &str, default360: u64| -> Option<(u64, String)> {
+            if let Some(v) = int(o, k) {
+                return Some((v, "the output".into()));
+            }
+            if let Some(s) = s360 {
+                return Some((int(s, k).unwrap_or(default360), "scene360".into()));
+            }
+            if let Some(l) = layout {
+                return Some((int(l, k)?, format!("layout \"{}\"", l.attribute("id").unwrap_or_default())));
+            }
+            Some((int(project, k)?, "the project".into()))
+        };
+        let (Some((w, from_w)), Some((h, from_h))) = (axis("width", 3840), axis("height", 1920)) else { continue };
+        let source = if from_w == from_h { from_w } else { format!("{from_w} and {from_h}") };
+        if let Some(m) = odd_frame_message(codec, pixel_format, [w, h], &source) {
+            let m = match o.attribute("id") {
+                Some(id) => format!("output \"{id}\": {m}"),
+                None => m,
+            };
+            out.push(Diagnostic::error("OUT1", m, Loc::of(o), element_path(o)));
+        }
+    }
 }
 
 /// Nodes whose matte edges participate in a cycle through mattes or contained children.

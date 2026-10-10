@@ -495,8 +495,10 @@ impl EncodeSpec {
             vec!["-hide_banner".into(), "-nostdin".into(), "-y".into(), "-v".into(), "error".into()];
         let s = |a: &mut Vec<String>, xs: &[&str]| a.extend(xs.iter().map(|x| x.to_string()));
         let mut encoder = choose_encoder(self.codec, self.hardware)?;
-        // SVT-AV1 needs frames of at least 64×64
-        if encoder == "libsvtav1" && (self.width < 64 || self.height < 64) && working_encoder("libaom-av1") {
+        // SVT-AV1 needs frames of at least 64×64, and an even width and height in 4:2:0, the only chroma it encodes
+        // ("Source Width must be even for YUV_420 colorspace", FFmpeg 7.1); libaom takes both
+        let svt_refuses = self.width < 64 || self.height < 64 || self.width % 2 == 1 || self.height % 2 == 1;
+        if encoder == "libsvtav1" && svt_refuses && working_encoder("libaom-av1") {
             encoder = "libaom-av1".into();
         }
         if encoder == "libsvtav1" && self.pass.is_some() && !svt_two_pass_available() {

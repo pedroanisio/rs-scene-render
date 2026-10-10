@@ -674,6 +674,30 @@ impl Drop for Scratch {
 }
 
 /// The evaluation options an output is rendered with.
+/// The frame an output delivers, and where its size comes from (for messages): the output's width and height, else
+/// scene360's (360 video renders at the scene360 size unless the output asks for another), else the layout's (a layout
+/// that crops or fits delivers at its own frame size, one that reflows renders at it), else the project's.
+fn output_frame(p: &sr_eval::Program, o: &m::Output) -> ([f64; 2], String) {
+    let frame = p
+        .scene
+        .scene360
+        .as_ref()
+        .map(|s| [s.width as f64, s.height as f64])
+        .or(p.reframe.map(|r| r.size))
+        .unwrap_or(p.size);
+    let size = [o.width.map(|w| w as f64).unwrap_or(frame[0]), o.height.map(|h| h as f64).unwrap_or(frame[1])];
+    let source = if o.width.is_some() && o.height.is_some() {
+        "the output".to_string()
+    } else if p.scene.scene360.is_some() {
+        "scene360".into()
+    } else if let Some(l) = &o.layout {
+        format!("layout \"{l}\"")
+    } else {
+        "the project".into()
+    };
+    (size, source)
+}
+
 fn eval_options(output: &m::Output, opts: &Options) -> EvalOptions {
     EvalOptions {
         variant: output.variant.clone(),
@@ -748,6 +772,17 @@ fn run_delivery(
     // audio, overlay and captions. Explicit segments retain their independent output clock.
     let effective_output = m::Output { start, end: Some(end), ..output.clone() };
     let output = &effective_output;
+    // OUT1 before anything is rendered: validate checks the document's outputs, not an ad-hoc one (encode -o)
+    let (frame, source) = output_frame(p0, output);
+    if let Some(message) = sr_model::rules::odd_frame_message(
+        output.codec.as_str(),
+        &output.pixel_format,
+        frame.map(|v| v.round().max(1.0) as u64),
+        &source,
+    ) {
+        let d = sr_model::Diagnostic::error("OUT1", message, sr_model::Loc::default(), "/scene/output");
+        return Err(DeliverError::Document(sr_model::Report { diagnostics: vec![d] }));
+    }
     *report = Report {
         path: resolve(&base, &output.path),
         range: [start, end],
@@ -934,20 +969,8 @@ fn run_delivery(
             device_type: format!("{:?}", gpu.info.device_type),
             software: gpu.is_software(),
         });
-        // 360 video renders at the scene360 size unless the output asks for another
-        // a layout that crops or fits delivers at its own frame size
-        let frame = p
-            .scene
-            .scene360
-            .as_ref()
-            .map(|s| [s.width as f64, s.height as f64])
-            .or(p.reframe.map(|r| r.size))
-            .unwrap_or(p.size);
-        let size = sr_gpu::output::frame_size(
-            [output.width.map(|w| w as f64).unwrap_or(frame[0]), output.height.map(|h| h as f64).unwrap_or(frame[1])],
-            &gpu.device.limits(),
-        )
-        .map_err(DeliverError::Invalid)?;
+        let size = sr_gpu::output::frame_size(output_frame(p, output).0, &gpu.device.limits())
+            .map_err(DeliverError::Invalid)?;
         report.size = size;
         let format = input_format(output, codec);
         let exr = codec == Codec::ExrSequence;
