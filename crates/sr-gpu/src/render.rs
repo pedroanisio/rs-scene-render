@@ -73,6 +73,13 @@ pub struct VoxelSurfaceStat {
 pub struct RenderStats {
     /// Draw calls.
     pub draws: usize,
+    /// Earlier frames rendered before this one to bring stateful effects to it (a seek; SREP 68), and their draw calls.
+    pub replayed_frames: usize,
+    pub replay_draws: usize,
+    pub replay_fx_passes: usize,
+    /// Saved states of stateful effects (SREP 68 checkpoints on disk) loaded for a seek, and seeks that found none.
+    pub checkpoint_hits: usize,
+    pub checkpoint_misses: usize,
     /// Render targets rendered (frame, offscreens, mattes, generators).
     pub targets: usize,
     /// Offscreens and mattes reused from the previous frame.
@@ -432,6 +439,12 @@ pub struct Renderer {
     pub audio: Option<Arc<crate::shader::AudioSignals>>,
     /// Whether the scene's shaders keep persistent ISF buffers (decided on the first render).
     persistent_isf: Option<bool>,
+    /// The ids of the stateful (persistent ISF) shader effects, and whether a replay may draw only their nodes (SREP 68).
+    persistent_ids: Option<(std::collections::HashSet<String>, bool)>,
+    /// Where stateful effects' states are saved between processes (SREP 68 checkpoints; `SR_CHECKPOINT_DIR`), and the
+    /// store for this document once opened.
+    checkpoint_dir: Option<std::path::PathBuf>,
+    checkpoint_store: Option<Result<crate::checkpoints::Store, String>>,
     /// Tiled vector paths reused across frames.
     tiles: sr_vector::tile::TileCache,
     /// The frame rendered last (ISF feedback replays on a seek).
@@ -1020,6 +1033,9 @@ impl Renderer {
             captions_off: false,
             audio: None,
             persistent_isf: None,
+            persistent_ids: None,
+            checkpoint_dir: std::env::var_os("SR_CHECKPOINT_DIR").filter(|v| !v.is_empty()).map(Into::into),
+            checkpoint_store: None,
             tiles: Default::default(),
             last_frame: None,
             frame_bufs: None,
@@ -3263,22 +3279,109 @@ impl Renderer {
             (f.num as f64 / f.den.max(1) as f64).max(1e-6)
         };
         let interval = fps.round().max(1.0) as i64;
+        let (mut replayed, mut replay_draws, mut replay_fx) = (0usize, 0usize, 0usize);
+        let (mut hits, mut misses) = (0usize, 0usize);
         if persistent && self.last_frame != Some(g.frame) && self.last_frame != Some(g.frame - 1) {
             if let Some(pv) = provider.as_mut() {
-                let start = self.fx.restore(g.frame - 1);
+                let base = Self::base_dir(p);
+                let (ids, local) = self.persistent_ids.get_or_insert_with(|| {
+                    let ids = crate::shader::persistent_effects(p, &base);
+                    let local = node_local_replay(p, &ids);
+                    (ids, local)
+                });
+                let (ids, local) = (ids.clone(), *local);
+                let mut start = self.fx.restore(g.frame - 1);
+                // a state saved on disk, by this process or another, nearer than the one in memory
+                if let Some(store) = self.store(p) {
+                    let nearest = (g.frame - 1).div_euclid(interval) * interval;
+                    let found =
+                        (start..=nearest).rev().step_by(interval as usize).find_map(|f| Some((f, store.load(f)?)));
+                    match found {
+                        Some((f, pairs)) => {
+                            self.install_states(f, pairs);
+                            start = f + 1;
+                            hits += 1;
+                        }
+                        None => misses += 1,
+                    }
+                }
                 for k in start..g.frame {
                     let gk = pv(k as f64 / fps);
-                    let _ = self.render_graph(&gk, p, Some(&mut **pv));
+                    // SREP 68: a stateful pair's state depends on its node alone, so the frames before a seek draw only
+                    // the nodes of stateful effects (with their subtrees and ancestors), not the whole scene
+                    let gk = if local { only_stateful(&gk, &ids) } else { gk };
+                    let f = self.render_graph(&gk, p, Some(&mut **pv));
                     self.fx.checkpoint(k, interval);
+                    self.save_states(p, k, interval);
+                    replayed += 1;
+                    replay_draws += f.stats.draws;
+                    replay_fx += f.stats.fx_passes;
                 }
             }
         }
-        let out = self.render_graph(g, p, provider);
+        let mut out = self.render_graph(g, p, provider);
+        out.stats.replayed_frames = replayed;
+        out.stats.replay_draws = replay_draws;
+        out.stats.replay_fx_passes = replay_fx;
+        out.stats.checkpoint_hits = hits;
+        out.stats.checkpoint_misses = misses;
         self.last_frame = Some(g.frame);
         if persistent {
             self.fx.checkpoint(g.frame, interval);
+            self.save_states(p, g.frame, interval);
         }
         out
+    }
+
+    /// Sets (or clears) the directory of SREP 68 checkpoints on disk; `SR_CHECKPOINT_DIR` sets it by default.
+    pub fn set_checkpoint_dir(&mut self, dir: Option<std::path::PathBuf>) {
+        self.checkpoint_dir = dir;
+        self.checkpoint_store = None;
+    }
+
+    /// The checkpoint store of document `p`, when a directory is set and it opens (a failure is reported once).
+    fn store(&mut self, p: &Program) -> Option<&crate::checkpoints::Store> {
+        let dir = self.checkpoint_dir.clone()?;
+        let store = self.checkpoint_store.get_or_insert_with(|| {
+            crate::checkpoints::Store::new(&dir, p).map_err(|e| format!("{}: {e}", dir.display()))
+        });
+        store.as_ref().ok()
+    }
+
+    /// Saves the states of the stateful effects after frame `frame` when it is a checkpoint frame and not saved yet.
+    fn save_states(&mut self, p: &Program, frame: i64, interval: i64) {
+        if frame % interval.max(1) != 0 || self.store(p).is_none_or(|s| s.has(frame)) {
+            return;
+        }
+        let mut pairs: Vec<crate::checkpoints::PairState> = Vec::new();
+        let mut entries: Vec<_> = self.fx.feedback.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        for (key, fb) in entries {
+            let mut targets: Vec<_> = fb.targets.iter().map(|(n, t)| (n.clone(), t.size, self.read(t))).collect();
+            targets.sort_by(|a, b| a.0.cmp(&b.0));
+            pairs.push(crate::checkpoints::PairState { key, frame: fb.frame, steps: fb.steps, targets });
+        }
+        if let Some(store) = self.store(p) {
+            // a checkpoint is an optimisation: a write that fails leaves the next seek to replay
+            let _ = store.save(frame, &pairs);
+        }
+    }
+
+    /// Makes the states loaded from a checkpoint of frame `frame` the current ones.
+    fn install_states(&mut self, frame: i64, pairs: Vec<crate::checkpoints::PairState>) {
+        let mut feedback = HashMap::new();
+        for s in pairs {
+            let targets = s
+                .targets
+                .into_iter()
+                .map(|(name, size, px)| {
+                    let t = Arc::new(resources::create(&self.gpu.device, &self.bgl1, size, 1, "checkpoint"));
+                    (name, self.fx.upload_texels(t, &px))
+                })
+                .collect();
+            feedback.insert(s.key, crate::shader::Feedback { frame: s.frame, targets, steps: s.steps });
+        }
+        self.fx.install(frame, feedback);
     }
 
     fn render_graph(
@@ -4298,6 +4401,53 @@ fn project_25(
     let wv = c.w.max(1e-3);
     let (w, hh) = (size[0] as f64, size[1] as f64);
     ([c.x, c.y, 0.0, c.w], [((c.x / wv) as f64 * 0.5 + 0.5) * w, (0.5 - (c.y / wv) as f64 * 0.5) * hh])
+}
+
+/// Whether the frames before a seek may draw only the nodes of the stateful effects (SREP 68, Semantics 2): not when a
+/// stateful effect names another node in a `<param>` (it may read that node as an input), which then needs the scene.
+fn node_local_replay(p: &Program, ids: &std::collections::HashSet<String>) -> bool {
+    let Some(fx) = p.scene.effects.as_ref() else { return true };
+    let names_a_node = |v: &str| p.nodes.iter().any(|n| &*n.id == v);
+    !fx.effects.iter().filter(|e| ids.contains(&*e.id)).any(|e| {
+        sr_model::element::children(e as &dyn Element)
+            .into_iter()
+            .filter(|c| c.element_name() == "param")
+            .any(|c| matches!(c.get_attr("value"), Some(AttrValue::Str(v)) if names_a_node(&v)))
+    })
+}
+
+/// `g` with every node hidden except the nodes of stateful effects, their subtrees and their ancestors (a matte source
+/// keeps its own flag: it is drawn when its user is).
+fn only_stateful(g: &FrameGraph, ids: &std::collections::HashSet<String>) -> FrameGraph {
+    let stateful: Vec<bool> =
+        g.nodes.iter().map(|n| render_fx::effect_ids(&*n.elem).iter().any(|id| ids.contains(id))).collect();
+    let mut keep = vec![false; g.nodes.len()];
+    for i in 0..g.nodes.len() {
+        // in a stateful node's subtree
+        let mut k = Some(i as u32);
+        while let Some(j) = k {
+            if stateful[j as usize] {
+                keep[i] = true;
+                break;
+            }
+            k = g.nodes[j as usize].parent;
+        }
+        // an ancestor of a stateful node
+        if stateful[i] {
+            let mut k = g.nodes[i].parent;
+            while let Some(j) = k {
+                keep[j as usize] = true;
+                k = g.nodes[j as usize].parent;
+            }
+        }
+    }
+    let mut out = g.clone();
+    for (n, keep) in out.nodes.iter_mut().zip(keep) {
+        if !keep && !n.is_matte {
+            n.draw = false;
+        }
+    }
+    out
 }
 
 #[cfg(test)]

@@ -765,4 +765,9 @@
       <sch:assert id="SRT1" test="number(@low) &lt;= number(@high) or not(@low) or not(@high)">segmented-sort needs low &lt;= high.</sch:assert>
     </sch:rule>
   </sch:pattern>
+  <sch:pattern id="p-srep68">
+    <sch:rule context="effects/effect[@stepsPerFrame or @prewarm]">
+      <sch:assert id="STP1" test="@type='shader'">stepsPerFrame and prewarm apply to shader effects and stepping programs (SREP 69) only.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
 </sch:schema>

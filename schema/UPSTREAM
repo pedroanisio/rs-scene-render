@@ -36,3 +36,7 @@ of the model generator of sr-model:
 - the union of tonemap/@reference is named densityReferenceType;
 - its keyword is named densityReferenceKeyword.
 Every document valid under the SREP is valid here.
+Added here ahead of an sr-core release: SREP 68 (accepted 2026-10-09), effectType/@stepsPerFrame and @prewarm, and the
+Schematron pattern p-srep68 with STP1, with the syntax of srep/srep-0068.md in sr-core branch srep/drafts-2026-10. The
+pattern's context leaves out program[@mode='step'] (SREP 69, not in this schema). A vendoring of the sr-core release that
+contains SREP 68 replaces these.

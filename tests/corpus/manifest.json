@@ -1030,6 +1030,9 @@
     "srt1-low-high.scene.xml": [
       "SRT1"
     ],
+    "stp1-not-a-shader.scene.xml": [
+      "STP1"
+    ],
     "txt2.scene.xml": [
       "TXT2"
     ],

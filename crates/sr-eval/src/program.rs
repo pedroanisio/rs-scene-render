@@ -577,6 +577,8 @@ pub struct Program {
     pub safe_area_id: Option<String>,
     /// Base directory of each document (0 = main, then includes).
     pub base_dirs: Vec<PathBuf>,
+    /// SHA-256 of the bytes of each document (the main one first, then each include as it was loaded).
+    pub source_digests: Vec<[u8; 32]>,
     /// Warnings.
     pub warnings: Vec<Diagnostic>,
     /// Tracking data by id.
@@ -1151,6 +1153,8 @@ fn template(
 // ------------------------------------------------------------------ builder
 
 struct DocCtx {
+    /// SHA-256 of the document's bytes.
+    digest: [u8; 32],
     scene: Arc<m::Scene>,
     ns: Arc<str>,
     base: PathBuf,
@@ -2139,6 +2143,7 @@ impl Builder {
                 return;
             }
         };
+        let digest = doc.source_sha256();
         let mut sub_d = Vec::new();
         let mut sub_w = Vec::new();
         let t = template(&doc, &EvalOptions::default(), &mut sub_d, &mut sub_w);
@@ -2174,6 +2179,7 @@ impl Builder {
         let (markers, grid) = markers_of(&t.scene);
         let doc_ix = self.docs.len() as u16;
         self.docs.push(DocCtx {
+            digest,
             tokens: tokens_of(&t.scene),
             scene: Arc::new(t.scene),
             ns: ns.clone(),
@@ -3310,6 +3316,7 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
     zero_opacity_sources(&scene, &mut warnings);
     let mut b = Builder {
         docs: vec![DocCtx {
+            digest: doc.source_sha256(),
             tokens: tokens_of(&scene),
             scene: scene.clone(),
             ns: "".into(),
@@ -3465,6 +3472,7 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
     let safe_enforce =
         resolved_safe_area.as_ref().map(|a| crate::safe_area::SafeEnforce::of(a.enforce)).unwrap_or_default();
     let base_dirs = b.docs.iter().map(|d| d.base.clone()).collect();
+    let source_digests = b.docs.iter().map(|d| d.digest).collect();
     Ok(Program {
         identity: Arc::new(()),
         mesh_sequence_cache: Default::default(),
@@ -3473,6 +3481,7 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
         stroke_fonts: Default::default(),
         voxel_models: Default::default(),
         base_dirs,
+        source_digests,
         safe_area,
         safe_enforce,
         safe_area_id: resolved_safe_area.as_ref().map(|a| a.id.clone()),
