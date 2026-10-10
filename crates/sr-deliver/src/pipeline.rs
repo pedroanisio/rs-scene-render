@@ -144,6 +144,14 @@ pub struct Report {
     pub checkpoint_hits: usize,
     pub checkpoint_misses: usize,
     pub iterate_steps: std::collections::BTreeMap<String, [u64; 2]>,
+    /// Each `object3D` drawn as a mesh: the first and last times it was drawn, and whether it was inside the camera's
+    /// view at any of them (the render report's 3D-OFF-CAMERA).
+    #[serde(skip)]
+    pub objects3d_seen: std::collections::BTreeMap<String, ([f64; 2], bool)>,
+    /// Each `object3D` drawn with a metallic material in a 3D pass with no environment image: its highest metallic and
+    /// the first and last times (the render report's 3D-METAL-NO-ENVIRONMENT).
+    #[serde(skip)]
+    pub metal_without_environment: std::collections::BTreeMap<String, (f32, [f64; 2])>,
     /// Accessibility findings (flash analysis, text contrast, required captions).
     pub accessibility: Vec<String>,
     /// The finding that fails delivery (a check set to `error`).
@@ -434,6 +442,7 @@ impl Video<'_> {
                 report.decode_wait_seconds += frame.stats.decode_wait;
                 report.vector_seconds += frame.stats.vector_seconds;
                 stateful(report, &frame.stats);
+                seen_in_3d(report, &frame.stats, t);
                 let (picture, placement) = self.picture(&frame, ft.as_ref(), &mut unsupported)?;
                 if checks.contrast_on() {
                     if let Some(o) = self.overlay.as_mut() {
@@ -494,6 +503,7 @@ impl Video<'_> {
     /// `judge` has observed every frame of `times`, in order; text the inline probe could not reach is
     /// measured here, then the verdicts are given.
     fn judge(&mut self, mut judge: Judge, times: &[f64], report: &mut Report) {
+        three_d_findings(report);
         let p = self.ev.program();
         let checks = Checks::of(p);
         // Probe over the whole span of maximum visibility. A middle-frame sample can miss low
@@ -1401,6 +1411,12 @@ fn run_delivery(
                     let e = report.iterate_steps.entry(who).or_insert([lo, hi]);
                     *e = [e[0].min(lo), e[1].max(hi)];
                 }
+                for (id, seen) in part.objects3d_seen {
+                    merge_seen(&mut report.objects3d_seen, id, seen);
+                }
+                for (id, metal) in part.metal_without_environment {
+                    merge_metal(&mut report.metal_without_environment, id, metal);
+                }
                 unsupported.extend(part.unsupported);
                 if report.encoder.is_empty() {
                     report.encoder = encoder;
@@ -1921,6 +1937,66 @@ fn write_sidecars(
         files.push(path);
     }
     Ok(files)
+}
+
+/// What a frame's 3D pass measured for the render report (`t` in composition seconds): which objects it drew and whether
+/// they were in the camera's view, and its metals without an environment.
+fn seen_in_3d(report: &mut Report, stats: &sr_gpu::RenderStats, t: f64) {
+    for (id, inside) in &stats.objects3d_in_view {
+        merge_seen(&mut report.objects3d_seen, id.clone(), ([t, t], *inside));
+    }
+    for (id, metallic) in &stats.metal_without_environment {
+        merge_metal(&mut report.metal_without_environment, id.clone(), (*metallic, [t, t]));
+    }
+}
+
+fn merge_seen(
+    into: &mut std::collections::BTreeMap<String, ([f64; 2], bool)>,
+    id: String,
+    (at, inside): ([f64; 2], bool),
+) {
+    let e = into.entry(id).or_insert((at, inside));
+    *e = ([e.0[0].min(at[0]), e.0[1].max(at[1])], e.1 || inside);
+}
+
+fn merge_metal(into: &mut std::collections::BTreeMap<String, (f32, [f64; 2])>, id: String, (m, at): (f32, [f64; 2])) {
+    let e = into.entry(id).or_insert((m, at));
+    *e = (e.0.max(m), [e.1[0].min(at[0]), e.1[1].max(at[1])]);
+}
+
+/// The render report's 3D findings, from what the frames' 3D passes measured: an `object3D` never inside the camera's
+/// view in any frame it was drawn in, and one drawn with a metallic material where the pass had no environment image.
+/// Warnings, with the same text among the delivery's warnings.
+fn three_d_findings(report: &mut Report) {
+    use crate::render_report::{code, Finding};
+    let mut found = Vec::new();
+    for (id, ([from, to], inside)) in &report.objects3d_seen {
+        if !inside {
+            let msg = format!(
+                "object3D {id} is drawn from {from:.3} s to {to:.3} s and is never inside the camera's view: its bounds \
+                 lie wholly behind, beside or beyond the camera's frustum in every frame rendered, so only its shadows \
+                 or reflections can show"
+            );
+            found.push(
+                Finding::node(code::engine("3D-OFF-CAMERA"), sr_model::Severity::Warning, id, msg).at_time(*from, *to),
+            );
+        }
+    }
+    for (id, (metallic, [from, to])) in &report.metal_without_environment {
+        let limit = sr_gpu::three::METALLIC_NEEDS_ENVIRONMENT;
+        let msg = format!(
+            "object3D {id} has a metallic material ({metallic:.2}, at least {limit}) and its 3D pass has no environment \
+             image: a metal shows what it reflects, and with nothing to reflect it shades as a uniform colour (flat \
+             grey under the default lights). Add a dome light with an environment image, or lower metallic below {limit}"
+        );
+        found.push(
+            Finding::node(code::engine("3D-METAL-NO-ENVIRONMENT"), sr_model::Severity::Warning, id, msg)
+                .at_time(*from, *to)
+                .measuring(*metallic as f64, Some(limit as f64), "metallic"),
+        );
+    }
+    report.warnings.extend(found.iter().map(|f| format!("{}: {}", f.code, f.message)));
+    report.findings.extend(found);
 }
 
 /// What a frame's stateful effects add to the report (SREPs 67 and 68).

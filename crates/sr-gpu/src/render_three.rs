@@ -2933,8 +2933,10 @@ impl Renderer {
                 }
             } else {
                 let clock = std::time::Instant::now();
+                let first = draws.len();
                 self.object_draws(plan, ctx, j, opacity.min(1.0), &mut draws, &mut splats);
                 plan.stats.draw_prep_seconds += clock.elapsed().as_secs_f64();
+                note_view_and_environment(plan, &g.nodes[j], &draws[first..], &cam, env.is_some());
             }
         }
         if draws.is_empty()
@@ -3179,6 +3181,24 @@ fn visible3(g: &FrameGraph, j: usize) -> bool {
 
 /// Why a pass with foam mixed into the water's albedo cannot be drawn without the path tracer: the camera is not path traced, or it
 /// asks for it and the scene is over a limit of the path tracer (`limit`), which is then the reason to act on.
+/// What the render report needs of an `object3D`'s mesh draws this frame: whether any reaches into the camera's view,
+/// and, in a pass without an environment image, its most metallic draw when that is at least
+/// [`crate::three::METALLIC_NEEDS_ENVIRONMENT`]. Only measured: nothing here changes what is drawn.
+fn note_view_and_environment(plan: &mut Plan, n: &FrameNode, draws: &[Draw3], cam: &CameraView, environment: bool) {
+    if n.kind != "object3D" || draws.is_empty() {
+        return;
+    }
+    let view_proj = cam.view_proj();
+    plan.stats.objects3d_in_view.push((n.id.to_string(), draws.iter().any(|d| d.in_view(view_proj))));
+    if environment {
+        return;
+    }
+    let most = draws.iter().filter_map(Draw3::metallic).fold(f32::NEG_INFINITY, f32::max);
+    if most >= crate::three::METALLIC_NEEDS_ENVIRONMENT {
+        plan.stats.metal_without_environment.push((n.id.to_string(), most));
+    }
+}
+
 fn foam_needs_the_path_tracer(id: &str, camera_asks: bool, limit: Option<&str>) -> String {
     match (camera_asks, limit) {
         (true, Some(limit)) => format!(

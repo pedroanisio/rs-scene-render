@@ -115,6 +115,12 @@ pub struct RenderStats {
     pub subframes: usize,
     /// 3D mesh draws.
     pub objects3d: usize,
+    /// The `object3D` nodes drawn as meshes this frame, and whether any of their draws reaches into the camera's view
+    /// (their bounds against its frustum). For the render report; nothing here changes the picture.
+    pub objects3d_in_view: Vec<(String, bool)>,
+    /// The `object3D` nodes drawn this frame, in a 3D pass with no environment image, with a material at least
+    /// [`crate::three::METALLIC_NEEDS_ENVIRONMENT`] metallic: the most metallic of their draws. For the render report.
+    pub metal_without_environment: Vec<(String, f32)>,
     /// 3D triangles drawn (all instances).
     pub triangles: u64,
     /// Gaussian splats drawn.

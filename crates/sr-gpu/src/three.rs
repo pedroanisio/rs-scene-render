@@ -151,7 +151,58 @@ impl Draw3 {
     pub fn mesh_triangles(&self) -> u64 {
         self.mesh.mesh().count as u64 / 3
     }
+
+    /// Whether the mesh's bounds, placed by the draw's model matrix, reach into the clip volume of `view_proj`
+    /// ([`box_in_view`]).
+    pub fn in_view(&self, view_proj: Mat4) -> bool {
+        box_in_view(view_proj * self.model, self.mesh.bounds())
+    }
+
+    /// The metallic the draw shades with: the material's factor, times the mean blue channel of its
+    /// metallic-roughness map when it has one (at most 4,096 texels sampled); none for an unlit material, which
+    /// reflects nothing, and for a shadow catcher, which draws no colour of its own.
+    pub fn metallic(&self) -> Option<f32> {
+        if self.material.unlit || self.shadow_catcher {
+            return None;
+        }
+        let factor = self.material.metallic.clamp(0.0, 1.0);
+        let Some(map) = &self.maps[2] else { return Some(factor) };
+        let texels = map.rgba.len() / 4;
+        if texels == 0 {
+            return Some(factor);
+        }
+        let step = texels.div_ceil(4096);
+        let (sum, n) =
+            (0..texels).step_by(step).fold((0u64, 0u64), |(s, n), k| (s + map.rgba[4 * k + 2] as u64, n + 1));
+        Some(factor * sum as f32 / (255.0 * n as f32))
+    }
 }
+
+/// Whether a box, its eight corners mapped to clip space by `to_clip`, reaches into the clip volume (reverse-Z: depth
+/// from 0 at the far plane to w at the near one): false only when every corner lies beyond the same plane of the volume.
+/// This is the usual conservative frustum test: a box that misses the volume near one of its edges still counts as in.
+pub fn box_in_view(to_clip: Mat4, (lo, hi): (Vec3, Vec3)) -> bool {
+    let corners: [glam::Vec4; 8] = std::array::from_fn(|k| {
+        let pick = |bit: usize, a: f32, b: f32| if k & bit == 0 { a } else { b };
+        to_clip * Vec3::new(pick(1, lo.x, hi.x), pick(2, lo.y, hi.y), pick(4, lo.z, hi.z)).extend(1.0)
+    });
+    let beyond = |plane: fn(glam::Vec4) -> bool| corners.iter().all(|c| plane(*c));
+    !(beyond(|c| c.x < -c.w)
+        || beyond(|c| c.x > c.w)
+        || beyond(|c| c.y < -c.w)
+        || beyond(|c| c.y > c.w)
+        || beyond(|c| c.z < 0.0)
+        || beyond(|c| c.z > c.w))
+}
+
+/// The metallic at and above which a draw is reported when its 3D pass has no environment image. In this renderer's
+/// shading (three.wgsl) a surface's diffuse response is albedo · (1 − metallic), and its specular reflectance at normal
+/// incidence is f0 = mix(0.04, albedo, metallic) at the default ior of 1.5. The diffuse part shows the form under any
+/// light; the specular part shows only what there is to reflect: a uniform colour from ambient light or from a dome
+/// without an image, and highlights from punctual lights. The two parts are equal at metallic = (a − 0.04) / (2a − 0.04)
+/// for an albedo a: 0.44 at a = 0.2, 0.48 at 0.5, 0.49 at 1. From 0.5 the reflection outweighs the diffuse response
+/// whatever the albedo, so the surface reads mostly as the environment it does not have.
+pub const METALLIC_NEEDS_ENVIRONMENT: f32 = 0.5;
 
 /// Splats one storage binding of the device holds: 64 bytes each, 192 with spherical harmonics.
 pub fn splat_capacity(limits: &wgpu::Limits, sh: bool) -> u64 {
@@ -2888,6 +2939,21 @@ pub fn sort_src() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_box_is_out_of_view_only_wholly_beyond_one_plane() {
+        use super::*;
+        let cam = sr_3d::camera::resolve(&sr_3d::camera::CameraParams::default(), 128.0, 128.0);
+        let vp = cam.view_proj();
+        let cube = |c: Vec3, r: f32| (c - Vec3::splat(r), c + Vec3::splat(r));
+        assert!(box_in_view(vp, cube(Vec3::new(64.0, 64.0, 0.0), 10.0)), "at the frame's centre");
+        assert!(!box_in_view(vp, cube(Vec3::new(64.0, 64.0, -1000.0), 10.0)), "behind the camera");
+        assert!(!box_in_view(vp, cube(Vec3::new(5000.0, 64.0, 0.0), 10.0)), "far to the right");
+        assert!(!box_in_view(vp, cube(Vec3::new(64.0, 64.0, 20000.0), 10.0)), "beyond the far plane");
+        // straddling the right edge of the frame, and around the camera itself
+        assert!(box_in_view(vp, cube(Vec3::new(130.0, 64.0, 0.0), 10.0)));
+        assert!(box_in_view(vp, cube(cam.eye, 50.0)));
+    }
+
     #[test]
     fn instance_object_admission_is_aligned_bounded_and_transactional() {
         use super::*;
