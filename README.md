@@ -22,7 +22,7 @@ target/release/scene-render resolve promo.scene.xml                      # make 
 target/release/scene-render explain C21
 ```
 
-Contents: [document model](#document-model) · [evaluation](#evaluation) · [GPU compositor](#gpu-compositor) · [media and delivery](#media-and-delivery) · [vector graphics, deformation and rigging](#vector-graphics-deformation-and-rigging) · [typography and data graphics](#typography-and-data-graphics) · [effects, transitions and colour finishing](#effects-transitions-and-colour-finishing) · [3D rendering and 360 video](#3d-rendering-and-360-video) · [simulation and accessibility](#simulation-and-accessibility) · [2D simulations, clay, lighting and path tracing](#2d-simulations-clay-lighting-and-path-tracing) · [asset interop and colour](#asset-interop-and-colour) · [Gaussian splats](#photographic-objects-with-gaussian-splats) · [reference-clip evidence](#reference-clip-evidence) · [performance and verified platforms](#performance-and-verified-platforms) · [CLI](#cli) · [layout](#layout)
+Contents: [document model](#document-model) · [evaluation](#evaluation) · [GPU compositor](#gpu-compositor) · [media and delivery](#media-and-delivery) · [vector graphics, deformation and rigging](#vector-graphics-deformation-and-rigging) · [typography and data graphics](#typography-and-data-graphics) · [effects, transitions and colour finishing](#effects-transitions-and-colour-finishing) · [3D rendering and 360 video](#3d-rendering-and-360-video) · [simulation and accessibility](#simulation-and-accessibility) · [2D simulations, clay, lighting and path tracing](#2d-simulations-clay-lighting-and-path-tracing) · [document version 1.6](#document-version-16) · [asset interop and colour](#asset-interop-and-colour) · [Gaussian splats](#photographic-objects-with-gaussian-splats) · [reference-clip evidence](#reference-clip-evidence) · [performance and verified platforms](#performance-and-verified-platforms) · [CLI](#cli) · [layout](#layout)
 
 ### Premium production acceptance
 
@@ -481,6 +481,149 @@ Tests:
 - The denoiser halves the pixel-to-pixel variation while keeping the mean.
 
 **Limitations.** Shadow rays treat glass as opaque (no caustics), and indirect light samples are clamped against fireflies. Geometry, textures and frame buffers that exceed device limits fall back to rasterisation with a diagnostic.
+
+## Document version 1.6
+
+`scene/@version="1.6"` adds programs, compute nodes, iteration and stepping, parametric geometry and pixel-exact options (SREPs 66 to 70, 72 and 73, carried here ahead of an sr-core release; `schema/UPSTREAM` lists them). A 1.6 document holding 1.5 content validates and renders as the same document at 1.5: the tests rewrite every corpus document to both versions and require the same diagnostics (V12–V14 aside) and byte-identical frames. Three rules gate the new syntax on `version="1.6"`: V12 for `program`, V13 for `compute`, `iterate`, `error-diffusion` and `segmented-sort`, V14 for parametric shapes, surfaces and heightfields. `stepsPerFrame`, `prewarm`, `precision`, `supersample`, `supersampleFilter`, `edgeBlend` and `orientToVelocity` are accepted at any version.
+
+### Compute nodes
+
+**`<compute>` runs a WGSL compute shader into a histogram (SREP 67).** `src` (with an optional `sha256`) names WGSL that defines `fn sr_point(i: u32)`; the engine prepends its prelude and calls `sr_point` once for each of `invocations` (up to 4,294,967,295), in workgroups of 64. The shader adds integer amounts into a `width` × `height` histogram of `channels` planes (1, or 4: density then the R, G and B sums) with `sr_accumulate(x, y, channel, amount)`; out-of-range cells, channels and zero amounts are ignored, and every cell is an exact 64-bit sum (two 32-bit words with a carry) whatever the order of the additions. `sr_accumulate_f` adds a float scaled by 2^`fractionBits` (0 to 24) and rounded; `sr_param(k)` reads the k-th `<param>` child (0 past the end), `sr_hash` is an integer hash, and the uniform `sr` holds the size, the invocation count, the frame index and time and two seed words mixed from `project/@seed` and the node's `seed`. The histogram is cleared every frame and the tonemapped picture is drawn in the node's `width` × `height` box with its transform, opacity and `blend`. A source that cannot be read or fails its digest is CMP10; one that does not compile against the prelude, has no `sr_point` or declares its own `@group(0)` bindings is CMP11; a histogram of width × height × channels × 8 bytes larger than the device's storage binding is CMP12. The 64-bit carry is tested on llvmpipe only.
+
+```wgsl
+fn sr_point(i: u32) {
+  if (i < 1000u) { sr_accumulate(100, 100, 0u, 1u); }
+  else if (i < 1100u) { sr_accumulate(200, 100, 0u, 1u); }
+  else { sr_accumulate(300, 100, 0u, 1u); }
+}
+```
+
+```xml
+<scene version="1.6"><project width="640" height="360" fps="24" duration="1" seed="1"/>
+  <composition>
+    <compute id="c" src="three.wgsl" width="400" height="200" invocations="1110"><tonemap/></compute>
+  </composition>
+</scene>
+```
+
+### Tonemaps
+
+**`<tonemap>` turns a compute node's histogram into colour.** At most one per node (CMP13); without one the defaults apply. A cell's density is d = count / 2^`fractionBits`, and `reference` is the density that maps to 1: `max` (the default, the largest density in the frame) or a positive number. With `scale="log"` (the default) the value is v = ln(1 + gain · d) / ln(1 + gain · reference), with `scale="linear"` v = d / reference (`gain` unused); either is clamped to [0, 1] and raised to 1/`gamma`. With one channel the colour is `ramp` at v: stops of `#RRGGBB[AA]` spaced evenly on [0, 1] and interpolated in display-encoded values (default black to white). With four channels the colour is the mean R, G and B of the cell (plane sum over density) times v, and `ramp` is not read. `alpha="density"` makes v the alpha; `opaque` (the default) keeps 1. With the compute example above, the default tonemap gives grey levels 255, 170.3 and 88.5 at the three points, `reference="2000"` 231.8, 154.8 and 80.4, and `scale="linear"` 255, 25.5 and 2.6.
+
+```xml
+<compute id="flame" src="flame.wgsl" width="512" height="512" invocations="4000000" channels="4" fractionBits="8">
+  <param name="spread" value="0.7"/>
+  <tonemap scale="log" gain="0.5" gamma="2.2" alpha="density"/>
+</compute>
+```
+
+### Iterate
+
+**`<iterate>` runs stateful shaders to a still state at every frame (SREP 67).** It holds nodes like a group. A shader effect with a `PERSISTENT` ISF pass on a node inside it starts from the zero state at every frame and takes `steps` steps (up to 10,000,000) before the frame is drawn, all passes per step, run as one loop over two textures per pass when the passes are recorded; nothing carries from one frame to the next, so seeking needs no replay. `FRAMEINDEX` counts the steps from 0, and `stepsPerFrame` and `prewarm` are not read inside it. With `until="converged"` the persistent buffers are read back every `checkEvery` steps (default 100, at most `steps`: ITR1), and stepping stops when no channel of any texel changed by more than `tolerance` (default 0.0001) since the previous check; the first check only records, so the earliest stop is at 2 × `checkEvery`, and `steps` stays the ceiling. Iterates do not nest (ITR2). The steps each pair took are reported in the frame's statistics as `iterate_steps`. The same SREP adds two CPU effects over a node's content box in 16-bit display-encoded values: `error-diffusion` (`kernel` Floyd–Steinberg, Atkinson, Jarvis–Judice–Ninke, Stucki, Burkes or Sierra, a `palette` of colours, `serpentine` rows) and `segmented-sort` (runs of pixels whose `sortKey` lies within `low`..`high`, low ≤ high by SRT1, sorted stably in `order` along `direction`).
+
+```xml
+<iterate id="still" steps="5000" until="converged" tolerance="0.00005" checkEvery="250">
+  <shape id="seed" shape="rect" width="640" height="360" fill="#202020" effects="relax"/>
+</iterate>
+<!-- in <effects>: <effect id="relax" type="shader" src="relax.fs" space="raw"/>, an ISF shader with a PERSISTENT pass -->
+```
+
+### Programs
+
+**`<program>` runs a WebAssembly module (SREPs 66 and 69).** `src` names the module and `sha256` (required) pins it (PRG10 when it cannot be read or differs). The module exports `memory` and, by mode, its entry points, and may import only `sr.rand_u64`, `sr.rand_f64` (SplitMix64 seeded from `project/@seed` and the program's `seed`), `sr.param_f64` and `sr.param_str` (its `<param>` children, unique by name: PRG1; a value that is not a number read as one is PRG16). Execution is deterministic: NaNs are canonicalised, threads and relaxed SIMD are refused, the stack is 1 MiB, and memory may grow to `memoryLimit` MiB (default 64; a larger declared minimum is PRG11). Each call may execute at most `fuel` instructions (default 10⁹; PRG12), a trap is PRG13, and an output that is unusable is PRG14. A module whose imports, exports or features are not these is PRG11.
+
+- **Build mode** (`mode="build"`, the default) calls `generate`, which returns a pointer and length packed in an i64, once at load. A program in the composition is replaced by a `<group>` with its node attributes, its other children, and the XML it returned (a well-formed fragment of at most 1,000,000 elements, without DOCTYPE, entities, processing instructions, namespaces or programs, valid in place), which is then validated with the document. A program in `<parameters>` returns JSON (an array, or `{"rows": [...]}`) and becomes a data source that a `repeat over` can name (a node program there is PRG2). `outputSha256` pins the output (PRG15). Outputs are cached by module, seeds, fuel, memory limit and parameters in `SR_PROGRAM_CACHE` (default `~/.cache/scene-render/program`; `off` disables it). `validate` does not run programs.
+- **Step mode** (`mode="step"`, with `width` and `height`: PRG3) calls `init` once, `step(i)` for each step from 0, and `frame` for a picture of `width` × `height` × 4 bytes of straight sRGB RGBA, top row first, drawn in the node's box. At frame f the module has taken `prewarm` + s · `stepsPerFrame` steps, s being the frames from 0 to f at which the node is drawn; a seek replays from `init`.
+
+`examples/program-maze` builds a module from Rust. The corpus document `tests/corpus/valid/programs.scene.xml` uses all three forms:
+
+```xml
+<scene version="1.6"><project width="64" height="64" fps="24" duration="1"/>
+  <parameters><program id="rows" src="../media/rows.wasm" sha256="30913dad3a42ec921501faa4c7402fb2b441c06743d3f5ceca607b45f64f9ba3"/></parameters>
+  <composition>
+    <program id="build" src="../media/rect.wasm" sha256="2b2cbfb8eed8624f6aa8a112626fae8cdc0e15c220557f0afdc6e5da56d48c96" seed="3" fuel="100000"><param name="side" value="1"/></program>
+    <repeat id="rep" over="rows"><shape id="c" shape="rect" width="4" height="4" fill="#FF0000"/></repeat>
+    <program id="steps" mode="step" width="8" height="8" src="../media/counter.wasm" sha256="102ec7058fa604f20d4265061f4d6ad44e8769077e1ddd246f0140772f4d11cf" stepsPerFrame="2" prewarm="3"/>
+  </composition>
+</scene>
+```
+
+### Steps per frame and prewarm
+
+**`stepsPerFrame` and `prewarm` advance stateful nodes over time (SREP 68).** They apply to a shader effect with a `PERSISTENT` ISF pass and to a step program (STP1 refuses them anywhere else). Each frame at which the node is drawn takes `stepsPerFrame` steps (1 to 10,000, default 1), and the first such frame also takes `prewarm` steps first (0 to 10,000,000, default 0), so at frame f the pair has taken prewarm + s · stepsPerFrame steps, s counting the frames from 0 to f at which the node is drawn; a frame at which it is not drawn takes none, and a node that starts later steps from its first frame. With the defaults `FRAMEINDEX` and `TIMEDELTA` keep their usual values (the frame index, and 1/fps, 0 at time 0); otherwise `FRAMEINDEX` counts the pair's steps from 0, prewarm included, and `TIMEDELTA` is 1/(fps · stepsPerFrame). The state does not depend on the order frames are rendered in: a seek restores the latest checkpoint (one a second, kept in memory, and on disk in `SR_CHECKPOINT_DIR` when it is set, keyed by the engine build, the documents and their files) and replays the frames between, drawing only the stateful nodes and what holds them.
+
+```xml
+<layer id="ink" asset="photo" effects="spread"/>
+<!-- in <effects>: -->
+<effect id="spread" type="shader" src="diffuse.fs" space="raw" stepsPerFrame="3" prewarm="120"/>
+```
+
+```glsl
+/*{ "INPUTS": [{"NAME": "inputImage", "TYPE": "image"}],
+    "PASSES": [{"TARGET": "state", "PERSISTENT": true, "FLOAT": true}, {}] }*/
+void main() {
+    vec2 d = 1.0 / RENDERSIZE, uv = isf_FragNormCoord;
+    if (PASSINDEX == 0) {
+        vec4 n = IMG_NORM_PIXEL(state, uv + vec2(d.x, 0.0)) + IMG_NORM_PIXEL(state, uv - vec2(d.x, 0.0))
+               + IMG_NORM_PIXEL(state, uv + vec2(0.0, d.y)) + IMG_NORM_PIXEL(state, uv - vec2(0.0, d.y));
+        gl_FragColor = mix(n * 0.25, IMG_NORM_PIXEL(inputImage, uv), 0.2);
+    } else {
+        gl_FragColor = IMG_NORM_PIXEL(state, uv);
+    }
+}
+```
+
+### Parametric paths
+
+**`shape="parametric"` draws the curve of one `<parametricPath>` (SREP 70; PAR1).** `x` and `y` are expressions in `t` (the language of `expression`, so `time`, `prop` and parameters animate them), evaluated in double precision at `samples` values (2 to 1,000,000, default 256) spaced evenly from `t0` to `t1` (0 to 1); with `closed="true"` the last sample stops one step short of `t1` and the path is closed. The points, in the shape's local pixels, are joined by lines and drawn exactly as `shape="path"` draws that path, with the shape's fill, stroke and trims; a non-finite point breaks the curve (which then stays open), and the shape's box is the bounding box of its points, so it needs no `width` or `height`.
+
+```xml
+<shape id="orbit" shape="parametric" stroke="#FFFFFF" strokeWidth="2">
+  <parametricPath x="32 + 20 * Math.cos(t)" y="32 + 10 * Math.sin(t)" t0="0" t1="6.283185307179586" samples="64" closed="true"/>
+</shape>
+```
+
+### Parametric surfaces and heightfields
+
+**`primitive="parametric"` meshes one `<parametricSurface>`, and `primitive="heightfield"` one `<heightfield>` (SREP 70; PAR2).** A surface's `x`, `y` and `z` are expressions in `u` and `v` sampled on a `uSamples` × `vSamples` grid (2 to 4,096, default 64) over `u0`..`u1` and `v0`..`v1` (0 to 1); `closedU` and `closedV` join the last row or column to the first. A heightfield's vertices are (x, −height(x, z), z) for x across `width` and z across `depth`, centred, on `xSamples` × `zSamples` points, so its top faces −y and is the front face. Both make two triangles per grid cell with vertex normals D_v × D_u from central differences; a triangle faces the camera when its normals do (single-sided materials cull the back), and triangles at a non-finite vertex are dropped. They are evaluated at each frame and share an upload when the mesh is unchanged.
+
+```xml
+<materials><material id="m" baseColor="#FF0000" unlit="true"/></materials>
+<composition>
+  <object3D id="sheet" primitive="parametric" material="m" x="32" y="32">
+    <parametricSurface x="u" y="v" z="0" u0="-8" u1="8" v0="-4" v1="4" uSamples="4" vSamples="4"/>
+  </object3D>
+  <object3D id="ground" primitive="heightfield" material="m" x="32" y="48" rotationX="90">
+    <heightfield height="2 * Math.sin(x / 4)" width="16" depth="8" xSamples="8" zSamples="4"/>
+  </object3D>
+</composition>
+```
+
+### Pixel-exact options
+
+**Precision, content rectangles, edge blending and supersampling (SREP 72)** are described under [effects, transitions and colour finishing](#effects-transitions-and-colour-finishing). In short: `project/@precision="f32"` makes the 2D working textures 32-bit float (an error on an adapter that cannot blend and filter them; E23 notes that 3D stays 16-bit); shaders read `sr_ContentRect` and `sr_PixelCoord` to find the node's content in their tile; a node's `edgeBlend` composites its own pixels in `linear` or `encoded` values (`inherit` follows `linearLight`; only with `blend="normal"`); and `project/@supersample` n (up to 4) renders n times larger and filters down with `supersampleFilter` `box` or `lanczos3`. With `linearLight="false"`, a white rectangle half-covering a column of pixels on black gives 187.5 with `edgeBlend="linear"` and 127.5 with `encoded`.
+
+```xml
+<project width="1920" height="1080" fps="30" duration="10" precision="f32" supersample="2" supersampleFilter="lanczos3" linearLight="false"/>
+<!-- in the composition: -->
+<shape id="hairline" shape="rect" x="100.5" y="100" width="100" height="50" fill="#FFFFFF" edgeBlend="linear"/>
+```
+
+```glsl
+// a shader effect in the plain GLSL form: red in the first 10 px of the node's content box, whatever its tile's margin
+void main() {
+    vec4 c = texture(inputTexture, uv);
+    fragColor = (sr_PixelCoord.x >= 0.0 && sr_PixelCoord.x < 10.0) ? vec4(c.a, 0.0, 0.0, c.a) : c;
+}
+```
+
+### Flocks that stay upright
+
+**`flock/@orientToVelocity` (SREP 73)** turns each agent's disc or sprite along its velocity when `true` (the default). With `false` the agents keep rotation 0 in the flock's space, where the flock node's own transform still turns them. Streaks, the default `shape`, always follow the velocity, so `orientToVelocity="false"` on a streak flock is reported as `INERT-I16` (information).
+
+```xml
+<flock id="birds" width="320" height="180" count="40" seed="2" shape="sprite" sprite="bird" orientToVelocity="false"/>
+```
 
 ## Asset interop and colour
 
