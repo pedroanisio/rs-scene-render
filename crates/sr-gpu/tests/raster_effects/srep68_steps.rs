@@ -236,3 +236,30 @@ fn explicit_neutral_values_render_as_absent_ones() {
         assert_eq!(a.px, b.px, "{}", shader.1);
     }
 }
+
+#[test]
+fn float32_checkpoints_preserve_state_across_a_fresh_renderer() {
+    let Some(gpu) = gpu() else { return };
+    if !gpu.device.features().contains(sr_gpu::resources::F32_FEATURES) {
+        return;
+    }
+    let name = "srep68-f32-checkpoint.fs";
+    std::fs::write(fixtures().join(name), COUNTER.replace("prev.r + 1.0", "prev.r + 0.0001")).unwrap();
+    let d = doc_with(
+        r##"precision="f32" background="#00000000""##,
+        "",
+        r#"<layer id="a" asset="red" x="8" y="8" scaleX="4" scaleY="4" effects="f"/>"#,
+        &format!(
+            r#"<effects><effect id="f" type="shader" src="{name}" space="raw" stepsPerFrame="3" prewarm="2"/></effects>"#
+        ),
+    );
+    let dir = std::env::temp_dir().join(format!("srep68-f32-checkpoints-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let first = render_with_checkpoints(&d, &frames(13), &dir).unwrap();
+    let second = render_with_checkpoints(&d, &[1.2], &dir).unwrap();
+    assert!(first.stats.errors.is_empty(), "{:?}", first.stats.errors);
+    assert!(second.stats.errors.is_empty(), "{:?}", second.stats.errors);
+    assert_eq!((second.stats.checkpoint_hits, second.stats.replayed_frames), (1, 1));
+    assert_eq!(first.px, second.px, "a checkpoint must preserve every float32 state bit");
+    std::fs::remove_dir_all(dir).unwrap();
+}

@@ -700,10 +700,11 @@ impl FxEngine {
 
     /// Records passes in order. The parameters of every pass go into one uniform buffer (a
     /// dynamic offset selects the pass), and passes reading the same textures share a bind group.
-    /// The texels of `t` (RGBA16F, row 0 on top), after everything submitted so far.
+    /// The texels of `t` (RGBA16F or RGBA32F, row 0 on top), after everything submitted so far.
     pub(crate) fn read_texels(&self, t: &Tex) -> Vec<[f32; 4]> {
         let (w, hh) = (t.size[0], t.size[1]);
-        let row = (w * 8).div_ceil(256) * 256;
+        let stride = crate::resources::texel_bytes(t.tex.format());
+        let row = (w * stride).div_ceil(256) * 256;
         let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("cpu pass readback"),
             size: (row * hh) as u64,
@@ -730,29 +731,31 @@ impl FxEngine {
         let data = buf.slice(..).get_mapped_range().expect("mapped");
         let mut out = Vec::with_capacity((w * hh) as usize);
         for y in 0..hh {
-            let line = &data[(y * row) as usize..(y * row + w * 8) as usize];
-            for px in line.as_chunks::<8>().0 {
-                let c = |k: usize| half::f16::from_le_bytes([px[k], px[k + 1]]).to_f32();
-                out.push([c(0), c(2), c(4), c(6)]);
+            let line = &data[(y * row) as usize..(y * row + w * stride) as usize];
+            for px in line.chunks_exact(stride as usize) {
+                out.push(crate::resources::texel(t.tex.format(), px));
             }
         }
         out
     }
 
-    /// Writes texels into `t` (RGBA16F, row 0 on top); queued before the next submission.
+    /// Writes texels in the target's working format, queued before the next submission.
     pub(crate) fn write_texels(&self, t: &Tex, px: &[[f32; 4]]) {
         let [w, h] = t.size;
-        let bytes: Vec<u8> =
-            px.iter().flat_map(|c| c.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes())).collect();
+        let format = t.tex.format();
+        let bytes: Vec<u8> = if format == crate::resources::FORMAT_F32 {
+            px.iter().flat_map(|c| c.iter().flat_map(|v| v.to_le_bytes())).collect()
+        } else {
+            px.iter().flat_map(|c| c.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes())).collect()
+        };
         self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &t.tex,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
+            t.tex.as_image_copy(),
             &bytes,
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 8), rows_per_image: Some(h) },
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(w * crate::resources::texel_bytes(format)),
+                rows_per_image: Some(h),
+            },
             wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         );
     }

@@ -177,20 +177,7 @@ impl FxEngine {
 
     /// Uploads premultiplied, stored-working RGBA pixels (row 0 on top).
     pub(crate) fn upload(&self, pool_tex: Arc<Tex>, px: &[[f32; 4]]) -> Arc<Tex> {
-        let [w, h] = pool_tex.size;
-        let bytes: Vec<u8> =
-            px.iter().flat_map(|c| c.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes())).collect();
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &pool_tex.tex,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &bytes,
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 8), rows_per_image: Some(h) },
-            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-        );
+        self.write_texels(&pool_tex, px);
         pool_tex
     }
 }

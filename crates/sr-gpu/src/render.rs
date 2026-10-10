@@ -3623,7 +3623,14 @@ impl Renderer {
                 .targets
                 .into_iter()
                 .map(|(name, size, px)| {
-                    let t = Arc::new(resources::create(&self.gpu.device, &self.bgl1, size, 1, "checkpoint"));
+                    let t = Arc::new(resources::create_as(
+                        &self.gpu.device,
+                        &self.bgl1,
+                        self.format,
+                        size,
+                        1,
+                        "checkpoint",
+                    ));
                     (name, self.fx.upload_texels(t, &px))
                 })
                 .collect();

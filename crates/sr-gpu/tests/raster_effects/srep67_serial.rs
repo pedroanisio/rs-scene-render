@@ -83,3 +83,23 @@ fn segmented_sort_matches_the_kit() {
         close(mean(&px, [132, 100, 164, 108]), right, attrs);
     }
 }
+
+#[test]
+fn float32_serial_effects_read_and_write_the_working_texture() {
+    let Some(gpu) = gpu() else { return };
+    if !gpu.device.features().contains(sr_gpu::resources::F32_FEATURES) {
+        return;
+    }
+    for (effect, expected) in [
+        (r##"type="error-diffusion" palette="#000000 #FFFFFF""##, [255, 255, 255]),
+        (r#"type="segmented-sort" direction="horizontal" order="ascending""#, [255, 255, 255]),
+    ] {
+        let xml = format!(
+            r##"<scene version="1.6"><project width="32" height="16" fps="10" duration="1" precision="f32"/><composition><shape id="s" shape="rect" width="32" height="16" fill="#FFFFFF" effects="f"/></composition><effects><effect id="f" {effect}/></effects></scene>"##
+        );
+        let d = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap();
+        let (px, problems) = frame(&d).unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(&px[(8 * 32 + 16) * 4..(8 * 32 + 16) * 4 + 3], &expected);
+    }
+}

@@ -4,7 +4,7 @@
 //! One file per frame holds the state of every stateful pair (effect and node) at the end of that frame. Its name is the
 //! hex SHA-256 key of the frame. The key is a superset of the SREP's per-pair key: it covers
 //!
-//! * `"sr-checkpoint-1"`, the engine name and version, and the SHA-256 of the running executable (the build);
+//! * `"sr-checkpoint-2"`, the engine name and version, and the SHA-256 of the running executable (the build);
 //! * the SHA-256 of every document's bytes (the main document and its includes), which holds the effect's XML, its node's
 //!   subtree and everything that places that node;
 //! * the SHA-256 of every file the documents name through an `xs:anyURI` attribute, in document order (shader sources and
@@ -23,7 +23,7 @@ use sr_model::element::{AttrValue, Element};
 /// Files up to this size enter the key by content; larger ones (video) by size and modification time.
 pub const HASHED_BYTES: u64 = 256 << 20;
 
-const MAGIC: &[u8; 8] = b"SRCKPT01";
+const MAGIC: &[u8; 8] = b"SRCKPT02";
 
 /// The state of one stateful pair at the end of a frame.
 #[derive(Debug, Clone, PartialEq)]
@@ -34,7 +34,7 @@ pub struct PairState {
     pub frame: i64,
     /// Steps the pair has taken.
     pub steps: u64,
-    /// Its persistent buffers: name, size and RGBA texels (exact as half floats).
+    /// Its persistent buffers: name, size and RGBA texels (exact float32 values).
     pub targets: Vec<(String, [u32; 2], Vec<[f32; 4]>)>,
 }
 
@@ -54,7 +54,7 @@ impl Store {
             prefix.extend_from_slice(bytes);
             prefix.push(0);
         };
-        field(b"sr-checkpoint-1");
+        field(b"sr-checkpoint-2");
         field(b"rs-scene-render");
         field(env!("CARGO_PKG_VERSION").as_bytes());
         field(hex(&executable_digest()).as_bytes());
@@ -100,7 +100,7 @@ impl Store {
                 out.extend_from_slice(&size[1].to_le_bytes());
                 for p in px {
                     for c in p {
-                        out.extend_from_slice(&half::f16::from_f32(*c).to_bits().to_le_bytes());
+                        out.extend_from_slice(&c.to_le_bytes());
                     }
                 }
             }
@@ -134,14 +134,12 @@ fn parse(bytes: &[u8]) -> Option<Vec<PairState>> {
             let name = r.str()?;
             let (w, h) = (r.u32()?, r.u32()?);
             let texels = (w as usize).checked_mul(h as usize)?;
-            let raw = r.take(texels.checked_mul(8)?)?;
+            let raw = r.take(texels.checked_mul(16)?)?;
             let px = raw
-                .as_chunks::<8>()
+                .as_chunks::<16>()
                 .0
                 .iter()
-                .map(|t| {
-                    std::array::from_fn(|c| half::f16::from_bits(u16::from_le_bytes([t[2 * c], t[2 * c + 1]])).to_f32())
-                })
+                .map(|t| std::array::from_fn(|c| f32::from_le_bytes(t[4 * c..4 * c + 4].try_into().unwrap())))
                 .collect();
             targets.push((name, [w, h], px));
         }
@@ -250,7 +248,7 @@ mod tests {
 
     #[test]
     fn a_saved_state_reads_back_exactly_and_a_damaged_file_does_not() {
-        let px = vec![[0.0, 1.0, 65504.0, -2.5], [0.000_061_035_156, 0.5, 0.25, 1.0]];
+        let px: Vec<[f32; 4]> = vec![[0.0, 1.000_000_1, 100_000.0, -2.5], [f32::MIN_POSITIVE, 0.500_000_06, 0.25, 1.0]];
         let pairs = vec![PairState {
             key: "f|a|7".into(),
             frame: 29,
@@ -269,7 +267,7 @@ mod tests {
         out.extend_from_slice(&1u32.to_le_bytes());
         for p in &px {
             for c in p {
-                out.extend_from_slice(&half::f16::from_f32(*c).to_bits().to_le_bytes());
+                out.extend_from_slice(&c.to_le_bytes());
             }
         }
         assert_eq!(parse(&out), Some(pairs));
@@ -277,6 +275,7 @@ mod tests {
         let mut longer = out.clone();
         longer.push(0);
         assert_eq!(parse(&longer), None, "trailing bytes are no checkpoint");
-        assert_eq!(parse(b"SRCKPT02"), None);
+        out[..8].copy_from_slice(b"SRCKPT01");
+        assert_eq!(parse(&out), None, "half-float checkpoints use a different version");
     }
 }
