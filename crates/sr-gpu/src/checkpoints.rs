@@ -222,6 +222,10 @@ fn referenced_files(p: &sr_eval::Program) -> Vec<PathBuf> {
                 continue;
             }
             if let Some(AttrValue::Str(v)) = e.get_attr(a.name) {
+                // a material map of the form #id names an asset of the document, not a file (SREP 71)
+                if sr_model::assets::is_document_reference(e.element_name(), a.name, &v) {
+                    continue;
+                }
                 if let sr_model::assets::Resolved::Local(path) = sr_model::assets::resolve(&v, base) {
                     out.push(path);
                 }

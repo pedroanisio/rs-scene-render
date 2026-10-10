@@ -171,6 +171,12 @@ fn a_document_reference_is_not_a_file() {
     let r = sr_model::validate_str(&xml, &opts);
     assert!(r.diagnostics.iter().any(|d| d.code == "A01"), "{:?}", r.diagnostics);
     assert!(sr_model::assets::is_document_reference("material", "normalMap", "#g"));
+    // the generated material element reports its type's name
+    let xml = kit(gen_only, &map_material("baseColorMap", "#g"), PLANE, "");
+    let d = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap();
+    let m = &d.scene.materials.as_ref().unwrap().materials[0];
+    let name = sr_model::element::Element::element_name(m);
+    assert!(sr_model::assets::is_document_reference(name, "baseColorMap", "#g"), "{name}");
     assert!(!sr_model::assets::is_document_reference("material", "materialX", "#g"));
     assert!(!sr_model::assets::is_document_reference("light", "environment", "#g"));
 }

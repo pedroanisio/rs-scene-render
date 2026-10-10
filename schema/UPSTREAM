@@ -50,3 +50,13 @@ Additional local extensions accepted on 2026-10-09:
 - SREP 70: parametric paths, surfaces and heightfields, with V14, PAR1 and PAR2.
 - SREP 72: shader content rectangles, supersampling, edge blending and float32 working textures.
 - SREP 73: flock/@orientToVelocity and the INERT-I16 diagnostic for streak flocks.
+- SREP 71 (draft of 2026-10-09, sr-core branch srep/drafts-2026-10, srep/srep-0071.md): the subsurface attributes of
+  materialType with unitTripleType, the procedural sky of lightType, and the Schematron patterns p-srep71 (SKY1, SKY2)
+  and p-srep71-<map attribute> (MTX1-<map attribute>), as the SREP writes them. No version gate (the SREP's Syntax).
+  The model generator of sr-model was extended for the SREP's unitTripleType (a restriction whose base is an
+  anonymous list, with an xs:length facet).
+Unverified for SREP 71 in this engine:
+- The shape-parameter fit s(A) = 1.85 − A + 7|A − 0.8|³ and the profile are as the SREP states them; the SREP checked
+  them against appleseed's implementation, not against Pixar Technical Memo 15-04, and neither was read from here.
+- The subsurface lobe is a curvature pre-integration of the profile (sr_3d::subsurface), checked against a
+  brute-force integral on a sphere and against the SREP's five properties; it is not compared with a random walk.
