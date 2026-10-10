@@ -1,18 +1,9 @@
-# scene-render v0.3.0
+# scene-render v0.3.1
 
-This release adds scene document version 1.6 and integrates the following rendering features:
+Scenes with up to four ambient or directional lights use specialized shader pipelines that preserve light order and rendered output. Larger light lists and local lights retain the general lighting path.
 
-- Build-time and stepping WebAssembly programs with deterministic host functions, fuel limits and pinned output hashes.
-- Compute histograms, density tonemapping, iterated effects, error diffusion and segmented sorting.
-- Node-local shader stepping, prewarming and checkpoints.
-- Parametric paths, parametric surfaces and heightfields.
-- Shader content rectangles, supersampling, per-node edge blending and optional float32 working textures.
-- Float32 working precision is preserved through CPU effects and checkpoint restores, with format conversion for output joins.
-- Upright flock sprites through `orientToVelocity="false"`.
-- Faster bounded texture-coordinate conversion in the depth-of-field shader, checked against the original shader.
-
-The schema retains the vendored sr-core 1.5.0 base with the local 1.6 extensions documented in `schema/UPSTREAM`. The compute histogram carry tests use llvmpipe; discrete-GPU carry remains unverified.
+The optimization measured 6.7% and 10.9% higher frame throughput in two 24-frame Inova benchmark windows against v0.3.0. These are short-window measurements, not a full-package speedup claim. Two encoded clips matched byte for byte, including decoded video, audio and diagnostics. The GPU oracle checks all 31 light arrangements through four lights, opaque and blended materials, and fallback paths.
 
 The Linux archive contains the executable, source commit identifier, capability manifest, README, license and third-party notices. Its executable comes from the successful CI run for the release commit and is checksum-verified and smoke-tested before packaging.
 
-Verify the download with `sha256sum -c scene-render-v0.3.0-linux-x86_64.tar.gz.sha256`, extract it, then run `./scene-render --help`.
+Verify the download with `sha256sum -c scene-render-v0.3.1-linux-x86_64.tar.gz.sha256`, extract it, then run `./scene-render --help`.

@@ -2,7 +2,7 @@
   "format": "scene-render-capabilities/1",
   "engine": {
     "name": "rs-scene-render",
-    "version": "0.3.0"
+    "version": "0.3.1"
   },
   "schema": "1.5.0",
   "entries": [
