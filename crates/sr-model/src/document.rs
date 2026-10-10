@@ -472,7 +472,8 @@ fn run(xml: &str, base_dir: PathBuf, opts: &LoadOptions, build: bool) -> Outcome
             Ok(scene) => {
                 let index = Index::build(&scene, ids);
                 let warnings = report.diagnostics.clone();
-                let source_sha256 = sha2::Digest::finalize(<sha2::Sha256 as sha2::Digest>::new_with_prefix(xml.as_bytes())).into();
+                let source_sha256 =
+                    sha2::Digest::finalize(<sha2::Sha256 as sha2::Digest>::new_with_prefix(xml.as_bytes())).into();
                 Outcome { report, document: Some(Document { scene, index, base_dir, warnings, source_sha256 }) }
             }
             Err(e) => {
