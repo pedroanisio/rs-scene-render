@@ -242,6 +242,13 @@ pub struct FrameNode {
     /// A connector's geometry at this time (SREP 16): None when it draws nothing, or for other nodes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connector: Option<Arc<crate::connector::Connector>>,
+    /// The mesh of a parametric surface or heightfield at this time (SREP 70), in the object's local space.
+    #[serde(skip)]
+    pub param_mesh: Option<Arc<crate::parametric::ParamMesh>>,
+    /// The box of a parametric shape at this time (SREP 70): the bounding box `[x0, y0, x1, y1]` of its finite
+    /// points, in local pixels. Its outline is the `path` property.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub param_box: Option<[f64; 4]>,
     /// The node's element after templating (static attributes).
     #[serde(skip)]
     pub elem: Arc<Node>,
@@ -349,7 +356,7 @@ impl FrameGraph {
     }
 }
 
-struct Frame<'p> {
+pub(crate) struct Frame<'p> {
     /// Discovery/endpoint snapshots retain conditionally hidden nodes; ordinary
     /// frames still determine simulation participation at each step boundary.
     include_inactive: bool,
@@ -576,8 +583,18 @@ impl Program {
         }
         if let Some(x) = s.expr {
             let mut regs = Vec::new();
-            let mut h =
-                ExprHost { p: self, frame: None, comp_t, t, slot: Some(slot), expr: x, value: v.clone(), depth, memo };
+            let mut h = ExprHost {
+                p: self,
+                frame: None,
+                comp_t,
+                t,
+                slot: Some(slot),
+                expr: x,
+                value: v.clone(),
+                depth,
+                memo,
+                sample: [0.0; 2],
+            };
             let r = vm::run(&self.exprs[x as usize].code, &mut h, &mut regs);
             if let Some(nv) = s.kind.from_v(&r, &v) {
                 v = nv;
@@ -600,6 +617,8 @@ struct ExprHost<'a, 'f> {
     value: Value,
     depth: u32,
     memo: &'f Memo,
+    /// The sampling variables of a parametric geometry expression (SREP 70).
+    sample: [f64; 2],
 }
 
 impl Host for ExprHost<'_, '_> {
@@ -616,6 +635,7 @@ impl Host for ExprHost<'_, '_> {
             Var::TextTotal => V::Num(1.0),
             Var::Fps => V::Num(self.p.fps.as_f64()),
             Var::Duration => V::Num(self.p.duration),
+            Var::Sample(k) => V::Num(self.sample.get(k as usize).copied().unwrap_or(f64::NAN)),
             Var::PointX | Var::PointY | Var::PointAngle | Var::PointU | Var::PointRandom => {
                 let Some((g, i)) = node.and_then(|n| n.point) else { return V::Undef };
                 let gen = &self.p.points[g as usize];
@@ -811,6 +831,7 @@ impl<'p> Frame<'p> {
                         value: v.clone(),
                         depth: 0,
                         memo: &self.memo,
+                        sample: [0.0; 2],
                     };
                     vm::run(&p.exprs[x as usize].code, &mut h, &mut regs)
                 };
@@ -838,11 +859,42 @@ impl<'p> Frame<'p> {
                 value: Value::Bool(true),
                 depth: 0,
                 memo: &self.memo,
+                sample: [0.0; 2],
             };
             vm::run(&p.exprs[x as usize].code, &mut h, &mut regs)
         };
         self.regs = regs;
         r.truthy()
+    }
+
+    /// Runs the parametric geometry expression `x` of node `n` (SREP 70) once per sample, with the sampling variables
+    /// of each, at this frame. `out` receives one value per sample: the number the expression gives, NaN when it
+    /// gives none.
+    pub(crate) fn sampled(&mut self, n: u32, x: u32, samples: &[[f64; 2]], out: &mut Vec<f64>) {
+        let p = self.p;
+        let mut regs = std::mem::take(&mut self.regs);
+        out.clear();
+        out.reserve(samples.len());
+        for s in samples {
+            let mut h = ExprHost {
+                p,
+                frame: Some(self),
+                comp_t: self.t,
+                t: self.tl[n as usize],
+                slot: None,
+                expr: x,
+                value: Value::Num(0.0),
+                depth: 0,
+                memo: &self.memo,
+                sample: *s,
+            };
+            let v = vm::run(&p.exprs[x as usize].code, &mut h, &mut regs);
+            out.push(match v {
+                V::Num(_) | V::Bool(_) => v.num(),
+                _ => f64::NAN,
+            });
+        }
+        self.regs = regs;
     }
 
     fn num(&self, n: u32, k: usize) -> f64 {
@@ -1228,8 +1280,15 @@ fn evaluate_inner(p: &Program, t: f64, clocks: &[(u32, f64)], include_inactive: 
             pose3: None,
             joints: None,
             connector: None,
+            param_mesh: None,
+            param_box: None,
             elem: node.elem.clone(),
         });
+        if let Some(g) = node.geom {
+            if let Some(out) = o.nodes.last_mut() {
+                crate::parametric::attach(f, n, &p.geoms[g as usize], out);
+            }
+        }
         if node.name == "shape" {
             if let Some(shape) = o.nodes.last_mut() {
                 crate::stroke_font::attach(p, shape, &mut o.problems);

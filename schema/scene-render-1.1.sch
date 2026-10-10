@@ -437,7 +437,7 @@
       <sch:assert id="R52" test="//layer[@id=current()/@regionLayer][@asset=/scene/assets/pdf[region/@id=current()/@region]/@id]">@regionLayer must name a layer whose asset holds the region.</sch:assert>
     </sch:rule>
     <sch:rule context="shape">
-      <sch:assert id="C69" test="@width and @height">shape needs @width and @height unless it takes its box from @region.</sch:assert>
+      <sch:assert id="C69" test="@shape='parametric' or (@width and @height)">shape needs @width and @height unless it takes its box from @region or is parametric.</sch:assert>
     </sch:rule>
   </sch:pattern>
   <sch:pattern id="p74">
@@ -785,6 +785,17 @@
   <sch:pattern id="p-srep68">
     <sch:rule context="effects/effect[@stepsPerFrame or @prewarm] | program[@stepsPerFrame or @prewarm]">
       <sch:assert id="STP1" test="(self::effect and @type='shader') or (self::program and @mode='step')">stepsPerFrame and prewarm apply to shader effects and stepping programs (SREP 69) only.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
+  <sch:pattern id="p-srep70">
+    <sch:rule context="/scene[@version='1.0' or @version='1.1' or @version='1.2' or @version='1.3' or @version='1.4' or @version='1.5']">
+      <sch:assert id="V14" test="not(.//shape[@shape='parametric'] or .//object3D[@primitive='parametric' or @primitive='heightfield'])">parametric shapes, parametric surfaces and heightfields need version="1.6".</sch:assert>
+    </sch:rule>
+    <sch:rule context="shape">
+      <sch:assert id="PAR1" test="(@shape='parametric') = (count(parametricPath) = 1)">a shape with shape="parametric" has exactly one parametricPath, and only such a shape has one.</sch:assert>
+    </sch:rule>
+    <sch:rule context="object3D">
+      <sch:assert id="PAR2" test="(@primitive='parametric') = (count(parametricSurface) = 1) and (@primitive='heightfield') = (count(heightfield) = 1)">primitive="parametric" has exactly one parametricSurface and primitive="heightfield" exactly one heightfield; no other primitive has either.</sch:assert>
     </sch:rule>
   </sch:pattern>
 </sch:schema>

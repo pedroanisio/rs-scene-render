@@ -2090,11 +2090,66 @@
     <xs:attribute name="audioBus" type="xs:IDREF"/>
   </xs:complexType>
 
+  <!-- ===================================================== parametric geometry (SREP 70, scene version 1.6) -->
+  <xs:complexType name="parametricPathType">
+    <xs:annotation><xs:documentation>
+      The outline of a shape="parametric": the points (x(t), y(t)) at N = samples values of t from t0 to t1 (to t1
+      minus one step with closed="true"), in the shape's local pixel space, joined by lines and closed when closed is
+      true. x and y are expressions of the expression language (expressionType) with the variable t, evaluated in
+      64-bit floats at each frame. A non-finite point is dropped and breaks the path. SREP 70.
+    </xs:documentation></xs:annotation>
+    <xs:attribute name="x" type="expressionString" use="required"/>
+    <xs:attribute name="y" type="expressionString" use="required"/>
+    <xs:attribute name="t0" type="xs:double" default="0"/>
+    <xs:attribute name="t1" type="xs:double" default="1"/>
+    <xs:attribute name="samples" default="256">
+      <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:minInclusive value="2"/><xs:maxInclusive value="1000000"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="closed" type="xs:boolean" default="false"/>
+  </xs:complexType>
+  <xs:simpleType name="surfaceSamplesType">
+    <xs:restriction base="xs:positiveInteger"><xs:minInclusive value="2"/><xs:maxInclusive value="4096"/></xs:restriction>
+  </xs:simpleType>
+  <xs:complexType name="parametricSurfaceType">
+    <xs:annotation><xs:documentation>
+      The mesh of an object3D with primitive="parametric": the vertices (x, y, z)(u, v) on a uSamples x vSamples grid
+      over [u0, u1] x [v0, v1], in the object's local space before its transform, two triangles per grid cell (the
+      last row or column joins the first in a closed direction). The vertex normal is the unit vector of
+      D_v x D_u (central differences); a triangle faces the camera when its vertex normals do. x, y and z are
+      expressions with the variables u and v. SREP 70.
+    </xs:documentation></xs:annotation>
+    <xs:attribute name="x" type="expressionString" use="required"/>
+    <xs:attribute name="y" type="expressionString" use="required"/>
+    <xs:attribute name="z" type="expressionString" use="required"/>
+    <xs:attribute name="u0" type="xs:double" default="0"/>
+    <xs:attribute name="u1" type="xs:double" default="1"/>
+    <xs:attribute name="v0" type="xs:double" default="0"/>
+    <xs:attribute name="v1" type="xs:double" default="1"/>
+    <xs:attribute name="uSamples" type="surfaceSamplesType" default="64"/>
+    <xs:attribute name="vSamples" type="surfaceSamplesType" default="64"/>
+    <xs:attribute name="closedU" type="xs:boolean" default="false"/>
+    <xs:attribute name="closedV" type="xs:boolean" default="false"/>
+  </xs:complexType>
+  <xs:complexType name="heightfieldType">
+    <xs:annotation><xs:documentation>
+      The mesh of an object3D with primitive="heightfield": the parametricSurface with u = z over [-depth/2, depth/2]
+      (zSamples), v = x over [-width/2, width/2] (xSamples) and vertices (x, -height(x, z), z), so that a flat
+      heightfield's top face (normal -y, up) is its front face. height is an expression with the variables x and z.
+      SREP 70.
+    </xs:documentation></xs:annotation>
+    <xs:attribute name="height" type="expressionString" use="required"/>
+    <xs:attribute name="width" type="positiveDecimal" use="required"/>
+    <xs:attribute name="depth" type="positiveDecimal" use="required"/>
+    <xs:attribute name="xSamples" type="surfaceSamplesType" default="64"/>
+    <xs:attribute name="zSamples" type="surfaceSamplesType" default="64"/>
+  </xs:complexType>
+
   <xs:complexType name="shapeType">
     <xs:choice minOccurs="0" maxOccurs="unbounded">
       <xs:group ref="nodeBehaviour"/>
       <xs:group ref="bodyBehaviour"/>
       <xs:element name="shapeModifier" type="shapeModifierType"/>
+      <xs:element name="parametricPath" type="parametricPathType"/>
     </xs:choice>
     <xs:attributeGroup ref="nodeAttributes"/>
     <xs:attribute name="shape" use="required">
@@ -2103,6 +2158,7 @@
         <xs:enumeration value="rounded-rect"/><xs:enumeration value="polygon"/>
         <xs:enumeration value="star"/><xs:enumeration value="line"/>
         <xs:enumeration value="path"/><xs:enumeration value="stroke-text"/>
+        <xs:enumeration value="parametric"/>
       </xs:restriction></xs:simpleType>
     </xs:attribute>
     <xs:attribute name="width" type="positiveLengthType"/>
@@ -2372,6 +2428,8 @@
       <xs:element name="fracture" type="fractureType"/>
       <xs:element name="blob" type="clayBlobType"/>
       <xs:element name="rigidBody" type="rigidBody3DType"/>
+      <xs:element name="parametricSurface" type="parametricSurfaceType"/>
+      <xs:element name="heightfield" type="heightfieldType"/>
     </xs:choice>
     <xs:attribute name="id" type="xs:ID" use="required"/>
     <xs:attribute name="name" type="xs:string"/>
@@ -2384,6 +2442,7 @@
         <xs:enumeration value="text"/><xs:enumeration value="extrude"/>
         <xs:enumeration value="clay"/><xs:enumeration value="map"/><xs:enumeration value="globe"/>
         <xs:enumeration value="volume"/><xs:enumeration value="voxels"/>
+        <xs:enumeration value="parametric"/><xs:enumeration value="heightfield"/>
       </xs:restriction></xs:simpleType>
     </xs:attribute>
     <xs:attribute name="material" type="xs:IDREF"/>

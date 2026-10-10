@@ -423,8 +423,9 @@ impl Host for UnitHost {
             Var::Fps => self.fps,
             Var::Value => 100.0,
             Var::Duration => 0.0,
-            // unit expressions compile without the point names (NoProps), so these never run
-            Var::PointX | Var::PointY | Var::PointAngle | Var::PointU | Var::PointRandom => f64::NAN,
+            // unit expressions compile without the point names and the sampling variables (NoProps), so these never
+            // run
+            Var::PointX | Var::PointY | Var::PointAngle | Var::PointU | Var::PointRandom | Var::Sample(_) => f64::NAN,
         })
     }
     fn prop(&mut self, _slot: u32) -> V {

@@ -280,6 +280,8 @@ pub struct InstNode {
     pub visible: bool,
     /// Condition expression.
     pub cond: Option<u32>,
+    /// Parametric geometry (SREP 70), in `Program::geoms`.
+    pub geom: Option<u32>,
     /// `@parent` node.
     pub parent_link: Option<u32>,
     /// `@matte` node.
@@ -547,6 +549,8 @@ pub struct Program {
     pub channels: Vec<Channel>,
     /// Expressions.
     pub exprs: Vec<ExprInst>,
+    /// Parametric geometry of shapes and 3D objects (SREP 70), indexed by `NodeInst::geom`.
+    pub geoms: Vec<crate::parametric::Geom>,
     /// Links.
     pub links: Vec<LinkInst>,
     /// The point generators of repeats with a `points` child (SREP 26).
@@ -1183,6 +1187,9 @@ struct Builder {
     slot_ix: HashMap<(Owner, Arc<str>), u32>,
     channels: Vec<Channel>,
     exprs: Vec<ExprInst>,
+    geoms: Vec<crate::parametric::Geom>,
+    /// Parametric definitions waiting for their expressions to compile: (node, definition, seed, scope, doc).
+    pending_geom: Vec<(u32, crate::parametric::Def, u64, Arc<str>, u16)>,
     links: Vec<LinkInst>,
     elements: Vec<ElemTarget>,
     transitions: Vec<TransitionInst>,
@@ -1468,6 +1475,7 @@ impl Builder {
                 visible: attr_bool(e, "visible").unwrap_or(true)
                     && (name != "camera" || attr_bool(e, "active").unwrap_or(true)),
                 cond: None,
+                geom: None,
                 parent_link: None,
                 matte: None,
                 copy: None,
@@ -2979,7 +2987,7 @@ impl Builder {
                 _ => "expression".into(),
             };
             let points = node.is_some_and(|n| self.nodes[n as usize].point.is_some());
-            let mut res = ExprResolver { b: self, scope, doc, points };
+            let mut res = ExprResolver { b: self, scope, doc, points, sample: &[] };
             match vm::compile(&src, &mut res) {
                 Ok(code) => {
                     self.exprs.push(ExprInst { code, slot, node, seed });
@@ -3002,6 +3010,35 @@ impl Builder {
                         who.as_str(),
                     ));
                 }
+            }
+        }
+        // SREP 70: the expressions of parametric geometry, with their sampling variables
+        for (n, def, seed, scope, doc) in std::mem::take(&mut self.pending_geom) {
+            let points = self.nodes[n as usize].point.is_some();
+            let mut exprs = Vec::with_capacity(def.sources.len());
+            for (attr, src) in &def.sources {
+                let who = format!("{}/{}@{attr}", self.nodes[n as usize].id, def.child);
+                let mut res = ExprResolver { b: self, scope: scope.clone(), doc, points, sample: def.names };
+                match vm::compile(src, &mut res) {
+                    Ok(code) => {
+                        self.exprs.push(ExprInst { code, slot: None, node: Some(n), seed });
+                        exprs.push((self.exprs.len() - 1) as u32);
+                    }
+                    Err(e) => {
+                        let excerpt: String = src.chars().skip(e.offset.saturating_sub(10)).take(30).collect();
+                        let loc = self.nodes[n as usize].elem.loc();
+                        self.diags.push(err(
+                            "E01",
+                            format!("{who}: {} (near {:?})", e.message, excerpt.trim()),
+                            loc,
+                            who.as_str(),
+                        ));
+                    }
+                }
+            }
+            if exprs.len() == def.sources.len() {
+                self.geoms.push(crate::parametric::Geom { kind: def.kind, exprs });
+                self.nodes[n as usize].geom = Some((self.geoms.len() - 1) as u32);
             }
         }
         for (slot, l, _node, scope, doc) in std::mem::take(&mut self.pending_link) {
@@ -3044,7 +3081,7 @@ impl Builder {
                     }
                 }
             } else {
-                let mut res = ExprResolver { b: self, scope, doc, points: false };
+                let mut res = ExprResolver { b: self, scope, doc, points: false, sample: &[] };
                 match res.prop(&l.source) {
                     Ok(s) => Some(LinkSource::Prop(s)),
                     Err(e) => {
@@ -3259,11 +3296,17 @@ struct ExprResolver<'b> {
     doc: u16,
     /// The expression sits inside a repeat with a `points` child.
     points: bool,
+    /// The sampling variables of a parametric geometry expression (SREP 70); none elsewhere.
+    sample: &'static [&'static str],
 }
 
 impl Resolver for ExprResolver<'_> {
     fn point_names(&self) -> bool {
         self.points
+    }
+
+    fn sample_names(&self) -> &'static [&'static str] {
+        self.sample
     }
 
     fn prop(&mut self, path: &str) -> Result<u32, String> {
@@ -3340,6 +3383,8 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
         slot_ix: HashMap::new(),
         channels: Vec::new(),
         exprs: Vec::new(),
+        geoms: Vec::new(),
+        pending_geom: Vec::new(),
         links: Vec::new(),
         elements: Vec::new(),
         transitions: Vec::new(),
@@ -3380,6 +3425,10 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
         if let Some(c) = attr_str(&*elem, "condition") {
             let seed = b.project_seed;
             b.pending_expr.push((None, Some(n), c, seed, elem.loc(), scope.clone(), doc_ix));
+        }
+        if let Some(def) = crate::parametric::definition(&*elem) {
+            let seed = b.project_seed;
+            b.pending_geom.push((n, def, seed, scope.clone(), doc_ix));
         }
     }
     b.globals();
@@ -3510,6 +3559,7 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
         slot_read,
         channels: b.channels,
         exprs: b.exprs,
+        geoms: b.geoms,
         links: b.links,
         points: b.points,
         connectors: b.connectors.into_iter().map(|(c, _, _)| c).collect(),

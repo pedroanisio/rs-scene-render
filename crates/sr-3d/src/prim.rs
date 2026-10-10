@@ -117,6 +117,90 @@ pub fn cuboid(w: f32, h: f32, d: f32) -> Primitive {
     finish(vs, idx)
 }
 
+/// A mesh sampled on a grid (SREP 70, `parametricSurface` and `heightfield`): `points[i + j * nu]` is the vertex
+/// P(i, j) at the i-th sample of u and the j-th of v, in the object's local space, and `uvs` its texture coordinates.
+///
+/// - Each grid cell gives the triangles (P(i,j), P(i+1,j), P(i+1,j+1)) and (P(i,j), P(i+1,j+1), P(i,j+1)); a closed
+///   direction (`closed[0]` for u, `closed[1]` for v) joins its last row or column to the first, an open one has no
+///   cell past its last sample.
+/// - The vertex normal is the unit vector of D_v × D_u, with D_u = P(i+1,j) − P(i−1,j) and D_v = P(i,j+1) − P(i,j−1),
+///   a missing neighbour at an open border replaced by the vertex itself and a closed direction wrapping. Where that
+///   cross product has zero length it is the normalised sum of the normals of the triangles that share the vertex
+///   (each oriented like D_v × D_u, that is (c − a) × (b − a) for the triangle (a, b, c) above), else (0, 0, −1).
+/// - A triangle faces the camera when its vertex normals do: it is wound accordingly.
+/// - A triangle with a non-finite vertex is dropped, and so is every vertex no kept triangle uses.
+pub fn parametric_grid(points: &[[f64; 3]], uvs: &[[f32; 2]], nu: usize, nv: usize, closed: [bool; 2]) -> Primitive {
+    assert!(nu >= 2 && nv >= 2 && points.len() == nu * nv && uvs.len() == points.len(), "a grid of nu × nv samples");
+    let at = |i: usize, j: usize| j * nu + i;
+    let finite = |k: usize| points[k].iter().all(|c| c.is_finite());
+    let pos = |k: usize| glam::DVec3::from(points[k]);
+    // the cells, and their triangles in the order of the SREP
+    let (cu, cv) = (if closed[0] { nu } else { nu - 1 }, if closed[1] { nv } else { nv - 1 });
+    let mut tris: Vec<[usize; 3]> = Vec::with_capacity(2 * cu * cv);
+    for j in 0..cv {
+        for i in 0..cu {
+            let (i1, j1) = ((i + 1) % nu, (j + 1) % nv);
+            for t in [[at(i, j), at(i1, j), at(i1, j1)], [at(i, j), at(i1, j1), at(i, j1)]] {
+                if t.iter().all(|&k| finite(k)) {
+                    tris.push(t);
+                }
+            }
+        }
+    }
+    // a neighbour along one direction: wrapped when closed, the vertex itself past an open border
+    let step = |c: usize, n: usize, closed: bool, up: bool| -> usize {
+        match (up, closed) {
+            (true, true) => (c + 1) % n,
+            (true, false) => (c + 1).min(n - 1),
+            (false, true) => (c + n - 1) % n,
+            (false, false) => c.saturating_sub(1),
+        }
+    };
+    let face = |t: &[usize; 3]| (pos(t[2]) - pos(t[0])).cross(pos(t[1]) - pos(t[0]));
+    let mut sum = vec![glam::DVec3::ZERO; points.len()];
+    for t in &tris {
+        let f = face(t);
+        for &k in t {
+            sum[k] += f;
+        }
+    }
+    let normal = |i: usize, j: usize| -> glam::DVec3 {
+        let du = pos(at(step(i, nu, closed[0], true), j)) - pos(at(step(i, nu, closed[0], false), j));
+        let dv = pos(at(i, step(j, nv, closed[1], true))) - pos(at(i, step(j, nv, closed[1], false)));
+        let n = dv.cross(du);
+        if n.is_finite() && n.length_squared() > 0.0 {
+            return n.normalize();
+        }
+        let s = sum[at(i, j)];
+        if s.is_finite() && s.length_squared() > 0.0 {
+            s.normalize()
+        } else {
+            glam::DVec3::NEG_Z
+        }
+    };
+    // the vertices the kept triangles use, in grid order
+    let mut used = vec![false; points.len()];
+    for t in &tris {
+        for &k in t {
+            used[k] = true;
+        }
+    }
+    let mut remap = vec![u32::MAX; points.len()];
+    let mut vs = Vec::new();
+    for j in 0..nv {
+        for i in 0..nu {
+            let k = at(i, j);
+            if used[k] {
+                remap[k] = vs.len() as u32;
+                let p = pos(k);
+                vs.push(v(p.as_vec3(), normal(i, j).as_vec3(), Vec2::from(uvs[k])));
+            }
+        }
+    }
+    let idx = tris.iter().flat_map(|t| t.map(|k| remap[k])).collect();
+    finish(vs, idx)
+}
+
 /// Plane in the xy plane facing the default camera (normal −z).
 pub fn plane(w: f32, h: f32, segs: u32) -> Primitive {
     let (mut vs, mut idx) = (Vec::new(), Vec::new());

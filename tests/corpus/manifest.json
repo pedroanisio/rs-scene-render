@@ -606,6 +606,24 @@
     "p3d9-orphan.scene.xml": [
       "P3D9"
     ],
+    "par1-missing.scene.xml": [
+      "PAR1"
+    ],
+    "par1-other-shape.scene.xml": [
+      "PAR1"
+    ],
+    "par1-two.scene.xml": [
+      "PAR1"
+    ],
+    "par2-crossed.scene.xml": [
+      "PAR2"
+    ],
+    "par2-missing.scene.xml": [
+      "PAR2"
+    ],
+    "par2-other-primitive.scene.xml": [
+      "PAR2"
+    ],
     "pen1.scene.xml": [
       "PEN1"
     ],
@@ -1070,6 +1088,12 @@
     "v13-iterate.scene.xml": [
       "V13"
     ],
+    "v14-heightfield.scene.xml": [
+      "V14"
+    ],
+    "v14-path.scene.xml": [
+      "V14"
+    ],
     "v2-outputs.scene.xml": [
       "V2"
     ],
@@ -1288,6 +1312,7 @@
     "ocean.scene.xml": [],
     "openvdb-sequence.scene.xml": [],
     "openvdb.scene.xml": [],
+    "parametric.scene.xml": [],
     "particles3d-gas.scene.xml": [],
     "particles3d.scene.xml": [],
     "pdf-region.scene.xml": [],

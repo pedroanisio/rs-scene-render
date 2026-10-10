@@ -561,6 +561,14 @@ PROGRAMS = ('<scene version="1.6"><project width="64" height="64" fps="24" durat
     '<repeat id="rep" over="rows"><shape id="c" shape="rect" width="4" height="4" fill="#FF0000"/></repeat>'
     '<program id="steps" mode="step" width="8" height="8" src="../media/counter.wasm" sha256="' + PROGRAM_SHA["counter"] + '" stepsPerFrame="2" prewarm="3"/>'
     '</composition></scene>\n')
+
+# SREP 70: a parametric curve, a parametric surface and a heightfield, in version 1.6
+PARAMETRIC = ('<scene version="1.6"><project width="64" height="64" fps="24" duration="1"/>'
+    '<materials><material id="m" baseColor="#FF0000" unlit="true"/></materials><composition>'
+    '<shape id="curve" shape="parametric" stroke="#FFFFFF" strokeWidth="2"><parametricPath x="32 + 20 * Math.cos(t)" y="32 + 10 * Math.sin(t)" t0="0" t1="6.283185307179586" samples="64" closed="true"/></shape>'
+    '<object3D id="surface" primitive="parametric" material="m" x="32" y="32"><parametricSurface x="u" y="v" z="0" u0="-8" u1="8" v0="-4" v1="4" uSamples="4" vSamples="4"/></object3D>'
+    '<object3D id="ground" primitive="heightfield" material="m" x="32" y="48" rotationX="90"><heightfield height="2 * Math.sin(x / 4)" width="16" depth="8" xSamples="8" zSamples="4"/></object3D>'
+    '</composition></scene>\n')
 VALID = {
     "solid-colliders": SOLID_COLLIDERS,
     "fracture": FRACTURE,
@@ -577,6 +585,7 @@ VALID = {
     "model-select": MODEL_SELECT,
     "repeat-points": POINTS,
     "programs": PROGRAMS,
+    "parametric": PARAMETRIC,
     "repeat-points-neutral-steps": POINTS.replace('<repeat id="r"', '<repeat id="r" from="0" step="1"'),
     "connector": CONNECTOR,
     "connector-points": CONNECTOR.replace(' to="b"', ' toX="50%" toY="100%"').replace('route="orthogonal"', 'route="curved" bend="-20"').replace(' label="note"', ''),
@@ -716,6 +725,18 @@ CASES += [
 # SREP 68: stepsPerFrame and prewarm apply to shader effects only
 CASES += [
     ("stp1-not-a-shader", ["STP1"], lambda _: '<scene version="1.6"><project width="64" height="64" fps="10" duration="1"/><composition><shape id="s" shape="rect" width="10" height="10" fill="#FFFFFF" effects="fx"/></composition><effects><effect id="fx" type="blur" stepsPerFrame="2"/></effects></scene>\n'),
+]
+
+# SREP 70: the version gate V14, PAR1 and PAR2, and C69's exemption of parametric shapes
+CASES += [
+    ("v14-path", ["V14"], lambda _: PARAMETRIC.replace('version="1.6"', 'version="1.5"')),
+    ("v14-heightfield", ["V14"], lambda _: re.sub(r'<shape id="curve".*?</shape>|<object3D id="surface".*?</object3D>', '', PARAMETRIC).replace('version="1.6"', 'version="1.2"')),
+    ("par1-missing", ["PAR1"], lambda _: re.sub(r'<parametricPath [^>]*/>', '', PARAMETRIC)),
+    ("par1-other-shape", ["PAR1"], lambda _: PARAMETRIC.replace('shape="parametric"', 'shape="rect" width="4" height="4"')),
+    ("par1-two", ["PAR1"], lambda _: re.sub(r'(<parametricPath [^>]*/>)', r'\1\1', PARAMETRIC)),
+    ("par2-missing", ["PAR2"], lambda _: re.sub(r'<parametricSurface [^>]*/>', '', PARAMETRIC)),
+    ("par2-other-primitive", ["PAR2"], lambda _: PARAMETRIC.replace('primitive="heightfield"', 'primitive="plane"')),
+    ("par2-crossed", ["PAR2"], lambda _: PARAMETRIC.replace('primitive="parametric"', 'primitive="heightfield"')),
 ]
 
 def write(path, text, expect):
