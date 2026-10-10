@@ -435,8 +435,9 @@ pub struct LoopPass {
     pub out: [Arc<Tex>; 2],
 }
 
-/// The steps of a stateful shader inside an `iterate`, from the zero state: its program, its passes, the fixed inputs by
-/// sampler name, and where its last output and the steps it took go.
+/// The steps of a stateful shader run as a loop: inside an `iterate` from the zero state (SREP 67), or the steps of one
+/// frame (prewarm, stepsPerFrame) from the pair's state (SREP 68). Its program, its passes, the inputs by sampler name
+/// (the persistent buffers among them), and where its last output and the steps it took go.
 pub struct LoopRun {
     pub pipe: Arc<crate::shader::CustomPipe>,
     pub program: crate::glsl::Program,
@@ -446,6 +447,8 @@ pub struct LoopRun {
     pub persistent: Vec<String>,
     pub empty: Arc<Tex>,
     pub spec: IterateSpec,
+    /// FRAMEINDEX of the first step: 0 in an `iterate`, the steps the pair has taken before this frame otherwise.
+    pub first: u64,
     /// Steps taken, written when the loop has run.
     pub taken: Arc<std::sync::atomic::AtomicU64>,
 }
@@ -763,7 +766,7 @@ impl FxEngine {
         );
     }
 
-    /// Runs a looped stateful shader (SREP 67, Semantics 4): `spec.steps` steps from the zero state, fewer when it
+    /// Runs a looped stateful shader (SREP 67, Semantics 4; SREP 68): `spec.steps` steps from its inputs, fewer when it
     /// converges, then copies the last output into `out`. Returns the passes recorded.
     fn run_loop(&mut self, enc: &mut wgpu::CommandEncoder, l: &LoopRun, out: &Tex) -> usize {
         let mut cur = l.inputs.clone();
@@ -776,7 +779,7 @@ impl FxEngine {
                 let target = p.out[(step % 2) as usize].clone();
                 let mut block = p.block.clone();
                 if let Some(u) = &frame_index {
-                    l.program.write(&mut block, u, &[step as f64]);
+                    l.program.write(&mut block, u, &[(l.first + step) as f64]);
                 }
                 let textures =
                     l.program.samplers.iter().map(|s| cur.get(s).cloned().unwrap_or_else(|| l.empty.clone())).collect();

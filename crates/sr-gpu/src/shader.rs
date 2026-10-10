@@ -1001,20 +1001,7 @@ impl Builder<'_> {
             // SREP 67, Semantics 4: `steps` steps from the zero state (fewer when it converges), run as one loop when the
             // passes are recorded, so a ceiling of millions of steps is not millions of recorded passes; stepsPerFrame and
             // prewarm are ignored; FRAMEINDEX counts the steps from 0
-            let mut loop_passes = Vec::new();
-            let mut sizes = [w, h];
-            for (i, ps) in passes.iter().enumerate() {
-                let pw = glsl::isf_size(ps.get("WIDTH"), &names, w);
-                let ph = glsl::isf_size(ps.get("HEIGHT"), &names, h);
-                let extra: HashMap<&'static str, Vec<f64>> =
-                    [("RENDERSIZE", vec![pw as f64, ph as f64]), ("PASSINDEX", vec![i as f64])].into();
-                loop_passes.push(crate::fx::LoopPass {
-                    block: run.block(&program, &extra),
-                    target: ps.get("TARGET").and_then(|t| t.as_str()).map(String::from),
-                    out: [self.tex([pw, ph]), self.tex([pw, ph])],
-                });
-                sizes = [pw, ph];
-            }
+            let (loop_passes, sizes) = self.loop_passes(&passes, &names, [w, h], |extra| run.block(&program, extra));
             let taken = Arc::new(std::sync::atomic::AtomicU64::new(0));
             self.eng.iterations.push((format!("{}|{}", e.element_id().unwrap_or(""), cx.node), taken.clone()));
             let run_loop = crate::fx::LoopRun {
@@ -1025,53 +1012,114 @@ impl Builder<'_> {
                 persistent: persistent.clone(),
                 empty: empty.clone(),
                 spec,
+                first: 0,
                 taken,
             };
-            let mut out = self.tex(sizes);
+            let out = self.tex(sizes);
             self.passes.push(Pass::looped(run_loop, out.clone()));
-            if sizes != [w, h] {
-                let rs = self.internal("resize", RESIZE);
-                let b = rs.program.block();
-                out = self.custom(&rs, b, vec![out], [w, h]);
-            }
-            return Ok(self.convert(&out, None, &space, &working, false));
+            return Ok(self.finish(out, sizes, [w, h], &space, &working));
         }
+        let per_frame = step_attr(e, a, "stepsPerFrame", 1, 10_000).max(1) as f64;
+        if steps > 1 {
+            // SREP 68: the steps of this frame (prewarm, stepsPerFrame) run as one loop over two textures per pass, seeded
+            // with the pair's state, as the steps of an iterate do. Unrolled, every step took a new texture per pass, held
+            // until the frame was submitted, so memory grew with the step count (an OOM at 6,000 prewarm steps on 8 GB).
+            // Several steps in a frame imply stepping: FRAMEINDEX counts the pair's steps and TIMEDELTA is 1/(fps · k).
+            let delta = 1.0 / (fps * per_frame);
+            let (loop_passes, sizes) = self.loop_passes(&passes, &names, [w, h], |extra| {
+                let mut extra = extra.clone();
+                extra.insert("TIMEDELTA", vec![delta]);
+                run.block(&program, &extra)
+            });
+            // the buffers the last step writes: pass outputs alternate between the pair's two textures
+            let last = ((steps - 1) % 2) as usize;
+            let targets = persistent
+                .iter()
+                .filter_map(|n| {
+                    let p = loop_passes.iter().rev().find(|p| p.target.as_deref() == Some(n.as_str()))?;
+                    Some((n.clone(), p.out[last].clone()))
+                })
+                .collect();
+            let run_loop = crate::fx::LoopRun {
+                pipe: pipe.clone(),
+                program: program.clone(),
+                passes: loop_passes,
+                inputs: textures,
+                persistent: persistent.clone(),
+                empty,
+                spec: crate::fx::IterateSpec { steps, converged: false, tolerance: 0.0, check_every: 1 },
+                first: taken,
+                taken: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            };
+            let out = self.tex(sizes);
+            self.passes.push(Pass::looped(run_loop, out.clone()));
+            self.eng.feedback.insert(key, Feedback { frame: cx.frame, targets, steps: taken + steps });
+            return Ok(self.finish(out, sizes, [w, h], &space, &working));
+        }
+        // one step: the passes recorded in order
         let mut out = inp.clone();
         let mut sizes = [w, h];
-        let per_frame = step_attr(e, a, "stepsPerFrame", 1, 10_000).max(1) as f64;
-        for step in 0..steps {
-            for (i, ps) in passes.iter().enumerate() {
-                let pw = glsl::isf_size(ps.get("WIDTH"), &names, w);
-                let ph = glsl::isf_size(ps.get("HEIGHT"), &names, h);
-                let mut extra: HashMap<&'static str, Vec<f64>> =
-                    [("RENDERSIZE", vec![pw as f64, ph as f64]), ("PASSINDEX", vec![i as f64])].into();
-                if stepping {
-                    extra.insert("FRAMEINDEX", vec![(taken + step) as f64]);
-                    extra.insert("TIMEDELTA", vec![1.0 / (fps * per_frame)]);
-                }
-                let block = run.block(&program, &extra);
-                let texs = program
-                    .samplers
-                    .iter()
-                    .map(|n| textures.get(n).cloned().unwrap_or_else(|| empty.clone()))
-                    .collect();
-                out = self.custom(&pipe, block, texs, [pw, ph]);
-                sizes = [pw, ph];
-                if let Some(t) = ps.get("TARGET").and_then(|t| t.as_str()) {
-                    textures.insert(t.to_string(), out.clone());
-                }
+        for (i, ps) in passes.iter().enumerate() {
+            let pw = glsl::isf_size(ps.get("WIDTH"), &names, w);
+            let ph = glsl::isf_size(ps.get("HEIGHT"), &names, h);
+            let mut extra: HashMap<&'static str, Vec<f64>> =
+                [("RENDERSIZE", vec![pw as f64, ph as f64]), ("PASSINDEX", vec![i as f64])].into();
+            if stepping {
+                extra.insert("FRAMEINDEX", vec![taken as f64]);
+                extra.insert("TIMEDELTA", vec![1.0 / (fps * per_frame)]);
+            }
+            let block = run.block(&program, &extra);
+            let texs =
+                program.samplers.iter().map(|n| textures.get(n).cloned().unwrap_or_else(|| empty.clone())).collect();
+            out = self.custom(&pipe, block, texs, [pw, ph]);
+            sizes = [pw, ph];
+            if let Some(t) = ps.get("TARGET").and_then(|t| t.as_str()) {
+                textures.insert(t.to_string(), out.clone());
             }
         }
         if !persistent.is_empty() {
             let targets = persistent.iter().filter_map(|n| textures.get(n).map(|t| (n.clone(), t.clone()))).collect();
             self.eng.feedback.insert(key, Feedback { frame: cx.frame, targets, steps: taken + steps });
         }
-        if sizes != [w, h] {
+        Ok(self.finish(out, sizes, [w, h], &space, &working))
+    }
+
+    /// The passes of a looped stateful shader: per ISF pass, its uniform block (`block` of RENDERSIZE and PASSINDEX), the
+    /// buffer it writes and its two ping-pong targets; and the size of the last pass.
+    fn loop_passes(
+        &mut self,
+        passes: &[serde_json::Value],
+        names: &HashMap<String, f64>,
+        [w, h]: [u32; 2],
+        block: impl Fn(&HashMap<&'static str, Vec<f64>>) -> Vec<u8>,
+    ) -> (Vec<crate::fx::LoopPass>, [u32; 2]) {
+        let mut out = Vec::with_capacity(passes.len());
+        let mut sizes = [w, h];
+        for (i, ps) in passes.iter().enumerate() {
+            let pw = glsl::isf_size(ps.get("WIDTH"), names, w);
+            let ph = glsl::isf_size(ps.get("HEIGHT"), names, h);
+            let extra: HashMap<&'static str, Vec<f64>> =
+                [("RENDERSIZE", vec![pw as f64, ph as f64]), ("PASSINDEX", vec![i as f64])].into();
+            out.push(crate::fx::LoopPass {
+                block: block(&extra),
+                target: ps.get("TARGET").and_then(|t| t.as_str()).map(String::from),
+                out: [self.tex([pw, ph]), self.tex([pw, ph])],
+            });
+            sizes = [pw, ph];
+        }
+        (out, sizes)
+    }
+
+    /// A shader's last output of `sizes`, resized to the effect's `size` when they differ, back in the working space.
+    fn finish(&mut self, out: Arc<Tex>, sizes: [u32; 2], size: [u32; 2], space: &Space, working: &Working) -> Arc<Tex> {
+        let out = if sizes != size {
             let rs = self.internal("resize", RESIZE);
             let b = rs.program.block();
-            out = self.custom(&rs, b, vec![out], [w, h]);
-        }
-        Ok(self.convert(&out, None, &space, &working, false))
+            self.custom(&rs, b, vec![out], size)
+        } else {
+            out
+        };
+        self.convert(&out, None, space, working, false)
     }
 
     /// An image file decoded into the stored working space and uploaded (cached by path).
