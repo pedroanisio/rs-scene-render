@@ -2519,6 +2519,18 @@ impl Builder {
                         ));
                         continue;
                     };
+                    if mp.auto_orient && self.nodes[n as usize].name == "camera" {
+                        // a camera turns by yaw, pitch and roll: the path's tangent has no axis of its own to turn it on
+                        self.diags.push(err(
+                            "E02",
+                            format!(
+                                "motionPath on {who:?}: a camera does not turn along its path (autoOrient); key its yaw, pitch or roll, or give it a target"
+                            ),
+                            mp.loc,
+                            who,
+                        ));
+                        continue;
+                    }
                     let path = match MotionPath::parse(&mp.path) {
                         Ok(p) => p,
                         Err(e) => {

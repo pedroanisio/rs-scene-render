@@ -378,6 +378,8 @@ struct Local {
     opacity: f64,
     pos: [f64; 2],
     anchor: [f64; 2],
+    /// The rotation, degrees, with a motion path's tangent when it orients the node.
+    rot: f64,
 }
 
 /// Whether node `n` is inside its time window at composition time `t`, and so is every ancestor, each
@@ -925,7 +927,7 @@ impl<'p> Frame<'p> {
         if let Some(adj) = self.adjust[n as usize] {
             aff = adj.then(&aff);
         }
-        Local { aff, opacity, pos: [x, y], anchor: [ax, ay] }
+        Local { aff, opacity, pos: [x, y], anchor: [ax, ay], rot }
     }
 
     /// Box size and media placement of a node in its local space.
@@ -1194,7 +1196,23 @@ fn evaluate_inner(p: &Program, t: f64, clocks: &[(u32, f64)], include_inactive: 
             anchor: lc.anchor,
             content,
             clip: node.clip,
-            props: f.props(&node.slots),
+            props: {
+                let mut props = f.props(&node.slots);
+                if node.motion.is_some() {
+                    // A motion path places the node through its local transform. Its x and y (and its rotation, when
+                    // the path orients it) are also the node's properties, so that what reads a pose from them (a
+                    // camera's eye, an object3D, a rigid body's start) follows the path instead of the attributes the
+                    // path replaced.
+                    let turn = node.motion.as_ref().is_some_and(|m| m.auto_orient).then_some(("rotation", lc.rot));
+                    for (k, v) in [("x", lc.pos[0]), ("y", lc.pos[1])].into_iter().chain(turn) {
+                        match props.0.iter_mut().find(|(name, _)| &**name == k) {
+                            Some(slot) => slot.1 = Value::Num(v),
+                            None => props.0.push((Arc::from(k), Value::Num(v))),
+                        }
+                    }
+                }
+                props
+            },
             parts,
             bones: Vec::new(),
             skin: None,
