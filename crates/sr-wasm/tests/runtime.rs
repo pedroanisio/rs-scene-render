@@ -110,6 +110,37 @@ fn fuel_is_exact_in_straight_line_code() {
 }
 
 #[test]
+fn nested_calls_pay_for_instructions_without_function_entry_charges() {
+    for depth in [1, 4, 10] {
+        let mut functions = String::from("(func $f0 (result i64) i64.const 0)");
+        for i in 1..=depth {
+            functions.push_str(&format!("(func $f{i} (result i64) call $f{})", i - 1));
+        }
+        let m =
+            wat(&format!("(module (memory (export \"memory\") 1) {functions} (export \"generate\" (func $f{depth})))"));
+        let fuel = depth as u64 + 1; // one call per level and the result constant
+        assert!(generate(&m, &Inputs::default(), Limits { fuel, ..Limits::default() }).is_ok(), "{depth}");
+        assert_eq!(
+            generate(&m, &Inputs::default(), Limits { fuel: fuel - 1, ..Limits::default() }).unwrap_err().code,
+            Code::Prg12
+        );
+    }
+}
+
+#[test]
+fn a_host_call_costs_one_instruction_and_its_body_is_free() {
+    let m = wat(r#"(module
+        (import "sr" "rand_u64" (func $rand (result i64)))
+        (memory (export "memory") 1)
+        (func (export "generate") (result i64) call $rand drop i64.const 0))"#);
+    assert!(generate(&m, &Inputs::default(), Limits { fuel: 2, ..Limits::default() }).is_ok());
+    assert_eq!(
+        generate(&m, &Inputs::default(), Limits { fuel: 1, ..Limits::default() }).unwrap_err().code,
+        Code::Prg12
+    );
+}
+
+#[test]
 fn fuel_counts_loop_iterations_exactly() {
     // 10 iterations of: local.get, i32.const, i32.add, local.tee, i32.const, i32.lt_u, br_if = 7 charged each;
     // then i64.const 1 = 71 in all

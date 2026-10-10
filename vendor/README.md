@@ -36,3 +36,19 @@ is alone: about 3 ms more per 30 MiB uploaded.
 **When wgpu is upgraded** and asks for another gpu-allocator version, vendor that version and carry the
 change over, or drop this directory if upstream has an option for it by then. `tools/tests/test_vendor.py`
 fails if the patch entry or the change is missing.
+
+## wasmtime-internal-cranelift 41.0.4
+
+Wasmtime's compiler integration, from the Bytecode Alliance's
+<https://github.com/bytecodealliance/wasmtime>, under Apache-2.0 WITH LLVM-exception
+(the licence is kept in the crate and in `THIRD-PARTY-NOTICES.md`).
+
+The single source change is in `src/func_environ.rs`: `fuel_consumed` starts at zero
+instead of one. The program runtime charges executed WebAssembly instructions;
+Wasmtime's additional charge for every function entry is not part of that contract.
+Calls still cost one unit, including recursive calls. All instruction costs and fuel
+checks remain as released upstream.
+
+`crates/sr-wasm/tests/runtime.rs` checks exact budgets for straight-line code, loops,
+nested functions and host calls. Preserve those boundaries when upgrading Wasmtime,
+and drop the patch if upstream provides a configurable function-entry cost.

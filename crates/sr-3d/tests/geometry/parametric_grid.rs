@@ -109,7 +109,7 @@ fn a_closed_direction_joins_its_last_samples_to_the_first() {
 
 #[test]
 fn a_degenerate_row_takes_the_normal_of_its_triangles() {
-    // a cone: every vertex of the apex row is the same point, so D_v is zero there
+    // A cone: the apex row has coincident positions but distinct grid vertices, so D_u is zero there.
     let n = 8;
     let mut p = Vec::new();
     for j in 0..3 {
@@ -124,10 +124,16 @@ fn a_degenerate_row_takes_the_normal_of_its_triangles() {
         let nv = Vec3::from(v.normal);
         assert!(nv.is_finite() && (nv.length() - 1.0).abs() < 1e-4, "{:?}", v.normal);
     }
-    let apex = m.vertices.iter().find(|v| Vec3::from(v.pos).length() < 1e-6).expect("the apex");
-    // the apex triangles all lean the same way around the axis: their sum points along the axis
-    let a = Vec3::from(apex.normal);
-    assert!(a.y.abs() > 0.99, "apex normal {a}");
+    // Each apex vertex shares one nondegenerate triangle, rather than the whole cone fan.
+    // Its face normal points along that facet's angular midpoint, with slope -r/height * cos(pi/n).
+    for (i, apex) in m.vertices[..n].iter().enumerate() {
+        assert!(Vec3::from(apex.pos).length() < 1e-6);
+        let half = std::f64::consts::PI / n as f64;
+        let mid = (2 * i + 1) as f64 * half;
+        let expected = Vec3::new(mid.cos() as f32, (-0.5 * half.cos()) as f32, mid.sin() as f32).normalize();
+        let actual = Vec3::from(apex.normal);
+        assert!((actual - expected).length() < 1e-6, "apex {i}: {actual}, expected {expected}");
+    }
 }
 
 #[test]

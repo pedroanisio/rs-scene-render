@@ -82,3 +82,5 @@ opt-level = 3
 # of the device's mapped-memory window (see vendor/README.md).
 [patch.crates-io]
 gpu-allocator = { path = "vendor/gpu-allocator" }
+# SREP 66 meters Wasm instructions without Wasmtime's extra unit at each function entry.
+wasmtime-internal-cranelift = { path = "vendor/wasmtime-internal-cranelift" }

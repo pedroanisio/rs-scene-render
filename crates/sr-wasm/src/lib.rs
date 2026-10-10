@@ -15,7 +15,8 @@
 //! 3. **A fixed memory limit**: a [`wasmtime::ResourceLimiter`] that allows growth up to `memoryLimit` MiB.
 //!    `memory.grow` returns −1 beyond that limit. A growth the host itself fails to provide traps
 //!    ([`Code::Prg13`]); it never returns −1.
-//! 4. **Fuel**: `Config::consume_fuel`. Wasmtime charges 1 per instruction, and 0 for nop, drop, block, loop,
+//! 4. **Fuel**: `Config::consume_fuel`, with the pinned compiler patch removing its synthetic function-entry charge.
+//!    Wasmtime charges 1 per instruction, and 0 for nop, drop, block, loop,
 //!    unreachable, return, else and end. It checks the remaining fuel only at function entries and loop headers.
 //!    So each call is given `fuel + 1`, and a call fails ([`Code::Prg12`]) when it traps out of fuel, or when it
 //!    returns with none left. That outcome is exactly "the call spent more than `fuel`".
