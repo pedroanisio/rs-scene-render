@@ -317,10 +317,7 @@ impl Plane {
         (u * self.cos + v * self.sin, -u * self.sin + v * self.cos)
     }
 
-    fn delta<T: Real>(&self, i: u32, j: u32) -> C<T>
-    where
-        T: FromScaled,
-    {
+    fn delta<T: Real + FromScaled>(&self, i: u32, j: u32) -> C<T> {
         let (a, b) = self.offset(i, j);
         C { re: T::scaled(a * self.p_m, self.p_e), im: T::scaled(b * self.p_m, self.p_e) }
     }
