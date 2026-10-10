@@ -136,7 +136,9 @@ fn parse(bytes: &[u8]) -> Option<Vec<PairState>> {
             let texels = (w as usize).checked_mul(h as usize)?;
             let raw = r.take(texels.checked_mul(8)?)?;
             let px = raw
-                .chunks_exact(8)
+                .as_chunks::<8>()
+                .0
+                .iter()
                 .map(|t| {
                     std::array::from_fn(|c| half::f16::from_bits(u16::from_le_bytes([t[2 * c], t[2 * c + 1]])).to_f32())
                 })
