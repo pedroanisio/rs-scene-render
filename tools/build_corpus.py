@@ -683,6 +683,14 @@ CASES += [
     ("r54-audiogram-source", ["R54"], lambda _: MINIMAL.replace('<composition/>', '<assets><audiogram id="a" source="wrong" width="32" height="32"/></assets><composition><group id="wrong"/></composition>')),
 ]
 
+# SREP 73: flock/@orientToVelocity; false on a streak flock (the default shape) is inert (INERT-I16, information)
+FLOCK_UPRIGHT = ('<scene version="1.6"><project width="64" height="64" fps="24" duration="1"/>'
+    '<composition><flock id="f" width="32" height="32" count="4" seed="2" shape="disc" orientToVelocity="false"/></composition></scene>\n')
+VALID["flock-upright"] = FLOCK_UPRIGHT
+WARN_CASES += [
+    ("inert-i16-streak-flock", ["INERT-I16"], lambda _: FLOCK_UPRIGHT.replace(' shape="disc"', '')),
+]
+
 def write(path, text, expect):
     header = f"<!-- expect: {' '.join(expect) if expect else 'valid'} -->\n"
     body = text.split("\n", 1)[1] if text.startswith("<?xml") else text

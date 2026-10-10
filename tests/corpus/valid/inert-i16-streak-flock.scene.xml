@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- expect: INERT-I16 -->
+<scene version="1.6"><project width="64" height="64" fps="24" duration="1"/><composition><flock id="f" width="32" height="32" count="4" seed="2" orientToVelocity="false"/></composition></scene>
