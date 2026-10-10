@@ -1,5 +1,5 @@
 //! A document of the corpus without 1.6 syntax evaluates to the same frame graph as 1.5 and as 1.6; one with 1.6 syntax
-//! (SREP 70's parametric geometry) is refused as 1.5 by its version rule only.
+//! (added by an SREP branch) is refused as 1.5 by its version rule only, one listed in GATES_1_6.
 
 use std::path::PathBuf;
 
@@ -31,7 +31,7 @@ fn the_corpus_evaluates_alike_at_1_5_and_1_6() {
         let opts = sr_model::LoadOptions { verify_assets: false, base_dir: f.parent().map(Into::into) };
         let (Ok(da), Ok(db)) = (sr_model::load_str(&a, &opts), sr_model::load_str(&b, &opts)) else {
             // a document that is not valid as 1.5 (version gates such as V8) is not valid as 1.6 either, unless it
-            // holds 1.6 syntax, which 1.5 refuses by a version rule only (V14, SREP 70)
+            // holds 1.6 syntax, which 1.5 refuses by a version rule of GATES_1_6 only
             if sr_model::load_str(&b, &opts).is_ok() {
                 let r = sr_model::validate_str(&a, &opts);
                 let errors: Vec<&str> = r
