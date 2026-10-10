@@ -218,54 +218,45 @@ fn srep_0071_subsurface_zero_neutral() {
     assert!(a.px == b.px, "weight 0 changes the picture");
 }
 
-/// The mean of the pixels of the sphere whose normal is just past the terminator of the kit's light: the band of
-/// cos θ ∈ [−0.25, −0.02] on the sphere's visible disc, with the frame's light direction recovered from the lit
-/// render (the brightest pixel's normal).
-fn terminator_band(r: &Rendered, light: [f64; 3]) -> ([f64; 3], usize) {
-    let d = display(r);
-    let (mut sum, mut n) = ([0f64; 3], 0usize);
+/// The pixels just past the terminator in a render without subsurface: unlit (black, as the kit's only light is
+/// directional) and within 10 px of a lit pixel of the sphere.
+fn past_terminator(lambert: &Rendered) -> Vec<(u32, u32)> {
+    let d = display(lambert);
+    let w = lambert.size[0];
+    let lit = |x: u32, y: u32| {
+        let o = ((y * w + x) * 4) as usize;
+        d[o] as u32 + d[o + 1] as u32 + d[o + 2] as u32 > 6
+    };
+    let on_ball = |x: u32, y: u32| {
+        let (dx, dy) = (x as f64 + 0.5 - 320.0, y as f64 + 0.5 - 180.0);
+        dx * dx + dy * dy < 76.0 * 76.0
+    };
+    let mut out = Vec::new();
     for y in 100..260u32 {
         for x in 240..400u32 {
-            let (dx, dy) = ((x as f64 + 0.5 - 320.0) / 80.0, (y as f64 + 0.5 - 180.0) / 80.0);
-            let rr = dx * dx + dy * dy;
-            if rr > 0.81 {
+            if !on_ball(x, y) || lit(x, y) {
                 continue;
             }
-            // the visible normal (toward the camera is −z), scene space: +x right, +y down
-            let nrm = [dx, dy, -(1.0 - rr).sqrt()];
-            let c = nrm[0] * light[0] + nrm[1] * light[1] + nrm[2] * light[2];
-            if (-0.25..=-0.02).contains(&c) {
-                let o = ((y * r.size[0] + x) * 4) as usize;
-                for k in 0..3 {
-                    sum[k] += d[o + k] as f64;
-                }
-                n += 1;
+            let near = (y - 10..=y + 10).any(|yy| (x - 10..=x + 10).any(|xx| on_ball(xx, yy) && lit(xx, yy)));
+            if near {
+                out.push((x, y));
             }
         }
     }
-    (sum.map(|s| s / n.max(1) as f64), n)
+    out
 }
 
-/// The direction toward the light, from the brightest pixel of the sphere in a Lambertian render.
-fn toward_light(r: &Rendered) -> [f64; 3] {
+/// The mean colour of `px` in 8-bit code values.
+fn mean_at(r: &Rendered, px: &[(u32, u32)]) -> [f64; 3] {
     let d = display(r);
-    let (mut best, mut at) = (0u32, [0.0; 3]);
-    for y in 100..260u32 {
-        for x in 240..400u32 {
-            let (dx, dy) = ((x as f64 + 0.5 - 320.0) / 80.0, (y as f64 + 0.5 - 180.0) / 80.0);
-            let rr = dx * dx + dy * dy;
-            if rr > 0.9 {
-                continue;
-            }
-            let o = ((y * r.size[0] + x) * 4) as usize;
-            let v = d[o] as u32 + d[o + 1] as u32 + d[o + 2] as u32;
-            if v > best {
-                best = v;
-                at = [dx, dy, -(1.0 - rr).sqrt()];
-            }
+    let mut sum = [0f64; 3];
+    for &(x, y) in px {
+        let o = ((y * r.size[0] + x) * 4) as usize;
+        for k in 0..3 {
+            sum[k] += d[o + k] as f64;
         }
     }
-    at
+    sum.map(|v| v / px.len().max(1) as f64)
 }
 
 #[test]
@@ -274,10 +265,9 @@ fn srep_0071_subsurface_wraps_terminator() {
         return;
     };
     let w1 = render_xml(&kit("", &subsurface(&format!("subsurface=\"1\" {SSS_ATTRS}")), BALL, LIT)).unwrap();
-    let light = toward_light(&w0);
-    let (dark, n) = terminator_band(&w0, light);
-    let (wrapped, m) = terminator_band(&w1, light);
-    assert!(n > 200 && n == m, "{n} {m} pixels past the terminator");
+    let band = past_terminator(&w0);
+    assert!(band.len() > 200, "{} pixels past the terminator", band.len());
+    let (dark, wrapped) = (mean_at(&w0, &band), mean_at(&w1, &band));
     // brighter just past the terminator (Semantics 1, the wrap property), and redder there (the bleeding order)
     assert!(wrapped.iter().sum::<f64>() > dark.iter().sum::<f64>() + 6.0, "{wrapped:?} vs {dark:?}");
     assert!(wrapped[0] > wrapped[2], "{wrapped:?}");
@@ -285,19 +275,19 @@ fn srep_0071_subsurface_wraps_terminator() {
 
 #[test]
 fn the_wrap_grows_with_the_radius_and_zero_radius_is_lambert() {
-    let band = |radius: &str| {
+    let ball = |radius: &str| {
         let m = subsurface(&format!("subsurface=\"1\" subsurfaceColor=\"#B0B0B0FF\" subsurfaceRadius=\"{radius}\""));
         render_xml(&kit("", &m, BALL, LIT))
     };
     let Some(lambert) = render_xml(&kit("", &subsurface(""), BALL, LIT)) else { return };
-    let light = toward_light(&lambert);
-    let at = |r: &Rendered| terminator_band(r, light).0.iter().sum::<f64>();
-    let zero = band("0").unwrap();
+    let band = past_terminator(&lambert);
+    let at = |r: &Rendered| mean_at(r, &band).iter().sum::<f64>();
+    let zero = ball("0").unwrap();
     // radius 0 with the base colour as the subsurface colour: the Lambertian picture (within rounding of the lobe)
     let (dl, dz) = (display(&lambert), display(&zero));
     let worst = dl.iter().zip(&dz).map(|(a, b)| (*a as i32 - *b as i32).abs()).max().unwrap();
     assert!(worst <= 2, "radius 0 differs from Lambert by {worst} code values");
-    let (r5, r20, r60) = (at(&band("5").unwrap()), at(&band("20").unwrap()), at(&band("60").unwrap()));
+    let (r5, r20, r60) = (at(&ball("5").unwrap()), at(&ball("20").unwrap()), at(&ball("60").unwrap()));
     assert!(at(&zero) < r5 && r5 < r20 && r20 < r60, "{} {r5} {r20} {r60}", at(&zero));
 }
 
