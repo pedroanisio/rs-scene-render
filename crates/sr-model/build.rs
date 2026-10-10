@@ -548,6 +548,12 @@ fn child_field_name(c: &CDef, el: &str) -> String {
     }
 }
 
+/// Child enums whose element alternatives that are also alternatives of nodeChoice (same name and type) are held as
+/// one `Node(Node)` variant, so that `Node::child_nodes` reaches them like the children of a group: the object3D, camera
+/// and particles3D children of a viewport3D (SREP 74), whose content model lists those elements rather than the
+/// nodeChoice group.
+const NODE_HOLDERS: &[&str] = &["Viewport3DChild"];
+
 fn group_enum_name(g: &str) -> String {
     match g {
         "animationElements" => "Animation".into(),
@@ -917,7 +923,20 @@ impl<'s> Model<'s> {
     }
 
     fn emit_choice_enum(&mut self, enum_name: &str, doc: &str, p: &Particle) {
-        let (els, groups) = self.choice_alts(p);
+        let (mut els, groups) = self.choice_alts(p);
+        // the element alternatives that are nodes of nodeChoice, held as a `Node` (see NODE_HOLDERS)
+        let mut node_els: Vec<String> = Vec::new();
+        if NODE_HOLDERS.contains(&enum_name) {
+            let (node_choice, _) = self.choice_alts(&self.s.groups["nodeChoice"]);
+            els.retain(|(el, st)| {
+                let node = node_choice.iter().any(|(n, t)| n == el && t == st);
+                if node {
+                    node_els.push(el.clone());
+                }
+                !node
+            });
+            assert!(!node_els.is_empty(), "{enum_name} holds no node of nodeChoice");
+        }
         let mut o = String::new();
         writeln!(o, "/// {doc}").unwrap();
         o.push_str("#[derive(Debug, Clone, PartialEq, serde::Serialize)]\n#[allow(clippy::large_enum_variant)]\n");
@@ -929,6 +948,9 @@ impl<'s> Model<'s> {
             let ge = group_enum_name(g);
             writeln!(o, "    #[serde(untagged)]\n    {ge}({ge}),").unwrap();
         }
+        if !node_els.is_empty() {
+            o.push_str("    #[serde(untagged)]\n    Node(Node),\n");
+        }
         o.push_str("}\n\n");
         writeln!(o, "impl {enum_name} {{").unwrap();
         writeln!(o, "    /// XML element names this enum accepts.").unwrap();
@@ -936,12 +958,20 @@ impl<'s> Model<'s> {
         for (el, _) in &els {
             write!(o, "{el:?}, ").unwrap();
         }
+        for el in &node_els {
+            write!(o, "{el:?}, ").unwrap();
+        }
         o.push_str("];\n\n");
         o.push_str("    pub(crate) fn from_xml(n: XNode<'_, '_>) -> Result<Option<Self>, ModelError> {\n");
-        if !els.is_empty() {
+        if !els.is_empty() || !node_els.is_empty() {
             o.push_str("        match n.tag_name().name() {\n");
             for (el, st) in &els {
                 writeln!(o, "            {el:?} => return Ok(Some(Self::{}({st}::from_xml(n)?))),", variant_name(el))
+                    .unwrap();
+            }
+            if !node_els.is_empty() {
+                let names: Vec<String> = node_els.iter().map(|e| format!("{e:?}")).collect();
+                writeln!(o, "            {} => return Ok(Node::from_xml(n)?.map(Self::Node)),", names.join(" | "))
                     .unwrap();
             }
             o.push_str("            _ => {}\n        }\n");
@@ -959,6 +989,9 @@ impl<'s> Model<'s> {
             let ge = group_enum_name(g);
             writeln!(o, "            Self::{ge}(v) => v.element_name(),").unwrap();
         }
+        if !node_els.is_empty() {
+            o.push_str("            Self::Node(v) => v.element_name(),\n");
+        }
         o.push_str("        }\n    }\n\n");
         o.push_str("    /// Value of `@id` of the wrapped element, if any.\n    pub fn id(&self) -> Option<&str> {\n        match self {\n");
         for (el, _) in &els {
@@ -968,6 +1001,9 @@ impl<'s> Model<'s> {
             let ge = group_enum_name(g);
             writeln!(o, "            Self::{ge}(v) => v.id(),").unwrap();
         }
+        if !node_els.is_empty() {
+            o.push_str("            Self::Node(v) => v.id(),\n");
+        }
         o.push_str("        }\n    }\n}\n\n");
         let arms = |call: &str| -> String {
             let mut a = String::new();
@@ -976,6 +1012,9 @@ impl<'s> Model<'s> {
             }
             for g in &groups {
                 writeln!(a, "            Self::{}(v) => v.{call},", group_enum_name(g)).unwrap();
+            }
+            if !node_els.is_empty() {
+                writeln!(a, "            Self::Node(v) => v.{call},").unwrap();
             }
             a
         };

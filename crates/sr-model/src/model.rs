@@ -30,7 +30,7 @@ impl Scene {
 }
 
 impl Node {
-    /// Child nodes of containers (`group`, `sequence`, `repeat`), in document order.
+    /// Child nodes of containers (`group`, `sequence`, `repeat`, `iterate`, `viewport3D`), in document order.
     pub fn child_nodes(&self) -> Box<dyn Iterator<Item = &Node> + '_> {
         match self {
             Node::Group(g) => Box::new(g.children.iter().filter_map(GroupChild::as_node)),
@@ -41,6 +41,11 @@ impl Node {
             })),
             Node::Iterate(r) => Box::new(r.children.iter().filter_map(|c| match c {
                 IterateChild::Node(n) => Some(n),
+                _ => None,
+            })),
+            // SREP 74: a viewport's object3D, camera and particles3D children
+            Node::Viewport3D(v) => Box::new(v.children.iter().filter_map(|c| match c {
+                Viewport3DChild::Node(n) => Some(n),
                 _ => None,
             })),
             _ => Box::new(std::iter::empty()),

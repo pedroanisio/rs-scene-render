@@ -2379,6 +2379,10 @@ impl Renderer {
             n.size.map(|s| h(&s.map(hf))).unwrap_or(4),
             Self::used_hash(ctx, i, to_space),
         ];
+        if n.kind == "viewport3D" {
+            // its picture also shows its animated background (SREP 74)
+            words.push(props_hash(&n.props, &n.parts));
+        }
         for &c in &ctx.kids[i] {
             words.push(Self::subtree_hash(ctx, c, to_space));
         }
@@ -2403,6 +2407,10 @@ impl Renderer {
     }
 
     fn isolated(n: &FrameNode, has_kids: bool, count_effects: bool) -> bool {
+        // a viewport3D always draws its picture: its own 3D scene over its background, in its width × height (SREP 74)
+        if n.kind == "viewport3D" {
+            return true;
+        }
         if !has_kids {
             return false;
         }
@@ -2575,6 +2583,9 @@ impl Renderer {
                         )),
                     };
                     let mut inner_cmds = Vec::new();
+                    if n.kind == "viewport3D" {
+                        self.viewport_background(plan, ctx, i, &inner, &mut inner_cmds);
+                    }
                     for c in Self::depth_sorted(g, &kids[i]) {
                         self.emit(plan, ctx, c, &inner, n.world_opacity, &mut inner_cmds, false, 0);
                     }
@@ -3388,11 +3399,65 @@ impl Renderer {
     /// and silhouettes act on layers only. A node with an edge-space override needs the visible background first.
     fn background(&mut self, plan: &mut Plan, ctx: &Ctx, space: &Space, cmds: &mut Vec<Cmd>) {
         let g = ctx.g;
+        let hash = {
+            let mut f = Fnv(0xcbf2_9ce4_8422_2325);
+            f.value(&g.background);
+            h(&[f.0, hf(g.size[0]), hf(g.size[1]), elements_hash(&g.elements)])
+        };
         // the document's frame, in document units (the space may draw it at another scale)
-        let (w, hh) = (g.size[0], g.size[1]);
+        self.fill_paint(plan, ctx, space, &g.background, g.size, &Affine::IDENTITY, BLEND_UNDER, hash, cmds);
+    }
+
+    /// The background of viewport3D node `i` (SREP 74 §4), filling its picture before its 3D scene draws.
+    fn viewport_background(&mut self, plan: &mut Plan, ctx: &Ctx, i: usize, space: &Space, cmds: &mut Vec<Cmd>) {
+        let n = &ctx.g.nodes[i];
+        let attrs = Attrs { e: &*n.elem, props: Some(&n.props) };
+        let value = match attrs.paint("background") {
+            Some(Value::Str(s)) if s.starts_with("token:") => {
+                Value::Color(self.tokens.get(&s[6..]).copied().unwrap_or([0.0; 4]))
+            }
+            Some(v) => v,
+            None => return,
+        };
+        if matches!(value, Value::Color(c) if c[3] <= 0.0) {
+            // the default, transparent: the picture starts empty
+            return;
+        }
+        let size = n.size.unwrap_or(ctx.g.size);
+        let hash = {
+            let mut f = Fnv(0xcbf2_9ce4_8422_2325);
+            f.value(&value);
+            h(&[
+                f.0,
+                hf(size[0]),
+                hf(size[1]),
+                affine_hash(&space.xform.then(&n.world)),
+                elements_hash(&ctx.g.elements),
+            ])
+        };
+        self.fill_paint(plan, ctx, space, &value, size, &n.world, 0, hash, cmds);
+    }
+
+    /// Fills the rectangle (0, 0)–`size` of the frame `world` maps into `space` with the paint `value` (a colour or a
+    /// paint reference), blended with `blend`.
+    #[allow(clippy::too_many_arguments)]
+    fn fill_paint(
+        &mut self,
+        plan: &mut Plan,
+        ctx: &Ctx,
+        space: &Space,
+        value: &Value,
+        size: [f64; 2],
+        world: &Affine,
+        blend: u32,
+        hash: u64,
+        cmds: &mut Vec<Cmd>,
+    ) {
+        let g = ctx.g;
+        let (w, hh) = (size[0], size[1]);
         let tokens = self.tokens.clone();
         let tok = |t: &str| tokens.get(t).copied();
-        let (kind, paint, tex) = match &g.background {
+        let (kind, paint, tex) = match value {
             Value::Color(c) => (src::PAINT, plan.paints.solid(&self.working, *c), self.dummy.clone()),
             Value::PaintRef(id) => {
                 match ctx.p.scene.paints.as_ref().and_then(|ps| ps.children.iter().find(|c| c.id() == Some(id))) {
@@ -3440,29 +3505,17 @@ impl Renderer {
             }
             _ => (src::PAINT, plan.paints.solid(&self.working, [0.0, 0.0, 0.0, 1.0]), self.dummy.clone()),
         };
-        let (_, first_vertex) = self.push_quad(
-            plan,
-            space,
-            &Affine::IDENTITY,
-            None,
-            [0.0, 0.0, w, hh],
-            [0.0, 0.0, 1.0, 1.0],
-            &glam::Mat4::IDENTITY,
-        );
+        let (_, first_vertex) =
+            self.push_quad(plan, space, world, None, [0.0, 0.0, w, hh], [0.0, 0.0, 1.0, 1.0], &glam::Mat4::IDENTITY);
         plan.draws.push(Draw {
             opacity: 1.0,
             src_kind: kind,
             paint,
             target_size: [space.size[0] as f32, space.size[1] as f32],
             uv_rect: [0.0, 0.0, 1.0, 1.0],
-            blend: BLEND_UNDER,
+            blend,
             ..Default::default()
         });
-        let hash = {
-            let mut f = Fnv(0xcbf2_9ce4_8422_2325);
-            f.value(&g.background);
-            h(&[f.0, hf(g.size[0]), hf(g.size[1]), elements_hash(&g.elements)])
-        };
         cmds.push(Cmd {
             draw: (plan.draws.len() - 1) as u32,
             first_vertex,

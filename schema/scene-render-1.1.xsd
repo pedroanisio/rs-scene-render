@@ -3195,8 +3195,29 @@
       <xs:element name="compute" type="computeType"/>
       <xs:element name="iterate" type="iterateType"/>
       <xs:element name="program" type="programNodeType"/>
+      <!-- SREP 74 (draft; document version 1.6, local addition until an sr-core release) -->
+      <xs:element name="viewport3D" type="viewport3DType"/>
     </xs:choice>
   </xs:group>
+  <!-- ===================================================== SREP 74: a 3D scene with its own camera, as a node -->
+  <xs:complexType name="viewport3DType">
+    <xs:annotation><xs:documentation>Renders its own 3D scene (its object3D and camera children, and the lights named by
+  @lights) into a width x height picture drawn at its origin. Isolated from the document's 3D scene. SREP 74.</xs:documentation></xs:annotation>
+    <xs:choice minOccurs="0" maxOccurs="unbounded">
+      <xs:group ref="nodeBehaviour"/>
+      <xs:element name="object3D" type="object3DType"/>
+      <xs:element name="camera" type="cameraType"/>
+      <xs:element name="particles3D" type="particles3DType"/>
+    </xs:choice>
+    <xs:attributeGroup ref="nodeAttributes"/>
+    <xs:attribute name="width" type="xs:positiveInteger" use="required"/>
+    <xs:attribute name="height" type="xs:positiveInteger" use="required"/>
+    <xs:attribute name="camera" type="xs:IDREF"/>
+    <xs:attribute name="lights" type="xs:IDREFS"/>
+    <xs:attribute name="background" type="paintType" default="#00000000"/>
+    <xs:attribute name="blend" type="blendType" default="normal"/>
+    <xs:attribute name="effects" type="xs:IDREFS"/>
+  </xs:complexType>
   <!-- ===================================================== SREP 67: compute accumulation, density tonemap, iterate -->
   <xs:complexType name="computeType">
     <xs:annotation><xs:documentation>Runs the WGSL compute shader @src for @invocations invocations; sr_accumulate adds

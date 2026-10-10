@@ -264,9 +264,18 @@ impl Renderer {
             return pw * own;
         }
         match n.parent {
+            // a viewport3D's children are in the viewport's own 3D space (SREP 74 §1)
+            Some(p) if g.nodes[p as usize].kind == "viewport3D" => own,
             Some(p) => embed(&g.nodes[p as usize].world) * own,
             None => own,
         }
+    }
+
+    /// The frame size, in pixels, of the 3D scene node `j` belongs to: its viewport3D's width × height (SREP 74), else
+    /// the document's frame.
+    fn frame_of(g: &FrameGraph, j: usize) -> [f32; 2] {
+        let size = sr_eval::viewport_of(&g.nodes, j).and_then(|v| g.nodes[v].size).unwrap_or(g.size);
+        [size[0] as f32, size[1] as f32]
     }
 
     /// World matrix of the frame a parented element's own transform is in,
@@ -293,7 +302,8 @@ impl Renderer {
                 // the camera as it looks: its pose, look-at target and shake
                 "camera" => {
                     let cp = Self::cam_params(g, lights, j, depth);
-                    camera::resolve(&cp, g.size[0] as f32, g.size[1] as f32).view.inverse()
+                    let [w, h] = Self::frame_of(g, j);
+                    camera::resolve(&cp, w, h).view.inverse()
                 }
                 _ => embed(&n.world),
             });
@@ -392,14 +402,27 @@ impl Renderer {
 
     /// The frame camera (the active camera node, else the default 2.5D camera).
     pub(super) fn camera3(&self, g: &FrameGraph, p: &Program, frame: [f32; 2]) -> (CameraView, CamExtras, [f32; 2]) {
+        self.camera3_of(g, p, frame, g.camera.map(|c| c as usize), self.view_override)
+    }
+
+    /// The view of camera node `cam` (else the implicit camera of a `frame`-sized picture), turned to a 360 face by
+    /// `view_override` when one is given.
+    fn camera3_of(
+        &self,
+        g: &FrameGraph,
+        p: &Program,
+        frame: [f32; 2],
+        cam: Option<usize>,
+        view_override: Option<ViewOverride>,
+    ) -> (CameraView, CamExtras, [f32; 2]) {
         let lights = doc_lights(p);
         let mut cp = CameraParams::default();
         let mut ex = CamExtras { exposure: 1.0, dof: None, lens_k1: 0.0, ao: None, ssr: false, path: None };
         let mut focal_mm = camera::lens_of_fov(cp.fov, 36.0);
         let (mut sensor, mut fstop, mut focus, mut blades, mut dof_on, mut focus_target) =
             (36.0f32, 2.8f32, 1000.0f32, 0u32, false, None);
-        if let Some(ci) = g.camera {
-            let n = &g.nodes[ci as usize];
+        if let Some(ci) = cam {
+            let n = &g.nodes[ci];
             let a = attrs(n);
             sensor = a.num("sensorWidth", 36.0) as f32;
             if flag(&a, "ambientOcclusion", false) {
@@ -414,7 +437,7 @@ impl Renderer {
                 });
             }
             focal_mm = camera::lens_of_fov(Self::cam_fov(&a), sensor);
-            cp = Self::cam_params(g, lights, ci as usize, 0);
+            cp = Self::cam_params(g, lights, ci, 0);
             ex.exposure = 2f32.powf(a.num("exposure", 0.0) as f32);
             ex.lens_k1 = a.num("lensDistortion", 0.0) as f32;
             dof_on = flag(&a, "depthOfField", false);
@@ -423,10 +446,10 @@ impl Renderer {
             blades = a.num("apertureBlades", 0.0) as u32;
             focus_target = a.str("focusTarget");
         }
-        let base = self.view_override.map(|o| o.frame).unwrap_or(frame);
+        let base = view_override.map(|o| o.frame).unwrap_or(frame);
         let mut view = camera::resolve(&cp, base[0], base[1]);
         let mut size = frame;
-        if let Some(o) = self.view_override {
+        if let Some(o) = view_override {
             // keep the viewport camera's eye; turn to the face and square the frustum
             let cam_to_world = view.view.inverse();
             let right = cam_to_world.transform_vector3(Vec3::X).normalize_or(Vec3::X);
@@ -2115,7 +2138,8 @@ impl Renderer {
     }
 
     /// Lights of the document at this frame (dome lights become the environment).
-    fn lights3(&mut self, plan: &mut Plan, ctx: &Ctx) -> (Vec<Light3>, Option<Env3>) {
+    /// The document's lights as the 3D pass uses them, or only those named in `only` (a viewport3D's `lights`).
+    fn lights3(&mut self, plan: &mut Plan, ctx: &Ctx, only: Option<&[String]>) -> (Vec<Light3>, Option<Env3>) {
         let mut out = Vec::new();
         let mut env = None;
         let Some(ls) = ctx.p.scene.lights.as_ref() else {
@@ -2123,6 +2147,9 @@ impl Renderer {
         };
         let base = Self::base_dir(ctx.p);
         for l in &ls.lights {
+            if only.is_some_and(|ids| !ids.iter().any(|id| *id == l.id)) {
+                continue;
+            }
             let a = Attrs { e: l as &dyn Element, props: element_props(ctx.g, &l.id) };
             let kind = a.str("type").unwrap_or_default();
             let mut color = self.working_color(a.paint("color"), self.literal_linear([1.0; 4]));
@@ -2440,7 +2467,12 @@ impl Renderer {
         gf.size = [side as f64, side as f64];
         let mut problems = Vec::new();
         if let Some(vc) = &s.viewport_camera {
-            match gf.nodes.iter().position(|n| &*n.id == vc.as_str() && n.kind == "camera") {
+            // a camera inside a viewport3D never views the document's scene (SREP 74 §2)
+            match (0..gf.nodes.len()).find(|&k| {
+                &*gf.nodes[k].id == vc.as_str()
+                    && gf.nodes[k].kind == "camera"
+                    && sr_eval::viewport_of(&gf.nodes, k).is_none()
+            }) {
                 Some(k) => gf.camera = Some(k as u32),
                 None => problems.push(format!("scene360: viewport camera {vc} is not a camera")),
             }
@@ -2618,9 +2650,10 @@ impl Renderer {
         Frame { texture: out, stats }
     }
 
-    /// Frame clip space → this target's clip space.
-    fn clip_fix(space: &Space, cam_size: [f32; 2]) -> Mat4 {
-        let (tw, th) = (space.size[0] as f32, space.size[1] as f32);
+    /// Frame clip space → this target's clip space, where `to_target` maps the camera's frame pixels to target pixels
+    /// (the space's transform, after a viewport's world for a viewport3D's scene).
+    fn clip_fix(to_target: &Affine, size: [u32; 2], cam_size: [f32; 2]) -> Mat4 {
+        let (tw, th) = (size[0] as f32, size[1] as f32);
         let to_px = Mat4::from_cols_array(&[
             cam_size[0] * 0.5,
             0.0,
@@ -2657,14 +2690,14 @@ impl Renderer {
             0.0,
             1.0,
         ]);
-        to_ndc * embed(&space.xform) * to_px
+        to_ndc * embed(to_target) * to_px
     }
 
     /// Projection of 2.5D layers: target pixels (with z) → target clip space through the frame camera.
     pub(super) fn proj25(&self, g: &FrameGraph, p: &Program, space: &Space) -> Mat4 {
         let (cam, _, cam_size) = self.camera3(g, p, [g.size[0] as f32, g.size[1] as f32]);
         let back = space.xform.inverse().map(|a| embed(&a)).unwrap_or(Mat4::IDENTITY);
-        Self::clip_fix(space, cam_size) * cam.view_proj() * back
+        Self::clip_fix(&space.xform, space.size, cam_size) * cam.view_proj() * back
     }
 
     /// The 3D objects of node `i`'s block, which render together in one pass (one depth buffer, one
@@ -2702,6 +2735,7 @@ impl Renderer {
     fn geodesic_scene(
         g: &FrameGraph,
         p: &Program,
+        camera: Option<usize>,
         members: &[usize],
         cam: &CameraView,
         ex: &CamExtras,
@@ -2710,7 +2744,7 @@ impl Renderer {
         unsupported: &mut Vec<String>,
     ) -> Result<Option<crate::geodesic::GeodesicScene>, String> {
         use crate::geodesic::{Disk, GeodesicScene, Pattern};
-        let wants = g.camera.is_some_and(|ci| flag(&attrs(&g.nodes[ci as usize]), "geodesics", false));
+        let wants = camera.is_some_and(|ci| flag(&attrs(&g.nodes[ci]), "geodesics", false));
         let holes: Vec<usize> = members.iter().copied().filter(|j| g.nodes[*j].kind == "blackHole").collect();
         let Some(&hole) = holes.first() else {
             return if wants { Err("camera geodesics=\"true\" needs a blackHole".into()) } else { Ok(None) };
@@ -2790,7 +2824,7 @@ impl Renderer {
         };
         let to_world = cam.view.inverse();
         let scale = if cam_size[0] > 0.0 { size[0] as f32 / cam_size[0] } else { 1.0 };
-        let samples = attrs(&g.nodes[g.camera.expect("geodesics needs a camera") as usize])
+        let samples = attrs(&g.nodes[camera.expect("geodesics needs a camera")])
             .num("pathSamples", 16.0)
             .clamp(1.0, 4096.0) as u32;
         Ok(Some(GeodesicScene {
@@ -2833,11 +2867,30 @@ impl Renderer {
         if members.first() != Some(&i) || !visible3(g, i) {
             return;
         }
-        let frame = [g.size[0] as f32, g.size[1] as f32];
-        let (cam, ex, cam_size) = self.camera3(g, ctx.p, frame);
+        // SREP 74: the scene of a viewport3D has the viewport's frame, its own camera and the lights it names, and is
+        // drawn in the viewport's space; a 360 face turns the document's camera only
+        let vp = sr_eval::viewport_of(&g.nodes, i);
+        let (frame, camera, view_override, to_target, only) = match vp {
+            Some(v) => {
+                let only = match g.nodes[v].elem.get_attr("lights") {
+                    Some(AttrValue::Tokens(ids)) => Some(ids),
+                    _ => None,
+                };
+                (Self::frame_of(g, i), sr_eval::viewport_camera(g, v), None, space.xform.then(&g.nodes[v].world), only)
+            }
+            None => (
+                [g.size[0] as f32, g.size[1] as f32],
+                g.camera.map(|c| c as usize),
+                self.view_override,
+                space.xform,
+                None,
+            ),
+        };
+        let (cam, ex, cam_size) = self.camera3_of(g, ctx.p, frame, camera, view_override);
         let geodesic = match Self::geodesic_scene(
             g,
             ctx.p,
+            camera,
             &members,
             &cam,
             &ex,
@@ -2851,7 +2904,7 @@ impl Renderer {
                 return;
             }
         };
-        let (mut lights, env) = self.lights3(plan, ctx);
+        let (mut lights, env) = self.lights3(plan, ctx, only.as_deref());
         if lights.is_empty()
             && env.is_none()
             && ctx.p.scene.lights.as_ref().map(|l| l.lights.is_empty()).unwrap_or(true)
@@ -2948,7 +3001,7 @@ impl Renderer {
         plan.stats.objects3d += draws.len();
         plan.stats.triangles += draws.iter().map(|d| d.mesh_triangles()).sum::<u64>();
         plan.stats.splats += splats.iter().map(|s| s.gpu.n as u64).sum::<u64>();
-        let clip_fix = Self::clip_fix(space, cam_size);
+        let clip_fix = Self::clip_fix(&to_target, space.size, cam_size);
         let scene = Scene3 {
             cam,
             clip_fix,

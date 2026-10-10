@@ -50,3 +50,8 @@ Additional local extensions accepted on 2026-10-09:
 - SREP 70: parametric paths, surfaces and heightfields, with V14, PAR1 and PAR2.
 - SREP 72: shader content rectangles, supersampling, edge blending and float32 working textures.
 - SREP 73: flock/@orientToVelocity and the INERT-I16 diagnostic for streak flocks.
+- SREP 74 (draft, sr-core branch srep/drafts-2026-10): viewport3D (viewport3DType, in nodeChoice) and the Schematron
+  pattern p-srep74 (V15, VP1, VP3), with the syntax of srep/srep-0074.md. Local difference from the engine's
+  black-hole rules as written in the draft SREP 76 (branch srep/upstream-engine-extensions): BH5 to BH8 look only in
+  the camera's scope, the viewport3D it is in, else the document outside every viewport3D (a let $scope of
+  generate-id(ancestor::viewport3D[1]) in the rule camera[@geodesics]); the native mirror's W03 does the same.

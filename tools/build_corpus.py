@@ -747,6 +747,29 @@ WARN_CASES += [
     ("inert-i16-streak-flock", ["INERT-I16"], lambda _: FLOCK_UPRIGHT.replace(' shape="disc"', '')),
 ]
 
+# SREP 74: a viewport3D (document version 1.6), V15, VP1 and VP3; and BH5, BH6 and BH8, which keep to the scope of the
+# camera (the viewport3D it is in, else the document outside every viewport3D). A black hole needs version 1.3 (BH1) and
+# a viewport3D 1.6 (V15), so each black-hole case also reports V15.
+VIEWPORT = ('<scene version="1.6"><project width="64" height="64" fps="24" duration="1"/>'
+    '<materials><material id="m" baseColor="#FF0000" unlit="true" doubleSided="true"/></materials>'
+    '<composition>'
+    '<viewport3D id="v" width="32" height="16" x="8" y="8" camera="vc" lights="key" background="#202020FF">'
+    '<camera id="vc" x="16" y="8" z="-27.7128"/>'
+    '<object3D id="p" primitive="plane" width="8" height="4" x="16" y="8" material="m"/>'
+    '</viewport3D>'
+    '</composition><lights><light id="key" type="directional"/></lights></scene>\n')
+VALID["viewport3d"] = VIEWPORT
+VIEWPORT_IN_BLACKHOLE = lambda inner: BLACKHOLE.replace('<blackHole', f'<viewport3D id="v" width="16" height="16">{inner}</viewport3D><blackHole')
+CASES += [
+    ("v15-viewport", ["V15"], lambda _: VIEWPORT.replace('version="1.6"', 'version="1.5"')),
+    ("vp1-camera-outside", ["VP1"], lambda _: VIEWPORT.replace('<viewport3D', '<camera id="out" x="0" y="0" z="-50"/><viewport3D').replace('camera="vc"', 'camera="out"')),
+    ("vp3-body", ["VP3"], lambda _: VIEWPORT.replace('material="m"/>', 'material="m"><rigidBody mass="1"/></object3D>')),
+    ("bh6-viewport-objects-isolated", ["V15"], lambda _: VIEWPORT_IN_BLACKHOLE('<object3D id="ball" primitive="sphere" radius="1"/><particles3D id="dust" rate="1"/>')),
+    ("bh5-viewport-camera-sees-no-hole", ["BH5", "V15"], lambda _: VIEWPORT_IN_BLACKHOLE('<camera id="eye2" x="0" y="0" z="-80" geodesics="true"/>')),
+    ("bh6-viewport-camera-sees-its-objects", ["BH5", "BH6", "V15"], lambda _: VIEWPORT_IN_BLACKHOLE('<camera id="eye2" x="0" y="0" z="-80" geodesics="true"/><object3D id="ball" primitive="sphere" radius="1"/>')),
+    ("bh8-per-viewport", ["BH5", "BH8", "V15"], lambda _: VIEWPORT_IN_BLACKHOLE('<camera id="eye2" x="0" y="0" z="-80" geodesics="true"/><camera id="eye3" x="0" y="0" z="-90" geodesics="true"/>')),
+]
+
 def write(path, text, expect):
     header = f"<!-- expect: {' '.join(expect) if expect else 'valid'} -->\n"
     body = text.split("\n", 1)[1] if text.startswith("<?xml") else text

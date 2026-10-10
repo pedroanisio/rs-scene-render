@@ -705,15 +705,18 @@
       <sch:assert id="BH4" test="not(/scene//blackHole[@id=current()/@blackHole]) or ((not(@innerRadius) or $inner &gt;= 6*$mass) and ((@innerRadius and $outer &gt; $inner) or (not(@innerRadius) and $outer &gt; 6*$mass)))">the inner radius of an accretionDisk is at least 6 times the mass of its blackHole (the innermost stable circular orbit), and the outer radius is beyond the inner one.</sch:assert>
     </sch:rule>
     <sch:rule context="camera[@geodesics]">
-      <sch:let name="hole" value="/scene//blackHole[1]"/>
+      <!-- SREP 74: a viewport3D's subtree is a 3D scene of its own; BH5 to BH8 look only in the camera's scope (the
+           viewport3D it is in, else the document outside every viewport3D) -->
+      <sch:let name="scope" value="generate-id(ancestor::viewport3D[1])"/>
+      <sch:let name="hole" value="(/scene//blackHole[generate-id(ancestor::viewport3D[1])=$scope])[1]"/>
       <sch:let name="mass" value="number(substring(normalize-space($hole/@mass),1+number(starts-with(normalize-space($hole/@mass),'+'))))"/>
       <sch:let name="dx" value="number(concat(substring(normalize-space(./@x),1+number(starts-with(normalize-space(./@x),'+'))),substring('0',1,1*number(not(./@x))))) - number(concat(substring(normalize-space($hole/@x),1+number(starts-with(normalize-space($hole/@x),'+'))),substring('0',1,1*number(not($hole/@x)))))"/>
       <sch:let name="dy" value="number(concat(substring(normalize-space(./@y),1+number(starts-with(normalize-space(./@y),'+'))),substring('0',1,1*number(not(./@y))))) - number(concat(substring(normalize-space($hole/@y),1+number(starts-with(normalize-space($hole/@y),'+'))),substring('0',1,1*number(not($hole/@y)))))"/>
       <sch:let name="dz" value="number(concat(substring(normalize-space(./@z),1+number(starts-with(normalize-space(./@z),'+'))),substring('0',1,1*number(not(./@z))))) - number(concat(substring(normalize-space($hole/@z),1+number(starts-with(normalize-space($hole/@z),'+'))),substring('0',1,1*number(not($hole/@z)))))"/>
-      <sch:assert id="BH5" test="@geodesics!='true' or /scene//blackHole">a camera with geodesics="true" needs a blackHole.</sch:assert>
-      <sch:assert id="BH6" test="@geodesics!='true' or not(/scene//object3D or /scene//particles3D or /scene//particleEmitter or /scene//ocean or /scene//fluid or /scene//flock or /scene//slime or /scene//erosion or /scene//pyro or /scene//medium)">a camera with geodesics="true" renders only the black hole, its disk and the 2D layers: no object3D, particles3D, particleEmitter, ocean, fluid, flock, slime, erosion, pyro or medium may be in the scene.</sch:assert>
+      <sch:assert id="BH5" test="@geodesics!='true' or /scene//blackHole[generate-id(ancestor::viewport3D[1])=$scope]">a camera with geodesics="true" needs a blackHole.</sch:assert>
+      <sch:assert id="BH6" test="@geodesics!='true' or not(/scene//*[self::object3D or self::particles3D or self::particleEmitter or self::ocean or self::fluid or self::flock or self::slime or self::erosion or self::pyro or self::medium][generate-id(ancestor::viewport3D[1])=$scope])">a camera with geodesics="true" renders only the black hole, its disk and the 2D layers: no object3D, particles3D, particleEmitter, ocean, fluid, flock, slime, erosion, pyro or medium may be in the scene.</sch:assert>
       <sch:assert id="BH7" test="@geodesics!='true' or not($hole) or $dx*$dx + $dy*$dy + $dz*$dz &gt; 9*$mass*$mass">a camera with geodesics="true" must be farther than 3 times the mass of the blackHole from it, the photon sphere.</sch:assert>
-      <sch:assert id="BH8" test="@geodesics!='true' or count(/scene//camera[@geodesics='true']) &lt;= 1">a scene has at most one camera with geodesics="true".</sch:assert>
+      <sch:assert id="BH8" test="@geodesics!='true' or count(/scene//camera[@geodesics='true'][generate-id(ancestor::viewport3D[1])=$scope]) &lt;= 1">a scene has at most one camera with geodesics="true".</sch:assert>
     </sch:rule>
   </sch:pattern>
   <sch:pattern id="cinematic-fracture">
@@ -796,6 +799,15 @@
     </sch:rule>
     <sch:rule context="object3D">
       <sch:assert id="PAR2" test="(@primitive='parametric') = (count(parametricSurface) = 1) and (@primitive='heightfield') = (count(heightfield) = 1)">primitive="parametric" has exactly one parametricSurface and primitive="heightfield" exactly one heightfield; no other primitive has either.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
+  <sch:pattern id="p-srep74">
+    <sch:rule context="/scene[@version='1.0' or @version='1.1' or @version='1.2' or @version='1.3' or @version='1.4' or @version='1.5']">
+      <sch:assert id="V15" test="not(.//viewport3D)">viewport3D needs version="1.6".</sch:assert>
+    </sch:rule>
+    <sch:rule context="viewport3D">
+      <sch:assert id="VP1" test="not(@camera) or camera[@id = current()/@camera]">viewport3D/@camera names a camera child of that viewport.</sch:assert>
+      <sch:assert id="VP3" test="not(.//rigidBody)">bodies inside a viewport3D are not supported (no physics world of its own yet).</sch:assert>
     </sch:rule>
   </sch:pattern>
 </sch:schema>

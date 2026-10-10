@@ -1374,7 +1374,14 @@ fn evaluate_inner(p: &Program, t: f64, clocks: &[(u32, f64)], include_inactive: 
     crate::region::resolve(p, &mut out.nodes);
     crate::connector::resolve(p, &mut out.nodes);
 
-    let camera = out.nodes.iter().enumerate().rev().find(|(_, n)| n.kind == "camera" && n.draw).map(|(i, _)| i as u32);
+    // the cameras inside a viewport3D view only its scene (SREP 74 §2), and never become the document's camera
+    let camera = out
+        .nodes
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(i, n)| n.kind == "camera" && n.draw && viewport_of(&out.nodes, *i).is_none())
+        .map(|(i, _)| i as u32);
 
     let mut transitions = Vec::new();
     for tr in &p.transitions {
@@ -1446,6 +1453,39 @@ fn evaluate_inner(p: &Program, t: f64, clocks: &[(u32, f64)], include_inactive: 
     };
     crate::joints::attach(p, &mut graph);
     graph
+}
+
+/// The `viewport3D` node that node `i` is inside, if any: the 3D scene `i` belongs to (SREP 74).
+pub fn viewport_of(nodes: &[FrameNode], i: usize) -> Option<usize> {
+    let mut at = nodes[i].parent;
+    while let Some(p) = at {
+        if nodes[p as usize].kind == "viewport3D" {
+            return Some(p as usize);
+        }
+        at = nodes[p as usize].parent;
+    }
+    None
+}
+
+/// The camera that views the scene of viewport `vp` at this frame (SREP 74 §2): the camera child its `camera`
+/// attribute names, else its last active camera child, else none (the viewport's implicit camera).
+pub fn viewport_camera(g: &FrameGraph, vp: usize) -> Option<usize> {
+    let mine = |i: usize| g.nodes[i].kind == "camera" && g.nodes[i].parent == Some(vp as u32);
+    if let Some(sr_model::element::AttrValue::Str(id)) =
+        sr_model::element::Element::get_attr(&*g.nodes[vp].elem, "camera")
+    {
+        // ids in the frame graph carry the scope of instances and includes; the named camera is a child
+        let named = (0..g.nodes.len()).find(|&i| mine(i) && local_id(&g.nodes[i].id) == id.as_str());
+        if named.is_some() {
+            return named;
+        }
+    }
+    (0..g.nodes.len()).rev().find(|&i| mine(i) && g.nodes[i].draw)
+}
+
+/// An id without the scope prefix of the instance or include it is in.
+fn local_id(id: &str) -> &str {
+    id.rsplit('/').next().unwrap_or(id)
 }
 
 fn token_color(p: &Program, name: &str) -> Option<[f64; 4]> {

@@ -33,6 +33,10 @@
     "bh5-geodesics-without-hole.scene.xml": [
       "BH5"
     ],
+    "bh5-viewport-camera-sees-no-hole.scene.xml": [
+      "BH5",
+      "V15"
+    ],
     "bh6-fluid.scene.xml": [
       "BH6"
     ],
@@ -42,8 +46,21 @@
     "bh6-particles.scene.xml": [
       "BH6"
     ],
+    "bh6-viewport-camera-sees-its-objects.scene.xml": [
+      "BH5",
+      "BH6",
+      "V15"
+    ],
+    "bh6-viewport-objects-isolated.scene.xml": [
+      "V15"
+    ],
     "bh7-inside-photon-sphere.scene.xml": [
       "BH7"
+    ],
+    "bh8-per-viewport.scene.xml": [
+      "BH5",
+      "BH8",
+      "V15"
     ],
     "bh8-two-cameras.scene.xml": [
       "BH8"
@@ -1094,6 +1111,9 @@
     "v14-path.scene.xml": [
       "V14"
     ],
+    "v15-viewport.scene.xml": [
+      "V15"
+    ],
     "v2-outputs.scene.xml": [
       "V2"
     ],
@@ -1255,6 +1275,12 @@
     "vox9-density.scene.xml": [
       "VOX9"
     ],
+    "vp1-camera-outside.scene.xml": [
+      "VP1"
+    ],
+    "vp3-body.scene.xml": [
+      "VP3"
+    ],
     "whitewater-checkpoint-range.scene.xml": [
       "S06"
     ],
@@ -1338,6 +1364,7 @@
     "text3d-tracking.scene.xml": [],
     "thermal-volume.scene.xml": [],
     "version-1.0.scene.xml": [],
+    "viewport3d.scene.xml": [],
     "volume-light-grid.scene.xml": [],
     "volume-scatter-bounces-zero.scene.xml": [],
     "volume-scatter-bounces.scene.xml": [],

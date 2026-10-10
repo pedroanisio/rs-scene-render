@@ -1216,6 +1216,7 @@ fn strip(n: &Node) -> Node {
         Node::Sequence(g) => g.children.retain(|c| !matches!(c, m::GroupChild::Node(_))),
         Node::Repeat(r) => r.children.retain(|c| !matches!(c, m::RepeatChild::Node(_))),
         Node::Iterate(r) => r.children.retain(|c| !matches!(c, m::IterateChild::Node(_))),
+        Node::Viewport3D(v) => v.children.retain(|c| !matches!(c, m::Viewport3DChild::Node(_))),
         _ => {}
     }
     n
@@ -1526,6 +1527,14 @@ impl Builder {
                 }
                 // SREP 67: an iterate holds its nodes like a group; the renderer steps their stateful effects
                 Node::Iterate(_) => {
+                    let kids = node_children(n);
+                    let c = self.instantiate(&kids, Some(idx), ctx);
+                    self.nodes[idx as usize].children = c;
+                }
+                // SREP 74: a viewport holds its own 3D scene, drawn into its width × height picture, clipped to it
+                Node::Viewport3D(v) => {
+                    self.nodes[idx as usize].box_size = Some([Length::px(v.width as f64), Length::px(v.height as f64)]);
+                    self.nodes[idx as usize].clip = true;
                     let kids = node_children(n);
                     let c = self.instantiate(&kids, Some(idx), ctx);
                     self.nodes[idx as usize].children = c;

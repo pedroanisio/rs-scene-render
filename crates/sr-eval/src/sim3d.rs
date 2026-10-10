@@ -141,6 +141,8 @@ pub(crate) fn world3(g: &FrameGraph, i: usize, depth: u32) -> DMat4 {
         }
     }
     match n.parent {
+        // a viewport3D's children are in the viewport's own 3D space (SREP 74 §1)
+        Some(p) if g.nodes[p as usize].kind == "viewport3D" => own,
         Some(p) => embed(&g.nodes[p as usize].world) * own,
         None => own,
     }

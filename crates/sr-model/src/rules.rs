@@ -212,6 +212,11 @@ fn has_kid(n: Node, name: &str) -> bool {
     kids(n, name).next().is_some()
 }
 
+/// The `viewport3D` that `n` is in (XPath `ancestor::viewport3D[1]`), which scopes the 3D scene `n` belongs to (SREP 74).
+fn viewport_of(n: Node) -> Option<roxmltree::NodeId> {
+    n.ancestors().skip(1).find(|a| is(*a, "viewport3D")).map(|a| a.id())
+}
+
 /// XPath `substring-before(substring-after(s, open), ')')`.
 fn between(s: &str, open: &str) -> String {
     match s.split_once(open) {
@@ -597,9 +602,17 @@ impl<'a> Eval<'a> {
     }
 
     /// BH1 to BH8 and W03 to W05: a Schwarzschild black hole, its disk and the camera that traces geodesics.
+    ///
+    /// SREP 74: a `viewport3D` holds a 3D scene of its own, so BH5 to BH8 (and W03) look only in the scope of the
+    /// camera or hole: the `viewport3D` it is in, else the document outside every `viewport3D`. Objects inside a
+    /// viewport do not refuse a geodesic camera of the document (BH6), a geodesic camera inside a viewport needs a
+    /// hole inside that viewport (BH5, which a viewport cannot hold today, so such a camera is refused), and each scope
+    /// has at most one geodesic camera (BH8).
     fn black_hole(&mut self, n: Node, local: &str) {
         let root = n.document().root_element();
         let all = |name: &'static str| root.descendants().filter(move |d| d.is_element() && is(*d, name));
+        let scope = viewport_of(n);
+        let scoped = move |name: &'static str| all(name).filter(move |d| viewport_of(*d) == scope);
         let number = |e: Node, k: &str, default: f64| {
             e.attribute(k).map_or(default, |s| xpath_number(s.trim().strip_prefix('+').unwrap_or(s.trim())))
         };
@@ -634,7 +647,7 @@ impl<'a> Eval<'a> {
                 }
             }
             _ if geodesics => {
-                let hole = all("blackHole").next();
+                let hole = scoped("blackHole").next();
                 self.check(hole.is_some(), n, "BH5", || "a camera with geodesics=\"true\" needs a blackHole.".into());
                 const OTHER: [&str; 10] = [
                     "object3D",
@@ -648,7 +661,7 @@ impl<'a> Eval<'a> {
                     "pyro",
                     "medium",
                 ];
-                self.check(!OTHER.iter().any(|name| all(name).next().is_some()), n, "BH6", || {
+                self.check(!OTHER.iter().any(|name| scoped(name).next().is_some()), n, "BH6", || {
                     "a camera with geodesics=\"true\" renders only the black hole, its disk and the 2D layers: no \
                      object3D, particles3D, particleEmitter, ocean, fluid, flock, slime, erosion, pyro or medium may \
                      be in the scene."
@@ -665,7 +678,7 @@ impl<'a> Eval<'a> {
                     });
                 }
                 self.check(
-                    all("camera").filter(|c| c.attribute("geodesics") == Some("true")).count() <= 1,
+                    scoped("camera").filter(|c| c.attribute("geodesics") == Some("true")).count() <= 1,
                     n,
                     "BH8",
                     || "a scene has at most one camera with geodesics=\"true\".".into(),
@@ -685,7 +698,7 @@ impl<'a> Eval<'a> {
             _ => {}
         }
         if matches!(local, "blackHole" | "accretionDisk")
-            && !all("camera").any(|c| c.attribute("geodesics") == Some("true"))
+            && !scoped("camera").any(|c| c.attribute("geodesics") == Some("true"))
         {
             self.warn(
                 n,
@@ -949,6 +962,21 @@ impl<'a> Eval<'a> {
             });
             self.check(!uses, n, "V13", || {
                 "compute, iterate, error-diffusion and segmented-sort need version=\"1.6\".".into()
+            });
+        }
+        // SREP 74 (p-srep74)
+        if local == "scene"
+            && n.parent_element().is_none()
+            && matches!(a("version"), Some("1.0" | "1.1" | "1.2" | "1.3" | "1.4" | "1.5"))
+        {
+            let uses = n.descendants().any(|d| is(d, "viewport3D"));
+            self.check(!uses, n, "V15", || "viewport3D needs version=\"1.6\".".into());
+        }
+        if local == "viewport3D" {
+            let named = a("camera").is_none_or(|id| kids(n, "camera").any(|c| c.attribute("id") == Some(id)));
+            self.check(named, n, "VP1", || "viewport3D/@camera names a camera child of that viewport.".into());
+            self.check(!n.descendants().any(|d| is(d, "rigidBody")), n, "VP3", || {
+                "bodies inside a viewport3D are not supported (no physics world of its own yet).".into()
             });
         }
         if local == "iterate" {
