@@ -263,3 +263,59 @@ fn float32_checkpoints_preserve_state_across_a_fresh_renderer() {
     assert_eq!(first.px, second.px, "a checkpoint must preserve every float32 state bit");
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// A feedback diffusion: each step averages the four neighbours of the state and mixes the input back in, so every
+/// step changes the picture and the result depends on each step's order and texture reads.
+const DIFFUSE: &str = r#"/*{ "INPUTS": [{"NAME": "inputImage", "TYPE": "image"}],
+    "PASSES": [{"TARGET": "state", "PERSISTENT": true, "FLOAT": true}, {}] }*/
+void main() {
+    if (PASSINDEX == 0) {
+        vec2 d = 1.0 / RENDERSIZE;
+        vec2 uv = isf_FragNormCoord;
+        vec4 n = IMG_NORM_PIXEL(state, uv + vec2(d.x, 0.0)) + IMG_NORM_PIXEL(state, uv - vec2(d.x, 0.0))
+               + IMG_NORM_PIXEL(state, uv + vec2(0.0, d.y)) + IMG_NORM_PIXEL(state, uv - vec2(0.0, d.y));
+        gl_FragColor = mix(n * 0.25, IMG_NORM_PIXEL(inputImage, uv), 0.2);
+    } else {
+        gl_FragColor = IMG_NORM_PIXEL(state, isf_FragNormCoord);
+    }
+}
+"#;
+
+/// Several steps in one frame (prewarm, stepsPerFrame) draw the same bytes as the same steps taken one a frame, which is
+/// the path the defaults take.
+#[test]
+fn steps_within_a_frame_draw_what_one_step_a_frame_draws() {
+    for (shader, name) in [(COUNTER, "srep68-counter.fs"), (DIFFUSE, "srep68-diffuse.fs")] {
+        for n in [2usize, 3, 5, 8] {
+            let Some(single) = render_seq(&doc("", "", shader, name), &frames(n)) else { return };
+            let prewarm = render_seq(&doc(&format!(r#"prewarm="{}""#, n - 1), "", shader, name), &[0.0]).unwrap();
+            assert_eq!(prewarm.px, single.px, "{name}: prewarm {} against {n} frames", n - 1);
+            let per_frame = render_seq(&doc(&format!(r#"stepsPerFrame="{n}""#), "", shader, name), &[0.0]).unwrap();
+            assert_eq!(per_frame.px, single.px, "{name}: stepsPerFrame {n} against {n} frames");
+        }
+        // both together, over frames: prewarm 3, then 2 steps at each of frames 0, 1 and 2 (9 steps)
+        let Some(single) = render_seq(&doc("", "", shader, name), &frames(9)) else { return };
+        let both = render_seq(&doc(r#"prewarm="3" stepsPerFrame="2""#, "", shader, name), &frames(3)).unwrap();
+        assert_eq!(both.px, single.px, "{name}: prewarm 3 and stepsPerFrame 2 against 9 frames");
+    }
+}
+
+/// The steps of a frame run as one loop over two textures per ISF pass, as an `iterate` does (SREP 67), so the textures
+/// a frame allocates do not grow with the step count. Unrolled, each step took a new texture per pass and kept it until
+/// the frame was submitted: about 3.6 MB a step in the reported scene, and an out-of-memory kill at 6,000 steps on 8 GB.
+#[test]
+fn the_textures_a_frame_allocates_do_not_grow_with_the_step_count() {
+    let created = |attrs: &str| {
+        render_seq(&doc(attrs, "", COUNTER, "srep68-counter.fs"), &[0.0]).map(|r| (r.stats.textures_created, count(&r)))
+    };
+    let Some((few, c)) = created(r#"prewarm="3""#) else { return };
+    assert!((c - 4.0).abs() < 0.01, "{c}");
+    // the count is read back as count / 64 in red, so the step counts stay below 64
+    let (many, c) = created(r#"prewarm="60""#).unwrap();
+    assert!((c - 61.0).abs() < 0.01, "{c}");
+    assert_eq!(few, many, "textures created at prewarm 3 and at prewarm 60");
+    let (few, _) = created(r#"stepsPerFrame="2""#).unwrap();
+    let (many, c) = created(r#"stepsPerFrame="60""#).unwrap();
+    assert!((c - 60.0).abs() < 0.01, "{c}");
+    assert_eq!(few, many, "textures created at stepsPerFrame 2 and at stepsPerFrame 60");
+}
