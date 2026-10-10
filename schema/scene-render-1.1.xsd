@@ -3118,6 +3118,7 @@
       <xs:element name="adjustment" type="adjustmentType"/>
       <xs:element name="transition" type="transitionType"/>
       <xs:element name="skeleton" type="skeletonType"/>
+      <xs:element name="program" type="programNodeType"/>
     </xs:choice>
   </xs:group>
   <xs:complexType name="compositionType">
@@ -3852,6 +3853,7 @@
       <xs:element name="bind" type="bindType"/>
       <xs:element name="data" type="dataSourceType"/>
       <xs:element name="variant" type="variantType"/>
+      <xs:element name="program" type="programDataType"/>
     </xs:choice>
   </xs:complexType>
 
@@ -4250,7 +4252,7 @@
       </xs:sequence>
       <xs:attribute name="version" use="required">
         <xs:simpleType><xs:restriction base="xs:string">
-          <xs:enumeration value="1.0"/><xs:enumeration value="1.1"/><xs:enumeration value="1.2"/><xs:enumeration value="1.3"/><xs:enumeration value="1.4"/><xs:enumeration value="1.5"/>
+          <xs:enumeration value="1.0"/><xs:enumeration value="1.1"/><xs:enumeration value="1.2"/><xs:enumeration value="1.3"/><xs:enumeration value="1.4"/><xs:enumeration value="1.5"/><xs:enumeration value="1.6"/>
         </xs:restriction></xs:simpleType>
       </xs:attribute>
     </xs:complexType>
@@ -5022,4 +5024,55 @@
     </xs:restriction></xs:simpleType></xs:attribute>
     <xs:attribute name="maxMemoryMiB" default="128"><xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType></xs:attribute>
   </xs:complexType>
+  <!-- ===================================================== programs (SREPs 66 and 69, version 1.6) -->
+  <xs:attributeGroup name="programAttributes">
+    <xs:attribute name="src" type="xs:anyURI" use="required"/>
+    <xs:attribute name="sha256" type="sha256Type" use="required"/>
+    <xs:attribute name="seed" type="xs:unsignedLong" default="0"/>
+    <xs:attribute name="fuel" default="1000000000">
+      <xs:annotation><xs:documentation>Instructions a call of the module may execute (SREP 66, Determinism 4).</xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:unsignedLong">
+        <xs:minInclusive value="1"/><xs:maxInclusive value="1000000000000"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="memoryLimit" default="64">
+      <xs:annotation><xs:documentation>MiB of linear memory the module may hold (16 pages of 64 KiB per MiB).</xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4096"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="outputSha256" type="sha256Type"/>
+  </xs:attributeGroup>
+  <xs:complexType name="programNodeType">
+    <xs:annotation><xs:documentation>
+      Runs the WebAssembly module @src (SHA-256 @sha256) under the determinism rules of SREP 66. In build mode it runs
+      once when the document is built and the scene-render nodes it returns are this node's children, drawn as a
+      group. With mode="step" (SREP 69) it keeps state, advances stepsPerFrame steps per frame after prewarm steps,
+      and draws the width x height RGBA picture its frame export returns.
+    </xs:documentation></xs:annotation>
+    <xs:choice minOccurs="0" maxOccurs="unbounded">
+      <xs:element name="param" type="paramValueType"/>
+      <xs:group ref="nodeBehaviour"/>
+    </xs:choice>
+    <xs:attributeGroup ref="nodeAttributes"/>
+    <xs:attributeGroup ref="programAttributes"/>
+    <xs:attribute name="mode" default="build">
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="build"/><xs:enumeration value="step"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="width" type="xs:positiveInteger"/>
+    <xs:attribute name="height" type="xs:positiveInteger"/>
+    <xs:attribute name="stepsPerFrame" default="1">
+      <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="10000"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="prewarm" default="0">
+      <xs:simpleType><xs:restriction base="xs:nonNegativeInteger"><xs:maxInclusive value="10000000"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="blend" type="blendType" default="normal"/>
+    <xs:attribute name="effects" type="xs:IDREFS"/>
+  </xs:complexType>
+  <xs:complexType name="programDataType">
+    <xs:annotation><xs:documentation>Runs the module once when the document is built; the JSON rows it returns are a data source for repeat/@over (SREP 66).</xs:documentation></xs:annotation>
+    <xs:sequence><xs:element name="param" type="paramValueType" minOccurs="0" maxOccurs="unbounded"/></xs:sequence>
+    <xs:attribute name="id" type="xs:ID" use="required"/>
+    <xs:attributeGroup ref="programAttributes"/>
+  </xs:complexType>
+
 </xs:schema>

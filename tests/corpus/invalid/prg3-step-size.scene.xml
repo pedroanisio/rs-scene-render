@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- expect: PRG3 -->
+<scene version="1.6"><project width="64" height="64" fps="24" duration="1"/><parameters><program id="rows" src="../media/rows.wasm" sha256="30913dad3a42ec921501faa4c7402fb2b441c06743d3f5ceca607b45f64f9ba3"/></parameters><composition><program id="build" src="../media/rect.wasm" sha256="2b2cbfb8eed8624f6aa8a112626fae8cdc0e15c220557f0afdc6e5da56d48c96" seed="3" fuel="100000"><param name="side" value="1"/></program><repeat id="rep" over="rows"><shape id="c" shape="rect" width="4" height="4" fill="#FF0000"/></repeat><program id="steps" mode="step" src="../media/counter.wasm" sha256="102ec7058fa604f20d4265061f4d6ad44e8769077e1ddd246f0140772f4d11cf" stepsPerFrame="2" prewarm="3"/></composition></scene>

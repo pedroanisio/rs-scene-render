@@ -79,7 +79,7 @@
   <sch:pattern id="p11">
     <sch:rule context="repeat">
       <sch:assert id="C17" test="count(@count) + count(@over) + number(boolean(points)) = 1">repeat needs exactly one of @count, @over or a points child.</sch:assert>
-      <sch:assert id="C18" test="not(@over) or /scene/parameters/data[@id=current()/@over] or /scene/parameters/param[@id=current()/@over][@type='list']">repeat/@over must name a data source or a list parameter.</sch:assert>
+      <sch:assert id="C18" test="not(@over) or /scene/parameters/data[@id=current()/@over] or /scene/parameters/param[@id=current()/@over][@type='list'] or /scene/parameters/program[@id=current()/@over]">repeat/@over must name a data source, a list parameter or a data program (SREP 66).</sch:assert>
     </sch:rule>
   </sch:pattern>
   <sch:pattern id="p12">
@@ -748,6 +748,28 @@
     </sch:rule>
     <sch:rule context="assets/audiogram">
       <sch:assert id="R54" test="/scene/audioMix/audioTrack[@id = current()/@source]">audiogram/@source names an audioTrack of audioMix.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
+  <!-- ===================================================== programs (SREPs 66 and 69, scene version 1.6) -->
+  <sch:pattern id="p-srep66-gate">
+    <sch:rule context="/scene[@version='1.0' or @version='1.1' or @version='1.2' or @version='1.3' or @version='1.4' or @version='1.5']">
+      <sch:assert id="V12" test="not(.//program)">program needs version="1.6".</sch:assert>
+    </sch:rule>
+  </sch:pattern>
+  <sch:pattern id="p-srep66">
+    <sch:rule context="program/param">
+      <sch:assert id="PRG1" test="not(preceding-sibling::param[@name = current()/@name])">a program's parameter names are unique.</sch:assert>
+    </sch:rule>
+    <sch:rule context="repeat[@over]">
+      <sch:assert id="PRG2" test="not(//program[@id = current()/@over]) or /scene/parameters/program[@id = current()/@over]">repeat/@over names a data program (one in parameters), not a node program.</sch:assert>
+    </sch:rule>
+    <sch:rule context="program[@mode='step']">
+      <sch:assert id="PRG3" test="@width and @height">a stepping program needs width and height (SREP 69).</sch:assert>
+    </sch:rule>
+  </sch:pattern>
+  <sch:pattern id="p-srep69-steps">
+    <sch:rule context="program[@stepsPerFrame or @prewarm]">
+      <sch:assert id="STP1" test="@mode='step'">stepsPerFrame and prewarm apply to shader effects and stepping programs (SREP 69) only.</sch:assert>
     </sch:rule>
   </sch:pattern>
 </sch:schema>

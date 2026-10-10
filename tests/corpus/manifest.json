@@ -603,6 +603,22 @@
     "pen2.scene.xml": [
       "PEN2"
     ],
+    "prg1-param-twice.scene.xml": [
+      "PRG1"
+    ],
+    "prg10-program-hash.scene.xml": [
+      "PRG10"
+    ],
+    "prg10-program-missing.scene.xml": [
+      "PRG10"
+    ],
+    "prg2-over-node-program.scene.xml": [
+      "C18",
+      "PRG2"
+    ],
+    "prg3-step-size.scene.xml": [
+      "PRG3"
+    ],
     "pyc1-derived.scene.xml": [
       "PYC1"
     ],
@@ -1018,6 +1034,9 @@
       "P3D6",
       "PYRO8"
     ],
+    "stp1-build-program.scene.xml": [
+      "STP1"
+    ],
     "txt2.scene.xml": [
       "TXT2"
     ],
@@ -1029,6 +1048,9 @@
     ],
     "v11.scene.xml": [
       "V11"
+    ],
+    "v12-program.scene.xml": [
+      "V12"
     ],
     "v2-outputs.scene.xml": [
       "V2"
@@ -1253,6 +1275,7 @@
     "pdf-region.scene.xml": [],
     "physics-internal-edges.scene.xml": [],
     "pinned-fonts.scene.xml": [],
+    "programs.scene.xml": [],
     "pyro-blast-gas.scene.xml": [],
     "pyro-blast.scene.xml": [],
     "pyro-colliders.scene.xml": [],
