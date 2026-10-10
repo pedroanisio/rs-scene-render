@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- expect: ITR2 -->
+<scene version="1.6"><project width="64" height="64" fps="10" duration="1"/><composition><iterate id="a" steps="10"><iterate id="b" steps="5"><shape id="s" shape="rect" width="10" height="10" fill="#FFFFFF" effects="fx"/></iterate></iterate></composition><effects><effect id="fx" type="blur"/></effects></scene>

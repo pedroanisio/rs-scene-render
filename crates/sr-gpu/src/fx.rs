@@ -196,6 +196,11 @@ pub struct Pass {
     pub clear: bool,
     /// A custom GLSL program with its own bindings (then `entry` and the fixed inputs are unused).
     pub custom: Option<Box<crate::shader::CustomBind>>,
+    /// A CPU operation from `src` to `out` (same size): the work recorded before it is submitted, `src` read back, the
+    /// operation run and `out` written (SREP 67 serial operations).
+    pub cpu: Option<CpuOp>,
+    /// The steps of a stateful shader inside an `iterate`, run as a loop when recorded (SREP 67, Semantics 4).
+    pub looped: Option<Box<LoopRun>>,
     /// What the pass belongs to (a node or adjustment id), for GPU timings.
     pub label: String,
 }
@@ -384,6 +389,83 @@ impl Pass {
             additive: false,
             clear: true,
             custom: Some(Box::new(bind)),
+            cpu: None,
+            looped: None,
+            label: String::new(),
+        }
+    }
+
+    /// A CPU operation from `src` to `out` (the stored working premultiplied texels of `src`, row 0 on top, in place).
+    pub fn cpu(op: CpuOp, src: Arc<Tex>, out: Arc<Tex>) -> Pass {
+        Pass {
+            entry: Entry::Copy,
+            params: Params::default(),
+            src,
+            aux: Aux::None,
+            aux2: None,
+            lut: None,
+            out,
+            additive: false,
+            clear: false,
+            custom: None,
+            cpu: Some(op),
+            looped: None,
+            label: String::new(),
+        }
+    }
+}
+
+/// An operation on the texels of a texture of the given size, in place.
+pub type CpuOp = Arc<dyn Fn(&mut [[f32; 4]], [u32; 2]) + Send + Sync>;
+
+/// The `iterate` around a node (SREP 67, Semantics 4): steps, and the convergence stop.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IterateSpec {
+    pub steps: u64,
+    pub converged: bool,
+    pub tolerance: f64,
+    pub check_every: u64,
+}
+
+/// One ISF pass of a looped stateful shader: its uniform block (FRAMEINDEX is written per step), the persistent or
+/// plain buffer it writes, and its two targets (ping-pong, so a pass never reads the texture it writes).
+pub struct LoopPass {
+    pub block: Vec<u8>,
+    pub target: Option<String>,
+    pub out: [Arc<Tex>; 2],
+}
+
+/// The steps of a stateful shader inside an `iterate`, from the zero state: its program, its passes, the fixed inputs by
+/// sampler name, and where its last output and the steps it took go.
+pub struct LoopRun {
+    pub pipe: Arc<crate::shader::CustomPipe>,
+    pub program: crate::glsl::Program,
+    pub passes: Vec<LoopPass>,
+    pub inputs: HashMap<String, Arc<Tex>>,
+    /// The persistent buffers, compared for convergence.
+    pub persistent: Vec<String>,
+    pub empty: Arc<Tex>,
+    pub spec: IterateSpec,
+    /// Steps taken, written when the loop has run.
+    pub taken: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl Pass {
+    /// A looped stateful shader writing its last output into `out`.
+    pub fn looped(run: LoopRun, out: Arc<Tex>) -> Pass {
+        Pass {
+            entry: Entry::Copy,
+            params: Params::default(),
+            src: out.clone(),
+            aux: Aux::None,
+            aux2: None,
+            lut: None,
+            out,
+            additive: false,
+            clear: false,
+            custom: None,
+            cpu: None,
+            looped: Some(Box::new(run)),
             label: String::new(),
         }
     }
@@ -439,6 +521,8 @@ pub struct FxEngine {
     /// Persistent ISF buffers by effect instance (latest), their state at the start of the
     /// current frame, and checkpoints by frame.
     pub(crate) feedback: HashMap<String, crate::shader::Feedback>,
+    /// The looped stateful shaders of the frame being rendered (SREP 67 iterate): effect and node, and the steps taken.
+    pub(crate) iterations: Vec<(String, Arc<std::sync::atomic::AtomicU64>)>,
     pub(crate) feedback_frame: (i64, HashMap<String, crate::shader::Feedback>),
     pub(crate) checkpoints: std::collections::BTreeMap<i64, HashMap<String, crate::shader::Feedback>>,
     /// Images uploaded for shader samplers, by path.
@@ -541,6 +625,7 @@ impl FxEngine {
             programs: HashMap::new(),
             sources: HashMap::new(),
             feedback: HashMap::new(),
+            iterations: Vec::new(),
             feedback_frame: (i64::MIN, HashMap::new()),
             checkpoints: std::collections::BTreeMap::new(),
             images: HashMap::new(),
@@ -612,6 +697,123 @@ impl FxEngine {
 
     /// Records passes in order. The parameters of every pass go into one uniform buffer (a
     /// dynamic offset selects the pass), and passes reading the same textures share a bind group.
+    /// The texels of `t` (RGBA16F, row 0 on top), after everything submitted so far.
+    pub(crate) fn read_texels(&self, t: &Tex) -> Vec<[f32; 4]> {
+        let (w, hh) = (t.size[0], t.size[1]);
+        let row = (w * 8).div_ceil(256) * 256;
+        let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cpu pass readback"),
+            size: (row * hh) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &t.tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buf,
+                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(hh) },
+            },
+            wgpu::Extent3d { width: w, height: hh, depth_or_array_layers: 1 },
+        );
+        self.queue.submit([enc.finish()]);
+        buf.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        let data = buf.slice(..).get_mapped_range().expect("mapped");
+        let mut out = Vec::with_capacity((w * hh) as usize);
+        for y in 0..hh {
+            let line = &data[(y * row) as usize..(y * row + w * 8) as usize];
+            for px in line.as_chunks::<8>().0 {
+                let c = |k: usize| half::f16::from_le_bytes([px[k], px[k + 1]]).to_f32();
+                out.push([c(0), c(2), c(4), c(6)]);
+            }
+        }
+        out
+    }
+
+    /// Writes texels into `t` (RGBA16F, row 0 on top); queued before the next submission.
+    pub(crate) fn write_texels(&self, t: &Tex, px: &[[f32; 4]]) {
+        let [w, h] = t.size;
+        let bytes: Vec<u8> =
+            px.iter().flat_map(|c| c.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes())).collect();
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &t.tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &bytes,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 8), rows_per_image: Some(h) },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+    }
+
+    /// Runs a looped stateful shader (SREP 67, Semantics 4): `spec.steps` steps from the zero state, fewer when it
+    /// converges, then copies the last output into `out`. Returns the passes recorded.
+    fn run_loop(&mut self, enc: &mut wgpu::CommandEncoder, l: &LoopRun, out: &Tex) -> usize {
+        let mut cur = l.inputs.clone();
+        let mut last: Option<Arc<Tex>> = None;
+        let mut previous: Option<Vec<Vec<[f32; 4]>>> = None;
+        let (mut taken, mut n) = (0u64, 0usize);
+        let frame_index = l.program.uniform("FRAMEINDEX").cloned();
+        for step in 0..l.spec.steps {
+            for p in &l.passes {
+                let target = p.out[(step % 2) as usize].clone();
+                let mut block = p.block.clone();
+                if let Some(u) = &frame_index {
+                    l.program.write(&mut block, u, &[step as f64]);
+                }
+                let textures =
+                    l.program.samplers.iter().map(|s| cur.get(s).cloned().unwrap_or_else(|| l.empty.clone())).collect();
+                self.record_custom(enc, &crate::shader::CustomBind { pipe: l.pipe.clone(), block, textures }, &target);
+                n += 1;
+                if let Some(t) = &p.target {
+                    cur.insert(t.clone(), target.clone());
+                }
+                last = Some(target);
+            }
+            taken = step + 1;
+            let check = l.spec.converged && taken % l.spec.check_every.max(1) == 0;
+            // bounded command buffers: submit every 64 steps, and before a convergence check
+            if taken % 64 == 0 || check {
+                let done = std::mem::replace(enc, self.device.create_command_encoder(&Default::default()));
+                self.queue.submit([done.finish()]);
+            }
+            if check {
+                let now: Vec<Vec<[f32; 4]>> =
+                    l.persistent.iter().filter_map(|t| cur.get(t)).map(|t| self.read_texels(t)).collect();
+                if let Some(before) = &previous {
+                    let diff = before
+                        .iter()
+                        .zip(&now)
+                        .flat_map(|(a, b)| a.iter().zip(b))
+                        .flat_map(|(a, b)| (0..4).map(move |c| (a[c] - b[c]).abs()))
+                        .fold(0.0f32, f32::max);
+                    if diff as f64 <= l.spec.tolerance {
+                        break;
+                    }
+                }
+                previous = Some(now);
+            }
+        }
+        l.taken.store(taken, std::sync::atomic::Ordering::Relaxed);
+        if let Some(t) = last {
+            let size = wgpu::Extent3d {
+                width: t.size[0].min(out.size[0]),
+                height: t.size[1].min(out.size[1]),
+                depth_or_array_layers: 1,
+            };
+            enc.copy_texture_to_texture(t.tex.as_image_copy(), out.tex.as_image_copy(), size);
+        }
+        n
+    }
+
     pub fn record(&mut self, enc: &mut wgpu::CommandEncoder, passes: &[Pass]) -> usize {
         self.record_scissored(enc, passes, true)
     }
@@ -623,7 +825,9 @@ impl FxEngine {
             let align = self.device.limits().min_uniform_buffer_offset_alignment as usize;
             std::mem::size_of::<Params>().div_ceil(align) * align
         };
-        let fixed: Vec<usize> = (0..passes.len()).filter(|&i| passes[i].custom.is_none()).collect();
+        let fixed: Vec<usize> = (0..passes.len())
+            .filter(|&i| passes[i].custom.is_none() && passes[i].cpu.is_none() && passes[i].looped.is_none())
+            .collect();
         let params_buf = (!fixed.is_empty()).then(|| {
             let mut bytes = vec![0u8; stride * fixed.len()];
             for (slot, &i) in fixed.iter().enumerate() {
@@ -639,6 +843,20 @@ impl FxEngine {
         let mut slot = 0u32;
         let mut groups: HashMap<[usize; 5], wgpu::BindGroup> = HashMap::new();
         for p in passes {
+            if let Some(l) = &p.looped {
+                n += self.run_loop(enc, l, &p.out);
+                continue;
+            }
+            if let Some(op) = &p.cpu {
+                // what was recorded so far runs first: the operation reads its result
+                let done = std::mem::replace(enc, self.device.create_command_encoder(&Default::default()));
+                self.queue.submit([done.finish()]);
+                let mut px = self.read_texels(&p.src);
+                op(&mut px, p.src.size);
+                self.write_texels(&p.out, &px);
+                n += 1;
+                continue;
+            }
             if let Some(c) = &p.custom {
                 self.record_custom(enc, c, &p.out);
                 n += 1;
@@ -1190,6 +1408,8 @@ pub struct Cx<'a> {
     pub frame_size: [f64; 2],
     /// The node the effect runs on (keys persistent ISF buffers).
     pub node: String,
+    /// The `iterate` the node is inside, if any (SREP 67).
+    pub iterate: Option<IterateSpec>,
     /// Named sampler inputs (nodes, image assets) covering the offscreen, stored working premultiplied.
     pub named: HashMap<String, Arc<Tex>>,
     /// The audio mix, when the render has one (ISF audio inputs).
@@ -1338,6 +1558,8 @@ impl Builder<'_> {
             additive: false,
             clear: true,
             custom: None,
+            cpu: None,
+            looped: None,
             label: String::new(),
         });
         out
@@ -1906,6 +2128,42 @@ impl Builder<'_> {
                 v[0] = [a.num("tolerance", 0.2) as f32, a.num("softness", 0.1) as f32, 0.0, 0.0];
                 color_op(self, 73, v, Aux::Tex(plate))
             }
+            "error-diffusion" | "segmented-sort" => {
+                // SREP 67: serial operations in 16-bit integers over the node's content rectangle, on the CPU
+                let rect = serial_rect(cx.content, size);
+                let working = cx.working;
+                let op: CpuOp = if kind == "error-diffusion" {
+                    let k = crate::serial::kernel(&a.str("kernel").unwrap_or_else(|| "floyd-steinberg".into()))
+                        .ok_or("error-diffusion: unknown kernel")?;
+                    let raw = a.str("palette").unwrap_or_else(|| "#000000FF #FFFFFFFF".into());
+                    let palette = match raw.split_whitespace().map(hex_rgba8).collect::<Option<Vec<_>>>() {
+                        Some(p) if !p.is_empty() => p.into_iter().map(crate::serial::palette16).collect::<Vec<_>>(),
+                        _ => {
+                            return Err(format!(
+                                "error-diffusion: palette {raw:?} is not a list of #RRGGBB[AA] colours"
+                            ))
+                        }
+                    };
+                    let serpentine = a.str("serpentine").as_deref() == Some("true");
+                    Arc::new(move |px: &mut [[f32; 4]], size: [u32; 2]| {
+                        serial_apply(px, size, rect, working, |i16, w, h| {
+                            crate::serial::error_diffusion(i16, w, h, k, &palette, serpentine)
+                        })
+                    })
+                } else {
+                    let vertical = a.str("direction").as_deref() == Some("vertical");
+                    let descending = a.str("order").as_deref() == Some("descending");
+                    let key = a.str("sortKey").unwrap_or_else(|| "luma".into());
+                    let (lo, hi) =
+                        (crate::serial::threshold(a.num("low", 0.0)), crate::serial::threshold(a.num("high", 1.0)));
+                    Arc::new(move |px: &mut [[f32; 4]], size: [u32; 2]| {
+                        serial_sort(px, size, rect, working, vertical, descending, &key, lo, hi)
+                    })
+                };
+                let out = self.tex(size);
+                self.passes.push(Pass::cpu(op, input.clone(), out.clone()));
+                out
+            }
             "halftone" => {
                 // the screen's angle is the authored one, the schema's default 0 included; ink is `color` (black)
                 // and the ground between the dots `paint` (opaque white)
@@ -2267,6 +2525,8 @@ impl Builder<'_> {
             additive: true,
             clear: first,
             custom: None,
+            cpu: None,
+            looped: None,
             label: String::new(),
         });
     }
@@ -2285,6 +2545,8 @@ impl Builder<'_> {
             additive: true,
             clear: first,
             custom: None,
+            cpu: None,
+            looped: None,
             label: String::new(),
         });
     }
@@ -2954,6 +3216,105 @@ fn hue_of_linear(c: [f64; 4]) -> f64 {
     h * 60.0
 }
 
+/// The node's content rectangle in whole texels (rounded out, clamped): SREP 67, Semantics 5.
+fn serial_rect(content: Option<[f64; 4]>, size: [u32; 2]) -> [usize; 4] {
+    let [w, h] = [size[0] as f64, size[1] as f64];
+    let [x0, y0, x1, y1] = content.unwrap_or([0.0, 0.0, w, h]);
+    [
+        x0.floor().clamp(0.0, w) as usize,
+        y0.floor().clamp(0.0, h) as usize,
+        x1.ceil().clamp(0.0, w) as usize,
+        y1.ceil().clamp(0.0, h) as usize,
+    ]
+}
+
+/// `#RRGGBB` or `#RRGGBBAA` as 8-bit RGBA.
+fn hex_rgba8(t: &str) -> Option<[u8; 4]> {
+    let hex = t.strip_prefix('#')?;
+    if !(hex.len() == 6 || hex.len() == 8) || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let c = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
+    Some([c(0)?, c(2)?, c(4)?, if hex.len() == 8 { c(6)? } else { 255 }])
+}
+
+/// A stored working premultiplied texel as display-encoded 16-bit R, G, B (of the straight colour) and its alpha.
+fn to_i16(p: [f32; 4], working: Working) -> ([u16; 3], f32) {
+    let a = p[3];
+    if a <= 0.0 {
+        return ([0; 3], 0.0);
+    }
+    let straight = [p[0] as f64 / a as f64, p[1] as f64 / a as f64, p[2] as f64 / a as f64];
+    let e = working.to_display_srgb(straight);
+    (e.map(crate::serial::to16), a)
+}
+
+/// Display-encoded 16-bit R, G, B and an alpha back to a stored working premultiplied texel.
+fn from_i16(c: [u16; 3], a: f32, working: Working) -> [f32; 4] {
+    let s = working.from_literal([c[0] as f64 / 65535.0, c[1] as f64 / 65535.0, c[2] as f64 / 65535.0, 1.0]);
+    let a64 = a as f64;
+    [(s[0] * a64) as f32, (s[1] * a64) as f32, (s[2] * a64) as f32, a]
+}
+
+/// Runs `f` on the 16-bit colours of `rect` and writes its result back, alpha unchanged.
+fn serial_apply(
+    px: &mut [[f32; 4]],
+    size: [u32; 2],
+    rect: [usize; 4],
+    working: Working,
+    f: impl Fn(&[[u16; 3]], usize, usize) -> Vec<[u16; 3]>,
+) {
+    let stride = size[0] as usize;
+    let [x0, y0, x1, y1] = rect;
+    let (w, h) = (x1.saturating_sub(x0), y1.saturating_sub(y0));
+    if w == 0 || h == 0 {
+        return;
+    }
+    let mut colours = Vec::with_capacity(w * h);
+    let mut alphas = Vec::with_capacity(w * h);
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let (c, a) = to_i16(px[y * stride + x], working);
+            colours.push(c);
+            alphas.push(a);
+        }
+    }
+    let out = f(&colours, w, h);
+    for (k, (c, a)) in out.into_iter().zip(alphas).enumerate() {
+        let (x, y) = (x0 + k % w, y0 + k / w);
+        px[y * stride + x] = from_i16(c, a, working);
+    }
+}
+
+/// Segmented sort of `rect`'s lines (rows, or columns when `vertical`), RGBA moving together.
+#[allow(clippy::too_many_arguments)]
+fn serial_sort(
+    px: &mut [[f32; 4]],
+    size: [u32; 2],
+    rect: [usize; 4],
+    working: Working,
+    vertical: bool,
+    descending: bool,
+    key: &str,
+    lo: u32,
+    hi: u32,
+) {
+    let stride = size[0] as usize;
+    let [x0, y0, x1, y1] = rect;
+    let lines: Vec<Vec<usize>> = if vertical {
+        (x0..x1).map(|x| (y0..y1).map(|y| y * stride + x).collect()).collect()
+    } else {
+        (y0..y1).map(|y| (x0..x1).map(|x| y * stride + x).collect()).collect()
+    };
+    for idx in lines {
+        let mut line: Vec<([u16; 3], [f32; 4])> = idx.iter().map(|&i| (to_i16(px[i], working).0, px[i])).collect();
+        crate::serial::sort_line(&mut line, |p| crate::serial::sort_key(p.0, key), lo, hi, descending);
+        for (&i, p) in idx.iter().zip(line) {
+            px[i] = p.1;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3053,6 +3414,8 @@ mod tests {
                     additive: true,
                     clear: k == 0,
                     custom: None,
+                    cpu: None,
+                    looped: None,
                     label: String::new(),
                 });
             }
@@ -3129,6 +3492,8 @@ mod tests {
             additive: false,
             clear: true,
             custom: None,
+            cpu: None,
+            looped: None,
             label: String::new(),
         };
         let render = |engine: &mut FxEngine, pass: &Pass| {

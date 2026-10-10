@@ -129,6 +129,29 @@ fn eid(e: &dyn Element) -> Option<String> {
     }
 }
 
+/// The `iterate` among node `i`'s ancestors (SREP 67): its steps and its convergence stop.
+fn iterate_of(g: &FrameGraph, i: usize) -> Option<fx::IterateSpec> {
+    let mut k = g.nodes[i].parent;
+    while let Some(j) = k {
+        let n = &g.nodes[j as usize];
+        if n.kind == "iterate" {
+            let e = &*n.elem;
+            let num = |name: &str, d: f64| match e.get_attr(name) {
+                Some(AttrValue::Num(v)) => v,
+                _ => d,
+            };
+            return Some(fx::IterateSpec {
+                steps: num("steps", 1.0).max(1.0) as u64,
+                converged: matches!(e.get_attr("until"), Some(AttrValue::Str(s)) if s == "converged"),
+                tolerance: num("tolerance", 1e-4),
+                check_every: num("checkEvery", 100.0).max(1.0) as u64,
+            });
+        }
+        k = n.parent;
+    }
+    None
+}
+
 fn fps_of(p: &Program) -> f64 {
     let f = &p.scene.project.fps;
     (f.num as f64 / f.den.max(1) as f64).max(1e-6)
@@ -697,6 +720,7 @@ impl Renderer {
             offset: [0.0, 0.0],
             frame_size: ctx.g.size,
             node: n.id.to_string(),
+            iterate: iterate_of(ctx.g, i),
             named: HashMap::new(),
             audio: self.audio.clone(),
             seed: self.seed,
@@ -1218,6 +1242,8 @@ impl Renderer {
             additive: false,
             clear: true,
             custom: None,
+            cpu: None,
+            looped: None,
             label: String::new(),
         });
         let (passes, temps, problems) =
@@ -2022,6 +2048,7 @@ impl Renderer {
             offset: [0.0, 0.0],
             frame_size: [fw, fh],
             node: who.clone(),
+            iterate: None,
             named: HashMap::new(),
             audio: self.audio.clone(),
             seed: self.seed,

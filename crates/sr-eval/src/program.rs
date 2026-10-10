@@ -577,6 +577,8 @@ pub struct Program {
     pub safe_area_id: Option<String>,
     /// Base directory of each document (0 = main, then includes).
     pub base_dirs: Vec<PathBuf>,
+    /// SHA-256 of the bytes of each document (the main one first, then each include as it was loaded).
+    pub source_digests: Vec<[u8; 32]>,
     /// Warnings.
     pub warnings: Vec<Diagnostic>,
     /// Tracking data by id.
@@ -1151,6 +1153,8 @@ fn template(
 // ------------------------------------------------------------------ builder
 
 struct DocCtx {
+    /// SHA-256 of the document's bytes.
+    digest: [u8; 32],
     scene: Arc<m::Scene>,
     ns: Arc<str>,
     base: PathBuf,
@@ -1202,6 +1206,7 @@ fn strip(n: &Node) -> Node {
         Node::Group(g) => g.children.retain(|c| !matches!(c, m::GroupChild::Node(_))),
         Node::Sequence(g) => g.children.retain(|c| !matches!(c, m::GroupChild::Node(_))),
         Node::Repeat(r) => r.children.retain(|c| !matches!(c, m::RepeatChild::Node(_))),
+        Node::Iterate(r) => r.children.retain(|c| !matches!(c, m::IterateChild::Node(_))),
         _ => {}
     }
     n
@@ -1483,8 +1488,8 @@ impl Builder {
                 clip: attr_bool(e, "clip").unwrap_or(false),
             };
             self.nodes.push(node);
-            if matches!(name, "flock" | "fluid" | "slime" | "erosion") {
-                // simulations draw in their width × height box
+            if matches!(name, "flock" | "fluid" | "slime" | "erosion" | "compute") {
+                // simulations draw in their width × height box, and so does a compute's histogram (SREP 67)
                 let (w, h) = (attr_num(e, "width").unwrap_or(1.0), attr_num(e, "height").unwrap_or(1.0));
                 self.nodes[idx as usize].box_size = Some([Length::px(w), Length::px(h)]);
             }
@@ -1508,6 +1513,12 @@ impl Builder {
                     let c = self.instantiate(&kids, Some(idx), ctx);
                     self.nodes[idx as usize].children = c;
                     self.place_sequence(idx, s);
+                }
+                // SREP 67: an iterate holds its nodes like a group; the renderer steps their stateful effects
+                Node::Iterate(_) => {
+                    let kids = node_children(n);
+                    let c = self.instantiate(&kids, Some(idx), ctx);
+                    self.nodes[idx as usize].children = c;
                 }
                 Node::Repeat(r) => self.repeat(idx, r, n, ctx),
                 Node::Connector(c) => self.connector(idx, c, ctx),
@@ -2139,6 +2150,7 @@ impl Builder {
                 return;
             }
         };
+        let digest = doc.source_sha256();
         let mut sub_d = Vec::new();
         let mut sub_w = Vec::new();
         let t = template(&doc, &EvalOptions::default(), &mut sub_d, &mut sub_w);
@@ -2174,6 +2186,7 @@ impl Builder {
         let (markers, grid) = markers_of(&t.scene);
         let doc_ix = self.docs.len() as u16;
         self.docs.push(DocCtx {
+            digest,
             tokens: tokens_of(&t.scene),
             scene: Arc::new(t.scene),
             ns: ns.clone(),
@@ -3310,6 +3323,7 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
     zero_opacity_sources(&scene, &mut warnings);
     let mut b = Builder {
         docs: vec![DocCtx {
+            digest: doc.source_sha256(),
             tokens: tokens_of(&scene),
             scene: scene.clone(),
             ns: "".into(),
@@ -3465,6 +3479,7 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
     let safe_enforce =
         resolved_safe_area.as_ref().map(|a| crate::safe_area::SafeEnforce::of(a.enforce)).unwrap_or_default();
     let base_dirs = b.docs.iter().map(|d| d.base.clone()).collect();
+    let source_digests = b.docs.iter().map(|d| d.digest).collect();
     Ok(Program {
         identity: Arc::new(()),
         mesh_sequence_cache: Default::default(),
@@ -3473,6 +3488,7 @@ pub fn build(doc: &Document, opts: &EvalOptions) -> Result<Program, sr_model::Re
         stroke_fonts: Default::default(),
         voxel_models: Default::default(),
         base_dirs,
+        source_digests,
         safe_area,
         safe_enforce,
         safe_area_id: resolved_safe_area.as_ref().map(|a| a.id.clone()),

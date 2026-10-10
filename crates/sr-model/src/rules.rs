@@ -873,6 +873,50 @@ impl<'a> Eval<'a> {
                 "An ID reference list names at least one id.".into()
             });
         }
+        // SREP 67 (p-srep67)
+        if local == "scene"
+            && n.parent_element().is_none()
+            && matches!(a("version"), Some("1.0" | "1.1" | "1.2" | "1.3" | "1.4" | "1.5"))
+        {
+            let uses = n.descendants().any(|d| {
+                is(d, "compute")
+                    || is(d, "iterate")
+                    || (is(d, "effect")
+                        && d.parent_element().is_some_and(|p| is(p, "effects"))
+                        && matches!(d.attribute("type"), Some("error-diffusion" | "segmented-sort")))
+            });
+            self.check(!uses, n, "V13", || {
+                "compute, iterate, error-diffusion and segmented-sort need version=\"1.6\".".into()
+            });
+        }
+        if local == "iterate" {
+            let num = |k: &str| a(k).and_then(|v| v.trim().parse::<f64>().ok());
+            let ok = match (num("checkEvery"), num("steps")) {
+                (Some(c), Some(s)) => c <= s,
+                _ => true,
+            };
+            self.check(ok, n, "ITR1", || "iterate/@checkEvery is at most @steps.".into());
+            self.check(!n.descendants().skip(1).any(|d| is(d, "iterate")), n, "ITR2", || {
+                "iterate does not nest.".into()
+            });
+        }
+        if local == "compute" {
+            self.check(kids(n, "tonemap").count() <= 1, n, "CMP13", || "compute has at most one tonemap.".into());
+        }
+        if local == "effect" && parent_is("effects") && a("type") == Some("segmented-sort") {
+            let num = |k: &str| a(k).and_then(|v| v.trim().parse::<f64>().ok());
+            let ok = match (num("low"), num("high")) {
+                (Some(l), Some(h)) => l <= h,
+                _ => true,
+            };
+            self.check(ok, n, "SRT1", || "segmented-sort needs low <= high.".into());
+        }
+        // SREP 68 (p-srep68): stepping applies to shader effects (and to stepping programs, SREP 69, not implemented)
+        if local == "effect" && parent_is("effects") && (a("stepsPerFrame").is_some() || a("prewarm").is_some()) {
+            self.check(a("type") == Some("shader"), n, "STP1", || {
+                "stepsPerFrame and prewarm apply to shader effects and stepping programs (SREP 69) only.".into()
+            });
+        }
         if local == "audiogram" && parent_is("assets") {
             self.check(a("source").is_some_and(|id| self.sets.audio_tracks.contains(id)), n, "R54", || {
                 "audiogram/@source names an audioTrack of audioMix.".into()

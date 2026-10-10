@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- expect: CMP13 -->
+<scene version="1.6"><project width="64" height="64" fps="10" duration="1"/><composition><compute id="c" src="../media/srep67-three.wgsl" width="4" height="4" invocations="1"><tonemap/><tonemap/></compute></composition></scene>

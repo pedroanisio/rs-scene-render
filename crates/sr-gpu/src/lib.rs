@@ -3,7 +3,9 @@
 //! Renders sr-eval FrameGraphs into linear-light RGBA16F frames with wgpu.
 
 pub mod caption_dump;
+pub mod checkpoints;
 pub mod color;
+pub mod compute;
 pub mod drape;
 pub mod fx;
 pub mod geodesic;
@@ -19,6 +21,7 @@ pub mod raster;
 pub mod render;
 pub mod resources;
 pub mod safe_audit;
+pub mod serial;
 
 pub mod shader;
 pub mod text;

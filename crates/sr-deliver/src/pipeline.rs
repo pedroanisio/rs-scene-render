@@ -139,6 +139,11 @@ pub struct Report {
     pub audio_ceiling: Option<crate::ceiling::Held>,
     /// Content not rendered by this batch, per node.
     pub unsupported: Vec<String>,
+    /// Stateful effects (SREPs 67 and 68): checkpoints loaded from disk for a seek and seeks that found none, and the
+    /// steps each looped effect inside an `iterate` took (effect and node), the fewest and the most over the frames.
+    pub checkpoint_hits: usize,
+    pub checkpoint_misses: usize,
+    pub iterate_steps: std::collections::BTreeMap<String, [u64; 2]>,
     /// Accessibility findings (flash analysis, text contrast, required captions).
     pub accessibility: Vec<String>,
     /// The finding that fails delivery (a check set to `error`).
@@ -428,6 +433,7 @@ impl Video<'_> {
                 }
                 report.decode_wait_seconds += frame.stats.decode_wait;
                 report.vector_seconds += frame.stats.vector_seconds;
+                stateful(report, &frame.stats);
                 let (picture, placement) = self.picture(&frame, ft.as_ref(), &mut unsupported)?;
                 if checks.contrast_on() {
                     if let Some(o) = self.overlay.as_mut() {
@@ -1389,6 +1395,12 @@ fn run_delivery(
                 }
                 report.decode_wait_seconds += part.decode_wait_seconds;
                 report.vector_seconds += part.vector_seconds;
+                report.checkpoint_hits += part.checkpoint_hits;
+                report.checkpoint_misses += part.checkpoint_misses;
+                for (who, [lo, hi]) in part.iterate_steps {
+                    let e = report.iterate_steps.entry(who).or_insert([lo, hi]);
+                    *e = [e[0].min(lo), e[1].max(hi)];
+                }
                 unsupported.extend(part.unsupported);
                 if report.encoder.is_empty() {
                     report.encoder = encoder;
@@ -1909,6 +1921,16 @@ fn write_sidecars(
         files.push(path);
     }
     Ok(files)
+}
+
+/// What a frame's stateful effects add to the report (SREPs 67 and 68).
+fn stateful(report: &mut Report, stats: &sr_gpu::RenderStats) {
+    report.checkpoint_hits += stats.checkpoint_hits;
+    report.checkpoint_misses += stats.checkpoint_misses;
+    for (who, n) in &stats.iterate_steps {
+        let e = report.iterate_steps.entry(who.clone()).or_insert([*n, *n]);
+        *e = [e[0].min(*n), e[1].max(*n)];
+    }
 }
 
 /// Most with/without renders spent measuring one text's contrast.

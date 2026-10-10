@@ -3118,8 +3118,82 @@
       <xs:element name="adjustment" type="adjustmentType"/>
       <xs:element name="transition" type="transitionType"/>
       <xs:element name="skeleton" type="skeletonType"/>
+      <!-- SREP 67 (accepted 2026-10-09; document version 1.6, local addition until an sr-core release) -->
+      <xs:element name="compute" type="computeType"/>
+      <xs:element name="iterate" type="iterateType"/>
     </xs:choice>
   </xs:group>
+  <!-- ===================================================== SREP 67: compute accumulation, density tonemap, iterate -->
+  <xs:complexType name="computeType">
+    <xs:annotation><xs:documentation>Runs the WGSL compute shader @src for @invocations invocations; sr_accumulate adds
+    integer amounts into a width x height histogram, which tonemap turns into this node's picture. SREP 67.</xs:documentation></xs:annotation>
+    <!-- The SREP writes a sequence (param*, tonemap?, behaviour*); the model generator of sr-model takes a choice, so
+         the order is free here and CMP13 keeps tonemap to one. Every document valid under the SREP is valid here. -->
+    <xs:choice minOccurs="0" maxOccurs="unbounded">
+      <xs:element name="param" type="paramValueType"/>
+      <xs:element name="tonemap" type="densityTonemapType"/>
+      <xs:group ref="nodeBehaviour"/>
+    </xs:choice>
+    <xs:attributeGroup ref="nodeAttributes"/>
+    <xs:attribute name="src" type="xs:anyURI" use="required"/>
+    <xs:attribute name="sha256" type="sha256Type"/>
+    <xs:attribute name="width" type="xs:positiveInteger" use="required"/>
+    <xs:attribute name="height" type="xs:positiveInteger" use="required"/>
+    <xs:attribute name="invocations" use="required">
+      <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4294967295"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="channels" default="1">
+      <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:enumeration value="1"/><xs:enumeration value="4"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="fractionBits" default="0">
+      <xs:simpleType><xs:restriction base="xs:nonNegativeInteger"><xs:maxInclusive value="24"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="seed" type="xs:unsignedLong" default="0"/>
+    <xs:attribute name="blend" type="blendType" default="normal"/>
+  </xs:complexType>
+
+  <!-- the SREP declares this union and its keyword anonymously; named here because the model generator of sr-model maps
+       unions by name and reads member types from memberTypes only. The lexical space is the SREP's. -->
+  <xs:simpleType name="densityReferenceType">
+    <xs:union memberTypes="positiveDecimal densityReferenceKeyword"/>
+  </xs:simpleType>
+  <xs:simpleType name="densityReferenceKeyword">
+    <xs:restriction base="xs:string"><xs:enumeration value="max"/></xs:restriction>
+  </xs:simpleType>
+  <xs:complexType name="densityTonemapType">
+    <xs:attribute name="scale" default="log">
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="log"/><xs:enumeration value="linear"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="gain" type="positiveDecimal" default="1"/>
+    <xs:attribute name="gamma" type="positiveDecimal" default="1"/>
+    <xs:attribute name="reference" type="densityReferenceType" default="max">
+      <xs:annotation><xs:documentation>"max" (the largest density in the frame) or a positive number: the density that maps to 1.</xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="ramp" type="xs:string" default="#000000FF #FFFFFFFF"/>
+    <xs:attribute name="alpha" default="opaque">
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="opaque"/><xs:enumeration value="density"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+  </xs:complexType>
+
+  <xs:complexType name="iterateType">
+    <xs:annotation><xs:documentation>Each frame, the stateful nodes inside start from their zero state and advance @steps
+    steps (fewer with until="converged") before the frame is drawn. For stills; SREP 68 is the animated form.</xs:documentation></xs:annotation>
+    <xs:choice minOccurs="0" maxOccurs="unbounded">
+      <xs:group ref="nodeBehaviour"/>
+      <xs:group ref="nodeChoice"/>
+    </xs:choice>
+    <xs:attributeGroup ref="nodeAttributes"/>
+    <xs:attribute name="steps" use="required">
+      <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="10000000"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="until" default="steps">
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="steps"/><xs:enumeration value="converged"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="tolerance" type="positiveDecimal" default="0.0001"/>
+    <xs:attribute name="checkEvery" type="xs:positiveInteger" default="100"/>
+    <xs:attribute name="blend" type="blendType" default="normal"/>
+  </xs:complexType>
+
   <xs:complexType name="compositionType">
     <xs:group ref="nodeChoice" minOccurs="0" maxOccurs="unbounded"/>
   </xs:complexType>
@@ -3183,6 +3257,8 @@
         <xs:enumeration value="tritone"/><xs:enumeration value="gradient-map"/>
         <xs:enumeration value="grayscale"/><xs:enumeration value="sepia"/>
         <xs:enumeration value="invert"/><xs:enumeration value="posterize"/>
+        <!-- SREP 67: serial image operations in integer arithmetic -->
+        <xs:enumeration value="error-diffusion"/><xs:enumeration value="segmented-sort"/>
         <xs:enumeration value="threshold"/><xs:enumeration value="color-overlay"/>
         <xs:enumeration value="gradient-overlay"/><xs:enumeration value="selective-color"/>
         <!-- stylise and texture -->
@@ -3290,6 +3366,37 @@
       <xs:simpleType><xs:restriction base="xs:string">
         <xs:enumeration value="behind"/><xs:enumeration value="on-top"/><xs:enumeration value="none"/>
       </xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <!-- SREP 67: error-diffusion and segmented-sort -->
+    <xs:attribute name="kernel" default="floyd-steinberg">
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="floyd-steinberg"/><xs:enumeration value="atkinson"/><xs:enumeration value="jarvis-judice-ninke"/>
+        <xs:enumeration value="stucki"/><xs:enumeration value="burkes"/><xs:enumeration value="sierra"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="palette" type="xs:string"/>
+    <xs:attribute name="serpentine" type="xs:boolean" default="false"/>
+    <xs:attribute name="direction" default="horizontal">
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="horizontal"/><xs:enumeration value="vertical"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="order" default="ascending">
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="ascending"/><xs:enumeration value="descending"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="sortKey" default="luma">
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="luma"/><xs:enumeration value="red"/><xs:enumeration value="green"/><xs:enumeration value="blue"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="low" type="unitDecimal" default="0"/>
+    <xs:attribute name="high" type="unitDecimal" default="1"/>
+    <!-- SREP 68 (accepted 2026-10-09; not yet in an sr-core release): steps of persistent shader passes -->
+    <xs:attribute name="stepsPerFrame" default="1">
+      <xs:annotation><xs:documentation>type="shader" with PERSISTENT passes: steps (evaluations of all passes) per frame. SREP 68.</xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="10000"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="prewarm" default="0">
+      <xs:annotation><xs:documentation>Steps run before the node's first active frame, with the inputs of that frame. SREP 68.</xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:nonNegativeInteger"><xs:maxInclusive value="10000000"/></xs:restriction></xs:simpleType>
     </xs:attribute>
   </xs:complexType>
   <xs:complexType name="effectsType">
@@ -4250,7 +4357,7 @@
       </xs:sequence>
       <xs:attribute name="version" use="required">
         <xs:simpleType><xs:restriction base="xs:string">
-          <xs:enumeration value="1.0"/><xs:enumeration value="1.1"/><xs:enumeration value="1.2"/><xs:enumeration value="1.3"/><xs:enumeration value="1.4"/><xs:enumeration value="1.5"/>
+          <xs:enumeration value="1.0"/><xs:enumeration value="1.1"/><xs:enumeration value="1.2"/><xs:enumeration value="1.3"/><xs:enumeration value="1.4"/><xs:enumeration value="1.5"/><xs:enumeration value="1.6"/>
         </xs:restriction></xs:simpleType>
       </xs:attribute>
     </xs:complexType>

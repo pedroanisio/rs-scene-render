@@ -590,11 +590,26 @@ impl Run<'_> {
     }
 }
 
+/// `stepsPerFrame` or `prewarm` of a shader effect (SREP 68): a whole number within `[0, max]`, else `default`.
+fn step_attr(e: &dyn Element, a: &Attrs, name: &str, default: u64, max: u64) -> u64 {
+    if e.get_attr(name).is_none() {
+        return default;
+    }
+    let v = a.num(name, default as f64);
+    if v.is_finite() && v >= 0.0 && v.fract() == 0.0 && v <= max as f64 {
+        v as u64
+    } else {
+        default
+    }
+}
+
 /// Persistent ISF buffers of one effect instance, as of a frame.
 #[derive(Default, Clone)]
 pub struct Feedback {
     pub frame: i64,
     pub targets: HashMap<String, Arc<Tex>>,
+    /// Steps the pair has taken, prewarm included (SREP 68).
+    pub steps: u64,
 }
 
 impl Builder<'_> {
@@ -875,14 +890,31 @@ impl Builder<'_> {
             .filter_map(|p| p.get("TARGET").and_then(|t| t.as_str()).map(String::from))
             .collect();
         let key = format!("{}|{}|{}", e.element_id().unwrap_or(""), cx.node, code_hash);
-        if !persistent.is_empty() {
+        // SREP 68: the steps this evaluation takes, and those the pair has taken before it
+        let (mut steps, mut taken) = (1u64, 0u64);
+        // SREP 67: inside an iterate the state starts from zero at every frame and does not carry over
+        let iterating = cx.iterate.filter(|_| !persistent.is_empty());
+        if !persistent.is_empty() && iterating.is_none() {
             // every read within a frame sees the history as it stood when the frame began
-            if let Some(fb) = self.eng.feedback_at(&key, cx.frame) {
-                for (n, t) in fb.targets {
-                    textures.entry(n).or_insert(t);
+            let before = self.eng.feedback_at(&key, cx.frame);
+            let per_frame = step_attr(e, a, "stepsPerFrame", 1, 10_000).max(1);
+            steps = per_frame;
+            match before {
+                Some(fb) => {
+                    taken = fb.steps;
+                    for (n, t) in fb.targets {
+                        textures.entry(n).or_insert(t);
+                    }
                 }
+                // the pair's first stepped frame: its prewarm steps run first, with this frame's input
+                None => steps += step_attr(e, a, "prewarm", 0, 10_000_000),
             }
         }
+        // With the defaults (one step, no prewarm) FRAMEINDEX and TIMEDELTA keep their values from before SREP 68:
+        // the frame index and 1/fps (0 at time 0). Otherwise FRAMEINDEX counts the pair's steps from 0 and
+        // TIMEDELTA is 1/(fps · stepsPerFrame).
+        let stepping = !persistent.is_empty()
+            && (step_attr(e, a, "stepsPerFrame", 1, 10_000) != 1 || step_attr(e, a, "prewarm", 0, 10_000_000) != 0);
         let mut names: HashMap<String, f64> =
             [("WIDTH".to_string(), w as f64), ("HEIGHT".to_string(), h as f64)].into();
         for inp in header.as_ref().and_then(|h| h.get("INPUTS")).and_then(|v| v.as_array()).into_iter().flatten() {
@@ -898,25 +930,74 @@ impl Builder<'_> {
             }
         }
         let empty = self.empty();
+        if let Some(spec) = iterating {
+            // SREP 67, Semantics 4: `steps` steps from the zero state (fewer when it converges), run as one loop when the
+            // passes are recorded, so a ceiling of millions of steps is not millions of recorded passes; stepsPerFrame and
+            // prewarm are ignored; FRAMEINDEX counts the steps from 0
+            let mut loop_passes = Vec::new();
+            let mut sizes = [w, h];
+            for (i, ps) in passes.iter().enumerate() {
+                let pw = glsl::isf_size(ps.get("WIDTH"), &names, w);
+                let ph = glsl::isf_size(ps.get("HEIGHT"), &names, h);
+                let extra: HashMap<&'static str, Vec<f64>> =
+                    [("RENDERSIZE", vec![pw as f64, ph as f64]), ("PASSINDEX", vec![i as f64])].into();
+                loop_passes.push(crate::fx::LoopPass {
+                    block: run.block(&program, &extra),
+                    target: ps.get("TARGET").and_then(|t| t.as_str()).map(String::from),
+                    out: [self.tex([pw, ph]), self.tex([pw, ph])],
+                });
+                sizes = [pw, ph];
+            }
+            let taken = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            self.eng.iterations.push((format!("{}|{}", e.element_id().unwrap_or(""), cx.node), taken.clone()));
+            let run_loop = crate::fx::LoopRun {
+                pipe: pipe.clone(),
+                program: program.clone(),
+                passes: loop_passes,
+                inputs: textures.clone(),
+                persistent: persistent.clone(),
+                empty: empty.clone(),
+                spec,
+                taken,
+            };
+            let mut out = self.tex(sizes);
+            self.passes.push(Pass::looped(run_loop, out.clone()));
+            if sizes != [w, h] {
+                let rs = self.internal("resize", RESIZE);
+                let b = rs.program.block();
+                out = self.custom(&rs, b, vec![out], [w, h]);
+            }
+            return Ok(self.convert(&out, None, &space, &working, false));
+        }
         let mut out = inp.clone();
         let mut sizes = [w, h];
-        for (i, ps) in passes.iter().enumerate() {
-            let pw = glsl::isf_size(ps.get("WIDTH"), &names, w);
-            let ph = glsl::isf_size(ps.get("HEIGHT"), &names, h);
-            let extra: HashMap<&'static str, Vec<f64>> =
-                [("RENDERSIZE", vec![pw as f64, ph as f64]), ("PASSINDEX", vec![i as f64])].into();
-            let block = run.block(&program, &extra);
-            let texs =
-                program.samplers.iter().map(|n| textures.get(n).cloned().unwrap_or_else(|| empty.clone())).collect();
-            out = self.custom(&pipe, block, texs, [pw, ph]);
-            sizes = [pw, ph];
-            if let Some(t) = ps.get("TARGET").and_then(|t| t.as_str()) {
-                textures.insert(t.to_string(), out.clone());
+        let per_frame = step_attr(e, a, "stepsPerFrame", 1, 10_000).max(1) as f64;
+        for step in 0..steps {
+            for (i, ps) in passes.iter().enumerate() {
+                let pw = glsl::isf_size(ps.get("WIDTH"), &names, w);
+                let ph = glsl::isf_size(ps.get("HEIGHT"), &names, h);
+                let mut extra: HashMap<&'static str, Vec<f64>> =
+                    [("RENDERSIZE", vec![pw as f64, ph as f64]), ("PASSINDEX", vec![i as f64])].into();
+                if stepping {
+                    extra.insert("FRAMEINDEX", vec![(taken + step) as f64]);
+                    extra.insert("TIMEDELTA", vec![1.0 / (fps * per_frame)]);
+                }
+                let block = run.block(&program, &extra);
+                let texs = program
+                    .samplers
+                    .iter()
+                    .map(|n| textures.get(n).cloned().unwrap_or_else(|| empty.clone()))
+                    .collect();
+                out = self.custom(&pipe, block, texs, [pw, ph]);
+                sizes = [pw, ph];
+                if let Some(t) = ps.get("TARGET").and_then(|t| t.as_str()) {
+                    textures.insert(t.to_string(), out.clone());
+                }
             }
         }
         if !persistent.is_empty() {
             let targets = persistent.iter().filter_map(|n| textures.get(n).map(|t| (n.clone(), t.clone()))).collect();
-            self.eng.feedback.insert(key, Feedback { frame: cx.frame, targets });
+            self.eng.feedback.insert(key, Feedback { frame: cx.frame, targets, steps: taken + steps });
         }
         if sizes != [w, h] {
             let rs = self.internal("resize", RESIZE);
@@ -1194,6 +1275,18 @@ impl FxEngine {
         }
     }
 
+    /// Makes `feedback` the history at the end of `frame` (a checkpoint loaded from disk), and records it as a checkpoint.
+    pub(crate) fn install(&mut self, frame: i64, feedback: HashMap<String, Feedback>) {
+        self.feedback_frame = (i64::MIN, HashMap::new());
+        self.checkpoints.insert(frame, feedback.clone());
+        self.feedback = feedback;
+    }
+
+    /// Uploads RGBA texels into `t` (a checkpoint's buffer).
+    pub(crate) fn upload_texels(&self, t: Arc<Tex>, px: &[[f32; 4]]) -> Arc<Tex> {
+        self.upload(t, px)
+    }
+
     /// Restores the latest history recorded at or before `frame`; returns the first frame to replay.
     pub(crate) fn restore(&mut self, frame: i64) -> i64 {
         self.feedback_frame = (i64::MIN, HashMap::new());
@@ -1213,15 +1306,25 @@ impl FxEngine {
 /// Whether any shader effect of the scene has PERSISTENT ISF passes (its renders then replay
 /// earlier frames on a seek, so feedback is the same whichever frame is rendered first).
 pub fn has_persistent(p: &sr_eval::Program, base: &Path) -> bool {
-    let Some(fx) = p.scene.effects.as_ref() else { return false };
-    fx.effects.iter().filter(|e| e.r#type.as_str() == "shader").any(|e| {
-        let a = Attrs { e: e as &dyn Element, props: None };
-        let Some(src) = a.str("src") else { return false };
-        let Ok((code, _)) = glsl::load_source(&src, base) else { return false };
-        glsl::build_effect(&code)
-            .ok()
-            .and_then(|p| p.isf)
-            .and_then(|h| h.get("PASSES").and_then(|v| v.as_array()).cloned())
-            .is_some_and(|ps| ps.iter().any(|p| p.get("PERSISTENT").and_then(|v| v.as_bool()).unwrap_or(false)))
-    })
+    !persistent_effects(p, base).is_empty()
+}
+
+/// The ids of the shader effects of the scene with PERSISTENT ISF passes: the stateful effects of SREP 68.
+pub fn persistent_effects(p: &sr_eval::Program, base: &Path) -> std::collections::HashSet<String> {
+    let Some(fx) = p.scene.effects.as_ref() else { return Default::default() };
+    fx.effects
+        .iter()
+        .filter(|e| e.r#type.as_str() == "shader")
+        .filter(|e| {
+            let a = Attrs { e: *e as &dyn Element, props: None };
+            let Some(src) = a.str("src") else { return false };
+            let Ok((code, _)) = glsl::load_source(&src, base) else { return false };
+            glsl::build_effect(&code)
+                .ok()
+                .and_then(|p| p.isf)
+                .and_then(|h| h.get("PASSES").and_then(|v| v.as_array()).cloned())
+                .is_some_and(|ps| ps.iter().any(|p| p.get("PERSISTENT").and_then(|v| v.as_bool()).unwrap_or(false)))
+        })
+        .map(|e| e.id.to_string())
+        .collect()
 }

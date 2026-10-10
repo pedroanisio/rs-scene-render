@@ -42,6 +42,14 @@ mod resample;
 mod shaders;
 #[path = "raster_effects/shutter_angle_node.rs"]
 mod shutter_angle_node;
+#[path = "raster_effects/srep67_compute.rs"]
+mod srep67_compute;
+#[path = "raster_effects/srep67_iterate.rs"]
+mod srep67_iterate;
+#[path = "raster_effects/srep67_serial.rs"]
+mod srep67_serial;
+#[path = "raster_effects/srep68_steps.rs"]
+mod srep68_steps;
 #[path = "raster_effects/stage_times.rs"]
 mod stage_times;
 #[path = "raster_effects/stencil_effects.rs"]
@@ -54,6 +62,8 @@ mod stroke_text_doc;
 mod text;
 #[path = "raster_effects/vector.rs"]
 mod vector;
+#[path = "raster_effects/version_1_6.rs"]
+mod version_1_6;
 #[path = "raster_effects/video.rs"]
 mod video;
 #[path = "raster_effects/wiggle_path_smooth.rs"]

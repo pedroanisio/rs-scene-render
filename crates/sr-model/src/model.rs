@@ -39,6 +39,10 @@ impl Node {
                 RepeatChild::Node(n) => Some(n),
                 _ => None,
             })),
+            Node::Iterate(r) => Box::new(r.children.iter().filter_map(|c| match c {
+                IterateChild::Node(n) => Some(n),
+                _ => None,
+            })),
             _ => Box::new(std::iter::empty()),
         }
     }

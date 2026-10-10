@@ -301,6 +301,9 @@
     "c9.scene.xml": [
       "C9"
     ],
+    "cmp13-two-tonemaps.scene.xml": [
+      "CMP13"
+    ],
     "crt1.scene.xml": [
       "CRT1"
     ],
@@ -486,6 +489,12 @@
     ],
     "gm-too-many-digits.scene.xml": [
       "R21"
+    ],
+    "itr1-check-every.scene.xml": [
+      "ITR1"
+    ],
+    "itr2-nested.scene.xml": [
+      "ITR2"
     ],
     "mov1.scene.xml": [
       "MOV1"
@@ -1018,6 +1027,12 @@
       "P3D6",
       "PYRO8"
     ],
+    "srt1-low-high.scene.xml": [
+      "SRT1"
+    ],
+    "stp1-not-a-shader.scene.xml": [
+      "STP1"
+    ],
     "txt2.scene.xml": [
       "TXT2"
     ],
@@ -1029,6 +1044,9 @@
     ],
     "v11.scene.xml": [
       "V11"
+    ],
+    "v13-iterate.scene.xml": [
+      "V13"
     ],
     "v2-outputs.scene.xml": [
       "V2"

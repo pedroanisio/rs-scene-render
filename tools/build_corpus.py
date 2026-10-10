@@ -683,6 +683,22 @@ CASES += [
     ("r54-audiogram-source", ["R54"], lambda _: MINIMAL.replace('<composition/>', '<assets><audiogram id="a" source="wrong" width="32" height="32"/></assets><composition><group id="wrong"/></composition>')),
 ]
 
+# SREP 67 (document version 1.6): compute, iterate and the serial effect types
+SREP67 = '<scene version="1.6"><project width="64" height="64" fps="10" duration="1"/><composition>{body}</composition>{post}</scene>\n'
+SREP67_SHAPE = '<shape id="s" shape="rect" width="10" height="10" fill="#FFFFFF" effects="fx"/>'
+CASES += [
+    ("v13-iterate", ["V13"], lambda _: SREP67.format(body=f'<iterate id="it" steps="10">{SREP67_SHAPE}</iterate>', post='<effects><effect id="fx" type="blur"/></effects>').replace('version="1.6"', 'version="1.5"')),
+    ("itr1-check-every", ["ITR1"], lambda _: SREP67.format(body=f'<iterate id="it" steps="10" checkEvery="20">{SREP67_SHAPE}</iterate>', post='<effects><effect id="fx" type="blur"/></effects>')),
+    ("itr2-nested", ["ITR2"], lambda _: SREP67.format(body=f'<iterate id="a" steps="10"><iterate id="b" steps="5">{SREP67_SHAPE}</iterate></iterate>', post='<effects><effect id="fx" type="blur"/></effects>')),
+    ("srt1-low-high", ["SRT1"], lambda _: SREP67.format(body=SREP67_SHAPE, post='<effects><effect id="fx" type="segmented-sort" low="0.8" high="0.2"/></effects>')),
+    ("cmp13-two-tonemaps", ["CMP13"], lambda _: SREP67.format(body='<compute id="c" src="../media/srep67-three.wgsl" width="4" height="4" invocations="1"><tonemap/><tonemap/></compute>', post='')),
+]
+
+# SREP 68: stepsPerFrame and prewarm apply to shader effects only
+CASES += [
+    ("stp1-not-a-shader", ["STP1"], lambda _: '<scene version="1.6"><project width="64" height="64" fps="10" duration="1"/><composition><shape id="s" shape="rect" width="10" height="10" fill="#FFFFFF" effects="fx"/></composition><effects><effect id="fx" type="blur" stepsPerFrame="2"/></effects></scene>\n'),
+]
+
 def write(path, text, expect):
     header = f"<!-- expect: {' '.join(expect) if expect else 'valid'} -->\n"
     body = text.split("\n", 1)[1] if text.startswith("<?xml") else text
@@ -719,8 +735,11 @@ def with_small_cells(text, expect):
 
 def oracle_codes(expected, blind=False):
     """Translate Rust diagnostics into the independent schema oracle's scope."""
-    codes = {code for code in expected if not code.startswith(("S", "A", "W"))}
-    if not blind and any(code.startswith("S") for code in expected):
+    # structural (S01...), asset (A01...) and warning (W01...) codes are a letter and digits; a Schematron id may start
+    # with one of those letters too (SRT1 and STP1 of SREPs 67 and 68)
+    outside = re.compile(r"[SAW]\d")
+    codes = {code for code in expected if not outside.match(code)}
+    if not blind and any(re.match(r"S\d", code) for code in expected):
         codes.add("XSD")
     return sorted(codes)
 
