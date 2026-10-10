@@ -2104,6 +2104,8 @@ impl Renderer {
                 clear: true,
                 custom: None,
                 label: "join format".into(),
+                cpu: None,
+                looped: None,
             };
             let target = pass.out.clone();
             Self::finish_builder(&mut plan, vec![pass], vec![target], Vec::new(), &who);
