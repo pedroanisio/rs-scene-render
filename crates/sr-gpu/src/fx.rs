@@ -1042,42 +1042,21 @@ impl FxEngine {
     /// A 256×1 table texture (curves, gradient maps), premultiplied RGBA.
     pub fn table(&self, pool: &mut Pool, bgl1: &wgpu::BindGroupLayout, px: &[[f32; 4]; 256]) -> Arc<Tex> {
         let t = pool.get(&self.device, bgl1, [256, 1]);
-        let bytes: Vec<u8> =
-            px.iter().flat_map(|c| c.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes())).collect();
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &t.tex,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &bytes,
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(256 * 8), rows_per_image: Some(1) },
-            wgpu::Extent3d { width: 256, height: 1, depth_or_array_layers: 1 },
-        );
+        self.write_texels(&t, px);
         t
     }
 }
 
 impl FxEngine {
-    /// A texels.len()×1 data texture of f16 values (integers up to 2048 are exact).
+    /// A texels.len()×1 data texture in the working format (f16 represents integers up to 2048 exactly).
     pub fn data_table(&self, pool: &mut Pool, bgl1: &wgpu::BindGroupLayout, texels: &[[f32; 4]]) -> Arc<Tex> {
         let w = texels.len().max(1) as u32;
         let t = pool.get(&self.device, bgl1, [w, 1]);
-        let mut bytes: Vec<u8> =
-            texels.iter().flat_map(|c| c.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes())).collect();
-        bytes.resize(w as usize * 8, 0);
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &t.tex,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &bytes,
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 8), rows_per_image: Some(1) },
-            wgpu::Extent3d { width: w, height: 1, depth_or_array_layers: 1 },
-        );
+        if texels.is_empty() {
+            self.write_texels(&t, &[[0.0; 4]]);
+        } else {
+            self.write_texels(&t, texels);
+        }
         t
     }
 }

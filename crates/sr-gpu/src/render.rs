@@ -1021,8 +1021,12 @@ impl Renderer {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &[0u8; 8],
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(8), rows_per_image: Some(1) },
+            &[0u8; 16][..resources::texel_bytes(format) as usize],
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(resources::texel_bytes(format)),
+                rows_per_image: Some(1),
+            },
             wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
         );
         let max_texture = d.limits().max_texture_dimension_2d.min(8192);
@@ -3380,9 +3384,8 @@ impl Renderer {
 
     // ---------------------------------------------------------- frame
 
-    /// The project background. The composition composites on transparency and the background goes
-    /// beneath everything last (as After Effects does), so `behind`, `subtract`, stencils and
-    /// silhouettes act on the layers only.
+    /// The project background. Normally it goes beneath the composition last, so `behind`, `subtract`, stencils
+    /// and silhouettes act on layers only. A node with an edge-space override needs the visible background first.
     fn background(&mut self, plan: &mut Plan, ctx: &Ctx, space: &Space, cmds: &mut Vec<Cmd>) {
         let g = ctx.g;
         // the document's frame, in document units (the space may draw it at another scale)
@@ -3777,13 +3780,22 @@ impl Renderer {
         // the document's coordinates at the tier's scale
         let space = Space { xform: Affine::scale(scale, scale), size, unit: scale };
         let mut cmds = Vec::new();
+        // An edge-space override must mix against the visible background in its chosen space.
+        // Keep the established background-last path for documents without an override.
+        let background_first =
+            g.nodes.iter().any(|n| n.draw && matches!(self.blend_of(n), BLEND_OVER_ENCODED | BLEND_OVER_LINEAR));
+        if background_first {
+            self.background(&mut plan, &ctx, &space, &mut cmds);
+        }
         for r in Self::depth_sorted(g, &roots) {
             let rh = h(&[Self::subtree_hash(&ctx, r, &Affine::IDENTITY), hf(g.nodes[r].world_opacity), cam_hash]);
             self.emit(&mut plan, &ctx, r, &space, 1.0, &mut cmds, false, rh);
         }
         self.burn_captions(&mut plan, &ctx, &space, &mut cmds);
         self.flush_vec(&mut plan, &mut cmds);
-        self.background(&mut plan, &ctx, &space, &mut cmds);
+        if !background_first {
+            self.background(&mut plan, &ctx, &space, &mut cmds);
+        }
         // contrast probes measure against what ends up behind the text: the background too
         let probe_bg = if plan.probes.is_empty() {
             None

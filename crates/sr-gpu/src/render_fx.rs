@@ -729,7 +729,7 @@ impl Renderer {
 
     /// The box of node `i`'s content in `space`'s pixels: the union of the boxes of the node and its
     /// sized descendants. None when nothing has a size.
-    fn content_box(ctx: &Ctx, i: usize, space: &Space) -> Option<[f64; 4]> {
+    fn content_box(ctx: &Ctx, i: usize, space: &Space, padding: f64) -> Option<[f64; 4]> {
         let mut b = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
         let mut stack = vec![i];
         while let Some(k) = stack.pop() {
@@ -743,13 +743,13 @@ impl Renderer {
             }
             stack.extend(ctx.kids[k].iter().copied());
         }
-        // tiles: each box grown by 2 px to whole pixels, within 64 px of the target
+        // Tiles need a 2 px fringe; serial operations must use the content rectangle itself.
         let (w, h) = (space.size[0] as f64, space.size[1] as f64);
         let b = [
-            (b[0] - 2.0).floor().max(-64.0),
-            (b[1] - 2.0).floor().max(-64.0),
-            (b[2] + 2.0).ceil().min(w + 64.0),
-            (b[3] + 2.0).ceil().min(h + 64.0),
+            (b[0] - padding).floor().max(-64.0),
+            (b[1] - padding).floor().max(-64.0),
+            (b[2] + padding).ceil().min(w + 64.0),
+            (b[3] + padding).ceil().min(h + 64.0),
         ];
         (b[2] > b[0] && b[3] > b[1]).then_some(b)
     }
@@ -887,6 +887,10 @@ impl Renderer {
             return false;
         }
         let op = if iso_op > 0.0 { n.world_opacity / iso_op } else { 0.0 };
+        // Invisible frames do not advance persistent shader state (SREP 68).
+        if op <= 0.0 {
+            return true;
+        }
         let ta = space.xform.then(&n.world);
         let px = Xf(ta.0).max_scale().max(1e-6);
         let (fw, fh) = (space.size[0] as f64, space.size[1] as f64);
@@ -1200,7 +1204,8 @@ impl Renderer {
                 };
             let named = if kind == "shader" { self.shader_samplers(plan, ctx, e, space, rect) } else { HashMap::new() };
             let mut cx = self.cx_for(ctx, i, inner, [0.0, 0.0, w, hgt], &to_uv, &color, &gradient, &base);
-            cx.content = Self::content_box(ctx, i, inner);
+            let padding = if matches!(kind, "error-diffusion" | "segmented-sort") { 0.0 } else { 2.0 };
+            cx.content = Self::content_box(ctx, i, inner, padding);
             cx.source = source;
             cx.named = named;
             cx.offset = [rect[0], space.size[1] as f64 - rect[3]];

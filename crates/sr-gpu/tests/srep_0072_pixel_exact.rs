@@ -43,11 +43,12 @@ fn expect(r: &Rendered, name: &str, want: [f64; 4]) {
 #[track_caller]
 fn region(r: &Rendered, [x0, y0, x1, y1]: [u32; 4], rgb: [f64; 3]) {
     let mut sum = [0f64; 3];
+    let display = r.renderer.to_srgb8(&r.px);
     for y in y0..y1 {
         for x in x0..x1 {
-            let p = r.at(x, y);
+            let offset = ((y * r.size[0] + x) * 4) as usize;
             for (k, s) in sum.iter_mut().enumerate() {
-                *s += (p[k].clamp(0.0, 1.0) * 255.0).round() as f64;
+                *s += display[offset + k] as f64;
             }
         }
     }
@@ -265,7 +266,7 @@ fn the_default_precision_cannot_hold_2049_in_a_float_pass() {
 
 #[test]
 fn f32_working_textures_read_back_as_written() {
-    // the frame and every readback decode 32-bit texels: a gradient of 4096 levels comes back with its levels
+    // The frame and readback preserve a linear colour that binary16 cannot represent.
     let Some(gpu) = gpu() else { return };
     if !gpu.device.features().contains(sr_gpu::resources::F32_FEATURES) {
         return;
@@ -279,4 +280,21 @@ fn f32_working_textures_read_back_as_written() {
     let p = r.at(320, 180);
     // #80 decoded to linear light is 0.2158605 (sRGB transfer); f16 would round it to 0.2158203
     assert!((p[0] - 0.215_860_5).abs() < 2e-6, "{p:?}");
+}
+
+#[test]
+fn f32_effect_lookup_tables_use_the_working_texture_format() {
+    let Some(gpu) = gpu() else { return };
+    if !gpu.device.features().contains(sr_gpu::resources::F32_FEATURES) {
+        return;
+    }
+    for attrs in [r#"type="curves" curve="0,0 1,1""#, r#"type="glitch" amount="1" seed="3""#] {
+        let xml = scene(
+            r#"precision="f32""#,
+            r##"<shape id="s" shape="rect" width="640" height="360" fill="#FFFFFF" effects="f"/>"##,
+            &format!(r#"<effects><effect id="f" {attrs}/></effects>"#),
+        );
+        let r = render_xml(&xml).unwrap();
+        region(&r, [310, 170, 330, 190], [255.0; 3]);
+    }
 }

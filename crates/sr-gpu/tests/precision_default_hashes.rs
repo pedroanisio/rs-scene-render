@@ -94,11 +94,12 @@ fn the_default_precision_renders_as_before_on_the_reference_host() {
     let mut got = serde_json::Map::new();
     let mut adapter = String::new();
     for (name, project, extra, body) in documents() {
-        let d = if extra.starts_with("<effects>") {
-            doc_with(&project, "", &body, &extra)
-        } else {
-            doc(&project, &extra, &body)
-        };
+        let (pre, post) = if extra.starts_with("<effects>") { ("", extra.as_str()) } else { (extra.as_str(), "") };
+        let xml = format!(
+            r#"<scene version="1.1"><project fps="10" duration="2" {project}/>{ASSETS}{pre}<composition>{body}</composition>{post}</scene>"#
+        );
+        let opts = sr_model::LoadOptions { verify_assets: true, base_dir: Some(fixtures()) };
+        let d = sr_model::load_str(&xml, &opts).unwrap_or_else(|e| panic!("{name}: {e:?}\n{xml}"));
         let Some(r) = render_times(&d, &[1.0]) else { return };
         assert!(
             r.stats.errors.is_empty() && r.stats.unsupported.is_empty(),

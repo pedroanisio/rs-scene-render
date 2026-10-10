@@ -56,7 +56,7 @@ fn kernels_read_only_declared_attributes() {
             .filter_map(|n| sample(n).map(|v| format!(r#" {n}="{v}""#)))
             .collect();
         let xml = format!(
-            r##"<scene version="1.1"><project width="32" height="32" fps="10" duration="1" background="#202020"/>
+            r##"<scene version="1.6"><project width="32" height="32" fps="10" duration="1" background="#202020"/>
             <composition><shape id="other" shape="rect" x="2" y="2" width="12" height="12" fill="#FFFFFF"/>
             <shape id="n" shape="rect" x="8" y="8" width="16" height="16" fill="#FF8800" effects="fx"/></composition>
             <lights><light id="lamp" type="directional" intensity="1"/></lights>
@@ -127,6 +127,11 @@ fn identifiers(text: &str) -> Vec<String> {
                     break;
                 }
             }
+        } else if c == ':' && chars.peek() == Some(&':') {
+            // Qualified helper names (such as serial::threshold) are not up-front local reads.
+            cur.push_str("::");
+            chars.next();
+            continue;
         } else if c.is_alphanumeric() || c == '_' {
             cur.push(c);
             continue;
@@ -136,6 +141,13 @@ fn identifiers(text: &str) -> Vec<String> {
         }
     }
     out
+}
+
+#[test]
+fn qualified_helpers_are_distinct_from_up_front_locals() {
+    let tokens = identifiers("let lo = crate::serial::threshold(a.num(\"low\", 0.0)); threshold + 1.0;");
+    assert!(tokens.iter().any(|t| t == "crate::serial::threshold"));
+    assert_eq!(tokens.iter().filter(|t| *t == "threshold").count(), 1);
 }
 
 /// The effect types an arm head names: a line starting with a quoted name or `| "name"`, continued until the line with `=>`.
