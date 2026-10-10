@@ -15,3 +15,4 @@ mod safe_area;
 mod semantics;
 mod spring_carry;
 mod stroke_text;
+mod version_1_6;
