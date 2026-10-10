@@ -356,7 +356,7 @@ impl Renderer {
         t
     }
 
-    fn builder<'b>(&'b mut self, _plan: &Plan) -> Builder<'b> {
+    pub(super) fn builder<'b>(&'b mut self, _plan: &Plan) -> Builder<'b> {
         let store = if self.working.linear {
             0
         } else {

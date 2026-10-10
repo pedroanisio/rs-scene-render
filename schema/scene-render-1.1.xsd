@@ -1604,6 +1604,16 @@
     </xs:attribute>
     <xs:attribute name="matteMode" type="matteModeType" default="alpha"/>
     <xs:attribute name="matteVisible" type="xs:boolean" default="false"/>
+    <xs:attribute name="edgeBlend" default="inherit">
+      <xs:annotation><xs:documentation>The space in which this node's own pixels (their colour C and coverage x opacity a)
+      composite onto what lies beneath (B): linear, out = a C + (1 - a) B in the linear working space; encoded, the same
+      on display-encoded values (the sRGB transfer function), decoded back; inherit, linear when project/@linearLight is
+      true and encoded when it is false. A group's value applies when its offscreen composites; children do not inherit
+      it. SREP 72.</xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:string">
+        <xs:enumeration value="inherit"/><xs:enumeration value="linear"/><xs:enumeration value="encoded"/>
+      </xs:restriction></xs:simpleType>
+    </xs:attribute>
   </xs:attributeGroup>
   <xs:attributeGroup name="nodeAttributes">
     <xs:attributeGroup ref="nodeCoreAttributes"/>
@@ -4039,6 +4049,23 @@
     </xs:attribute>
     <xs:attribute name="antialias3d" default="1">
       <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="precision" default="f16">
+      <xs:annotation><xs:documentation>Working textures (offscreens, effect passes, persistent buffers, the frame): f16 or f32
+      per channel. Decoded media keep their own precision. SREP 72.</xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="f16"/><xs:enumeration value="f32"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="supersample" default="1">
+      <xs:annotation><xs:documentation>n > 1 renders the frame at n x width by n x height, every length scaled by n, and filters
+      it down with supersampleFilter: output pixel i is the weighted mean of the samples, sample k centred at (k + 0.5)/n
+      output pixels, the weights renormalised at the frame's edges, in the working space before output encoding, and
+      clamped to [0, 1]. SREP 72.</xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="4"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="supersampleFilter" default="box">
+      <xs:annotation><xs:documentation>box: the mean of the n x n samples inside the pixel; lanczos3: the separable kernel
+      sinc(x) sinc(x/3) for |x| &lt; 3 output pixels. Read only when supersample > 1. SREP 72.</xs:documentation></xs:annotation>
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="box"/><xs:enumeration value="lanczos3"/></xs:restriction></xs:simpleType>
     </xs:attribute>
     <xs:attribute name="motionBlur" type="xs:boolean" default="false"/>
     <xs:attribute name="shutterAngle" default="180">

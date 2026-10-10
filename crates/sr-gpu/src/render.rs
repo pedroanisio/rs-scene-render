@@ -206,6 +206,10 @@ pub(crate) fn fixed_function_blend(blend: u32) -> bool {
 }
 /// Adjustment layers: backdrop + (effect − backdrop) · coverage.
 pub(crate) const BLEND_ADJUST: u32 = 35;
+/// SREP 72 `edgeBlend`: normal source-over computed on sRGB-encoded values while the frame stores linear ones.
+pub(crate) const BLEND_OVER_ENCODED: u32 = 36;
+/// SREP 72 `edgeBlend`: normal source-over computed on linear values while the frame stores encoded ones.
+pub(crate) const BLEND_OVER_LINEAR: u32 = 37;
 
 #[derive(Clone, Copy)]
 struct Space {
@@ -358,6 +362,8 @@ pub struct Renderer {
     prev_root: Vec<u64>,
     pool: Pool,
     frame: Option<Arc<Tex>>,
+    /// The frame filtered down from a supersampled render (SREP 72), reused while its size holds.
+    ss_frame: Option<Arc<Tex>>,
     video: crate::video::VideoEngine,
     decoders: HashMap<String, Result<sr_media::VideoDecoder, String>>,
     video_frames: HashMap<String, Arc<Tex>>,
@@ -700,6 +706,16 @@ fn frame_blend(e: &dyn Element) -> u8 {
         .unwrap_or(0)
 }
 
+/// Whether node `e` composites on encoded values (SREP 72 `edgeBlend`): `encoded`, or `inherit` in a document whose
+/// `linearLight` is false.
+fn edge_blend_encoded(e: &dyn Element, linear_light: bool) -> bool {
+    match e.get_attr("edgeBlend") {
+        Some(AttrValue::Str(s)) if s == "encoded" => true,
+        Some(AttrValue::Str(s)) if s == "linear" => false,
+        _ => !linear_light,
+    }
+}
+
 fn blend_index(e: &dyn Element) -> u32 {
     match e.get_attr("blend") {
         Some(AttrValue::Str(s)) => m::Blend::ALL.iter().position(|b| b.as_str() == s).unwrap_or(0) as u32,
@@ -973,6 +989,7 @@ impl Renderer {
             prev_root: Vec::new(),
             pool: Pool::default(),
             frame: None,
+            ss_frame: None,
             fx: fx::FxEngine::new(gpu_device.clone(), gpu_queue.clone()),
             bare: Default::default(),
             in_transition: Default::default(),
@@ -2162,9 +2179,16 @@ impl Renderer {
     /// sample.
     fn blend_of(&self, n: &FrameNode) -> u32 {
         if self.bare.contains(&n.id) || self.unblended.as_ref() == Some(&n.id) {
-            0
-        } else {
-            blend_index(&*n.elem)
+            return 0;
+        }
+        match blend_index(&*n.elem) {
+            // SREP 72: a normal blend in the space `edgeBlend` names; the other space than the frame's needs the backdrop
+            0 => match (edge_blend_encoded(&*n.elem, self.working.linear), self.working.linear) {
+                (true, true) => BLEND_OVER_ENCODED,
+                (false, false) => BLEND_OVER_LINEAR,
+                _ => 0,
+            },
+            b => b,
         }
     }
 
@@ -3289,12 +3313,19 @@ impl Renderer {
     ) -> Frame {
         self.contrast_batch_split = false;
         self.tier = Tier::of(self.quality.unwrap_or(p.scene.project.quality));
+        // SREP 72: a supersampled frame renders n times larger, as by a render scale, and is filtered down at the end
+        let ss = if self.view_override.is_none() && p.scene.scene360.is_none() {
+            p.scene.project.supersample.clamp(1, 4) as u32
+        } else {
+            1
+        };
+        let out_size = g.size.map(|v| v * self.tier.scale);
         let dimensions = if self.view_override.is_none() {
             p.scene.scene360.as_ref().map(|s| [s.width as f64, s.height as f64])
         } else {
             None
         }
-        .unwrap_or(g.size.map(|v| v * self.tier.scale));
+        .unwrap_or(out_size.map(|v| v * ss as f64));
         let size = match crate::output::frame_size(dimensions, &self.gpu.device.limits()) {
             Ok(size) => size,
             Err(error) => {
@@ -3309,6 +3340,7 @@ impl Renderer {
             return self.render_360(g, p, provider);
         }
         self.tier = Tier::of(self.quality.unwrap_or(p.scene.project.quality));
+        self.tier.scale *= ss as f64;
         let created_before = self.pool.created;
         let released_before = self.pool.released;
         let subs = provider.map(|pv| SubFrames {
@@ -3449,6 +3481,17 @@ impl Renderer {
         plan.stats.unsupported.sort();
         plan.stats.unsupported.dedup();
         let probes = std::mem::take(&mut plan.probes);
+        let shown = if ss > 1 {
+            match crate::output::frame_size(out_size, &self.gpu.device.limits()) {
+                Ok(target) => Some(self.supersample_down(&mut plan, p, &frame, ss, target)),
+                Err(error) => {
+                    plan.stats.errors.push(error);
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let mut stats = self.execute(plan, restore, snapshot_at, &hashes);
         for (id, rect, snap) in probes {
             if let Some(ratio) = self.measure_contrast(&snap, probe_bg.as_deref(), &frame, rect) {
@@ -3504,7 +3547,38 @@ impl Renderer {
         stats.textures_created = self.pool.created - created_before;
         stats.textures_released = self.pool.released - released_before;
         stats.voxel_states = self.voxel_surfaces.len();
-        Frame { texture: frame, stats }
+        Frame { texture: shown.unwrap_or(frame), stats }
+    }
+
+    /// Plans the filter of a supersampled `frame` (`n` samples per output pixel) down to `size` (SREP 72 §4), after
+    /// everything drawn into it, and returns the texture it lands in.
+    fn supersample_down(&mut self, plan: &mut Plan, p: &Program, frame: &Arc<Tex>, n: u32, size: [u32; 2]) -> Arc<Tex> {
+        let target = match &self.ss_frame {
+            Some(t) if t.size == size => t.clone(),
+            _ => Arc::new(resources::create(&self.gpu.device, &self.bgl1, size, 1, "supersampled frame")),
+        };
+        self.ss_frame = Some(target.clone());
+        let lanczos = p.scene.project.supersample_filter == m::SupersampleFilter::Lanczos3;
+        let mut b = self.builder(plan);
+        b.supersample_down(frame, n, lanczos, size);
+        let (mut passes, temps) = (std::mem::take(&mut b.passes), std::mem::take(&mut b.temps));
+        if let Some(last) = passes.last_mut() {
+            last.out = target.clone();
+        }
+        plan.fx_temps.extend(temps);
+        if !passes.is_empty() {
+            plan.jobs.push(Job {
+                target: passes[0].out.clone(),
+                clear: false,
+                cmds: Vec::new(),
+                root: false,
+                fx: passes,
+                flow: None,
+                draw: false,
+                parts: None,
+            });
+        }
+        target
     }
 
     /// Writes `data` into a grow-only buffer, reallocating (at least doubling) when it does not
