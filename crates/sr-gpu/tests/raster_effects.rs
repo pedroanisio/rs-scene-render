@@ -56,6 +56,8 @@ mod stroke_text_doc;
 mod text;
 #[path = "raster_effects/vector.rs"]
 mod vector;
+#[path = "raster_effects/version_1_6.rs"]
+mod version_1_6;
 #[path = "raster_effects/video.rs"]
 mod video;
 #[path = "raster_effects/wiggle_path_smooth.rs"]

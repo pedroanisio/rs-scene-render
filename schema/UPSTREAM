@@ -22,6 +22,10 @@ release of sr-core that takes these in replaces them; until then a vendoring kee
 2026-10-06 was done by component: every top-level type, group and pattern that sr-core changed since the previous
 vendoring is theirs, every one that only this repository changed is ours, and nothing was changed by both).
 
+Local addition ahead of an sr-core release: document version 1.6 (scene/@version gains "1.6"; sr_model::SCHEMA_VERSION
+is "1.6"), with no 1.6 syntax. It is the base on which the branches of the SREPs accepted on 2026-10-09 (66 to 75) add
+their own syntax and version rules; a 1.6 document holding 1.5 content validates and renders as the same document at
+1.5. The capability manifest still names the vendored release 1.5.0. A vendoring of sr-core 1.6.0 replaces this.
 Added here ahead of an sr-core release: SREP 68 (accepted 2026-10-09), effectType/@stepsPerFrame and @prewarm, and the
 Schematron pattern p-srep68 with STP1, with the syntax of srep/srep-0068.md in sr-core branch srep/drafts-2026-10. The
 pattern's context leaves out program[@mode='step'] (SREP 69, not in this schema). A vendoring of the sr-core release that

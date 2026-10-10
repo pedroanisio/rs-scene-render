@@ -51,7 +51,15 @@ fn the_published_manifest_is_well_formed() {
         .match_indices(&format!("release {}", m.schema))
         .any(|(i, t)| !upstream[i + t.len()..].starts_with(|c: char| c.is_ascii_digit() || c == '.'));
     assert!(named, "schema {} is not the vendored release in schema/UPSTREAM", m.schema);
-    assert!(m.schema.starts_with(sr_model::SCHEMA_VERSION));
+    // the engine accepts the vendored release's version, or the next one when schema/UPSTREAM records it as a local
+    // addition ahead of a release (document version 1.6)
+    assert!(
+        m.schema.starts_with(sr_model::SCHEMA_VERSION)
+            || upstream.contains(&format!("document version {} ", sr_model::SCHEMA_VERSION)),
+        "SCHEMA_VERSION {} is neither the manifest's schema {} nor a local addition in schema/UPSTREAM",
+        sr_model::SCHEMA_VERSION,
+        m.schema
+    );
     let mut seen = std::collections::HashSet::new();
     for e in &m.entries {
         let c = Construct::parse(&e.construct).unwrap_or_else(|| panic!("{}: not a construct", e.construct));
