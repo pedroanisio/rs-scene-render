@@ -46,6 +46,8 @@ enum Kind {
         low: [f32; 4],
         high: [f32; 4],
     },
+    /// A stepping program (SREP 69).
+    Program(Box<StepProgram>),
     Erosion {
         spec: erosion::ErosionSpec,
         tl: Timeline<erosion::Terrain>,
@@ -79,7 +81,7 @@ pub(crate) struct Sims {
 
 /// Whether node kind `k` is simulated here.
 pub fn is_sim(k: &str) -> bool {
-    matches!(k, "flock" | "fluid" | "slime" | "erosion")
+    matches!(k, "flock" | "fluid" | "slime" | "erosion" | "program")
 }
 
 fn srgb_to_linear(c: f64) -> f32 {
@@ -114,6 +116,7 @@ fn build(p: &Program, n: &FrameNode, problems: &mut Vec<String>) -> Sim {
     let sd = seed(e, &n.id);
     let fields = crate::sim::field_names(e);
     let kind = match n.kind {
+        "program" => Kind::Program(Box::new(StepProgram::build(p, n))),
         "flock" => {
             let spec = flock::FlockSpec {
                 seed: sd,
@@ -336,6 +339,16 @@ impl Sims {
             let mut forces = Forces { graphs, src: fields, names: names.as_deref(), id: &id, offset };
             let forced = sim.forced;
             match &mut sim.kind {
+                Kind::Program(prog) => {
+                    let fps = p.scene.project.fps.as_f64().max(1e-9);
+                    let frame = libm::floor(g.time * fps + 1e-6) as i64;
+                    let drawn = g.nodes[i].draw;
+                    match prog.at(frame, drawn, fps, &id, graphs) {
+                        Ok(Some(img)) => g.nodes[i].sim_image = Some(img),
+                        Ok(None) => {}
+                        Err(message) => g.fail(format!("{id}: {message}")),
+                    }
+                }
                 Kind::Flock { spec, tl, look } => {
                     let spec = &*spec;
                     let a = tl.at(local, &mut |a, _, t0| {
@@ -433,4 +446,143 @@ fn flock_frame(a: &flock::Agents, world: &Affine, look: &FlockLook) -> ParticleF
         f.frame.push(0);
     }
     f
+}
+
+// ------------------------------------------------------------------ stepping programs (SREP 69)
+
+/// A `<program mode="step">`: its module, live instance and step schedule (SREP 68, Semantics 1; SREP 69).
+pub(crate) struct StepProgram {
+    /// The module, or why it cannot run.
+    module: Result<Vec<u8>, String>,
+    inputs: sr_wasm::Inputs,
+    limits: sr_wasm::Limits,
+    width: u32,
+    height: u32,
+    steps_per_frame: u64,
+    prewarm: u64,
+    live: Option<sr_wasm::Stepper>,
+    /// The last frame whose stepping frames were counted, and that count (s(f) of SREP 68).
+    counted: Option<(i64, u64)>,
+    /// The picture of the last step count drawn.
+    last: Option<(u64, Arc<SimImage>)>,
+}
+
+impl StepProgram {
+    fn build(p: &Program, n: &FrameNode) -> StepProgram {
+        let e: &dyn Element = &*n.elem;
+        let text = |k: &str| crate::sim::text(e, k);
+        let int = |k: &str, d: u64| match e.get_attr(k) {
+            Some(sr_model::element::AttrValue::Num(v)) if v >= 0.0 => v as u64,
+            _ => text(k).and_then(|t| t.trim().parse().ok()).unwrap_or(d),
+        };
+        let params = sr_model::element::children(e)
+            .iter()
+            .filter(|c| c.element_name() == "param")
+            .map(|c| {
+                (crate::sim::text(*c, "name").unwrap_or_default(), crate::sim::text(*c, "value").unwrap_or_default())
+            })
+            .collect();
+        let base = base_dir(p, &n.id);
+        let module = match (text("src"), text("sha256")) {
+            (Some(src), Some(sha)) => sr_model::program::read_module_file(&src, &sha, &base),
+            _ => Err("a program needs src and sha256".to_string()),
+        };
+        StepProgram {
+            module: module.map_err(|m| format!("PRG10: {m}")),
+            inputs: sr_wasm::Inputs { project_seed: p.seed, seed: int("seed", 0), params },
+            limits: sr_wasm::Limits {
+                fuel: int("fuel", 1_000_000_000),
+                memory_mib: int("memoryLimit", 64).min(u32::MAX as u64) as u32,
+            },
+            width: int("width", 1).max(1) as u32,
+            height: int("height", 1).max(1) as u32,
+            steps_per_frame: int("stepsPerFrame", 1).max(1),
+            prewarm: int("prewarm", 0),
+            live: None,
+            counted: None,
+            last: None,
+        }
+    }
+
+    /// s(f): the frames from the first to `frame` at which the node is drawn. Counting forward from the last
+    /// count costs nothing on a sequential render; a seek back counts again from frame 0, evaluating the
+    /// document at each earlier frame, so the count never depends on the order of renders.
+    fn stepping_frames(&mut self, frame: i64, drawn: bool, fps: f64, id: &str, graphs: &mut Graphs<'_>) -> u64 {
+        let (from, mut s) = match self.counted {
+            Some((f, s)) if f < frame => (f + 1, s),
+            Some((f, s)) if f == frame => return s,
+            _ => (0, 0),
+        };
+        for f in from..frame {
+            let g = graphs.at(f as f64 / fps);
+            if index_of(&g, id).is_some_and(|k| g.nodes[k].draw) {
+                s += 1;
+            }
+        }
+        if drawn {
+            s += 1;
+        }
+        self.counted = Some((frame, s));
+        s
+    }
+
+    /// The picture at `frame`, after p + s(f)·k steps; `None` when the node is not drawn.
+    fn at(
+        &mut self,
+        frame: i64,
+        drawn: bool,
+        fps: f64,
+        id: &str,
+        graphs: &mut Graphs<'_>,
+    ) -> Result<Option<Arc<SimImage>>, String> {
+        let s = self.stepping_frames(frame, drawn, fps, id, graphs);
+        if !drawn || s == 0 {
+            return Ok(None);
+        }
+        let target = self.prewarm + s * self.steps_per_frame;
+        if let Some((k, img)) = &self.last {
+            if *k == target {
+                return Ok(Some(img.clone()));
+            }
+        }
+        let module = self.module.as_ref().map_err(Clone::clone)?;
+        let code = |e: sr_wasm::Error| format!("{}: {}", e.code.as_str(), e.message);
+        if self.live.as_ref().is_none_or(|l| l.steps() > target) {
+            // a step program's state only moves forward: an earlier state is reached again from init
+            self.live =
+                Some(sr_wasm::Stepper::new(module, &self.inputs, self.limits, self.width, self.height).map_err(code)?);
+        }
+        let live = self.live.as_mut().expect("instantiated above");
+        while live.steps() < target {
+            live.step().map_err(code)?;
+        }
+        let rgba = live.frame().map_err(code)?;
+        let img = Arc::new(SimImage {
+            width: self.width,
+            height: self.height,
+            rgba: rgba
+                .chunks_exact(4)
+                .map(|p| {
+                    let a = p[3] as f32 / 255.0;
+                    let c = |v: u8| srgb_to_linear(v as f64 / 255.0) * a;
+                    [c(p[0]), c(p[1]), c(p[2]), a]
+                })
+                .collect(),
+            key: crate::rng::hash_str(id) ^ target.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0x5052_4F47,
+        });
+        self.last = Some((target, img.clone()));
+        Ok(Some(img))
+    }
+}
+
+/// The directory a node's relative URIs resolve against: its include's, else the main document's.
+fn base_dir(p: &Program, id: &str) -> std::path::PathBuf {
+    let doc = p
+        .includes
+        .iter()
+        .enumerate()
+        .filter(|(_, (ns, _))| id.strip_prefix(&**ns).is_some_and(|rest| rest.starts_with('/')))
+        .max_by_key(|(_, (ns, _))| ns.len())
+        .map_or(0, |(i, _)| i + 1);
+    p.base_dirs.get(doc).cloned().unwrap_or_default()
 }

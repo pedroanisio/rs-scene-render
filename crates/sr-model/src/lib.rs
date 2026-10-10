@@ -40,6 +40,7 @@ pub mod foam;
 pub mod inert;
 pub mod model;
 pub mod parse;
+pub mod program;
 pub mod rules;
 pub mod values;
 pub mod xsd;

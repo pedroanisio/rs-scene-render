@@ -3128,6 +3128,7 @@ dependencies = [
  "sr-text",
  "sr-vector",
  "sr-volume",
+ "sr-wasm",
  "thiserror",
 ]
 
@@ -3207,6 +3208,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "sr-volume",
+ "sr-wasm",
  "thiserror",
 ]
 

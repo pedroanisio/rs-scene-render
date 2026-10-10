@@ -12,6 +12,7 @@ publish.workspace = true
 sr-media.workspace = true
 sr-geo.workspace = true
 sr-model.workspace = true
+sr-wasm.workspace = true
 sr-volume.workspace = true
 serde.workspace = true
 serde_json.workspace = true

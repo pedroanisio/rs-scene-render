@@ -928,6 +928,8 @@ fn template(
                 }
                 m::ParametersChild::Data(d) => sources.push(d.clone()),
                 m::ParametersChild::Bind(b) => binds.push(b.clone()),
+                // data programs became data sources when the document was loaded (SREP 66)
+                m::ParametersChild::Program(_) => {}
             }
         }
     }
@@ -1483,7 +1485,7 @@ impl Builder {
                 clip: attr_bool(e, "clip").unwrap_or(false),
             };
             self.nodes.push(node);
-            if matches!(name, "flock" | "fluid" | "slime" | "erosion") {
+            if matches!(name, "flock" | "fluid" | "slime" | "erosion" | "program") {
                 // simulations draw in their width × height box
                 let (w, h) = (attr_num(e, "width").unwrap_or(1.0), attr_num(e, "height").unwrap_or(1.0));
                 self.nodes[idx as usize].box_size = Some([Length::px(w), Length::px(h)]);

@@ -2537,7 +2537,9 @@ impl Renderer {
                 }
             }
             "particleEmitter" | "flock" => self.emit_particles(plan, ctx, i, space, op, cmds, root_hash),
-            "fluid" | "slime" | "erosion" => self.emit_sim_image(plan, ctx, i, space, op, blend, seed, cmds, root_hash),
+            "fluid" | "slime" | "erosion" | "program" => {
+                self.emit_sim_image(plan, ctx, i, space, op, blend, seed, cmds, root_hash)
+            }
             kind if sr_eval::draws_in_3d(kind) => self.three_run(plan, ctx, i, space, iso_op, cmds, root_hash),
             "adjustment" => self.adjust(plan, ctx, i, space, op, cmds, root_hash),
             _ => {}
