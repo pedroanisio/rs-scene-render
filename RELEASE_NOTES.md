@@ -7,6 +7,7 @@ This release adds scene document version 1.6 and integrates the following render
 - Node-local shader stepping, prewarming and checkpoints.
 - Parametric paths, parametric surfaces and heightfields.
 - Shader content rectangles, supersampling, per-node edge blending and optional float32 working textures.
+- Float32 working precision is preserved through CPU effects and checkpoint restores, with format conversion for output joins.
 - Upright flock sprites through `orientToVelocity="false"`.
 - Faster bounded texture-coordinate conversion in the depth-of-field shader, checked against the original shader.
 
