@@ -92,6 +92,25 @@ fn av1_two_pass_produces_and_consumes_statistics() {
     assert!(!s.path.exists());
 }
 
+/// SVT-AV1 refuses an odd width or height in 4:2:0, the only chroma it encodes ("Source Width must be even for YUV_420
+/// colorspace", FFmpeg 7.1), while libaom encodes it: an odd frame goes to libaom, as a frame below 64×64 does.
+#[test]
+fn av1_odd_frames_go_to_an_encoder_that_takes_them() {
+    if !have_ffmpeg() || !working_encoder("libsvtav1") || !working_encoder("libaom-av1") {
+        eprintln!("FFmpeg with SVT-AV1 and libaom unavailable; skipping");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = spec(&dir.path().join("odd.mp4"), Codec::Av1, InputFormat::Nv12);
+    (s.width, s.height) = (129, 73);
+    assert_eq!(s.args().unwrap().1, "libaom-av1");
+    encode(&s, 3);
+    let v = probe(&s.path).unwrap().video.unwrap();
+    assert_eq!((v.codec.as_str(), v.width, v.height), ("av1", 129, 73));
+    (s.width, s.height) = (128, 72);
+    assert_eq!(s.args().unwrap().1, "libsvtav1", "an even frame stays with SVT-AV1");
+}
+
 #[cfg(unix)]
 #[test]
 fn av1_two_pass_checks_encoder_statistics_before_selection() {

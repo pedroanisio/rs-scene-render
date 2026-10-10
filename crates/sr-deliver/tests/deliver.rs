@@ -384,6 +384,33 @@ fn failures_are_reported() {
     }
 }
 
+/// An ad-hoc output (`encode -o`) is not in the document, so validate cannot see its size: an H.264 frame of odd size is
+/// refused before anything is rendered, with the fix, instead of by FFmpeg after the first frame (OUT1).
+#[test]
+fn an_odd_h264_frame_is_refused_before_rendering() {
+    let dir = std::env::temp_dir().join(format!("sr-deliver-odd-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let d = doc(
+        &dir,
+        r#"<scene version="1.1"><project width="821" height="442" fps="10" duration="1"/><composition/></scene>"#,
+    );
+    let o = sr_deliver::adhoc_output(&dir.join("odd.mp4").to_string_lossy(), "h264").unwrap();
+    // no adapter is handed in: the refusal comes before one is needed
+    let e = sr_deliver::deliver(&d, &o, None, &Default::default(), &mut |_, _| {}).unwrap_err().to_string();
+    for words in ["OUT1", "821", "442", "even", "822"] {
+        assert!(e.contains(words), "{words:?} not in {e:?}");
+    }
+    assert!(!dir.join("odd.mp4").exists());
+    // a 4:4:4 encode of the same frame is not refused for its size
+    let mut o444 = o.clone();
+    o444.pixel_format = "yuv444p".into();
+    o444.path = dir.join("odd444.mp4").to_string_lossy().into_owned();
+    if let Err(e) = sr_deliver::deliver(&d, &o444, gpu().as_ref(), &Default::default(), &mut |_, _| {}) {
+        assert!(!e.to_string().contains("OUT1"), "{e}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn caption_sidecars_are_written_next_to_outputs() {
     let Some(dir) = fixtures() else { return };
