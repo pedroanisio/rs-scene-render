@@ -2147,7 +2147,7 @@ impl Renderer {
         };
         let base = Self::base_dir(ctx.p);
         for l in &ls.lights {
-            if only.is_some_and(|ids| !ids.iter().any(|id| *id == l.id)) {
+            if only.is_some_and(|ids| !ids.contains(&l.id)) {
                 continue;
             }
             let a = Attrs { e: l as &dyn Element, props: element_props(ctx.g, &l.id) };
