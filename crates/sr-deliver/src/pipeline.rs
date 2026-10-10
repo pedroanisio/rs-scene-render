@@ -494,6 +494,7 @@ impl Video<'_> {
         // contrast at either end, or a change in the text's backdrop.
         // Keep time moving forward and share each original frame among the texts
         // measured there, instead of replaying the timeline separately for every label.
+        let thinned = thinned_contrasts(&judge.unprobed);
         for (k, targets) in contrast_schedule(std::mem::take(&mut judge.unprobed)) {
             let t = times[k];
             let ev = self.ev;
@@ -525,6 +526,14 @@ impl Video<'_> {
             let finding =
                 Finding::scene(code::ACC_FLASH, sr_model::Severity::Warning, msg.clone()).at_time(first, first);
             fail(&checks.flash, msg, finding, report);
+        }
+        if let Some((id, got, of)) = thinned.first() {
+            let msg = format!(
+                "contrastCheck: {} texts share the check's budget of {CONTRAST_BUDGET} probes and are measured at fewer of \
+                 their frames (e.g. {id} at {got} of {of}); a backdrop that changes between two probes is not seen",
+                thinned.len()
+            );
+            report.findings.push(Finding::scene(code::engine("CONTRAST-SAMPLED"), sr_model::Severity::Info, msg));
         }
         let min_contrast = checks.min_contrast;
         for (id, (_, ratio, at)) in &judge.lowest {
@@ -1172,7 +1181,6 @@ fn run_delivery(
                 progress(done, n);
                 feeder.send(b)
             })?;
-            video.judge(judge, &times, report);
             feeder.finish()?;
             report.frames = n;
             let duration = end - start;
@@ -1203,6 +1211,8 @@ fn run_delivery(
                     None => break,
                 }
             }
+            // the checks' post pass runs once the file is written: a check that fails, or takes long, leaves it whole
+            video.judge(judge, &times, report);
         } else if workers > 1 {
             // Each worker renders contiguous chunks with its own encoder. Accessibility-enabled
             // chunks fit one bounded observation batch, so ordering does not serialize the workers.
@@ -1387,9 +1397,9 @@ fn run_delivery(
             report.unsupported = unsupported.into_iter().collect();
             // every chunk was rendered, so every chunk has been judged; text the workers could not
             // measure in place is measured by this thread's renderer
-            video.judge(judge, &times, report);
             progress(n, n);
             spec.join(&parts, &tmp.join("segments.txt"))?;
+            video.judge(judge, &times, report);
             report.frames = n;
             report.passes = 1;
             report.segments = workers as u32;
@@ -1404,8 +1414,9 @@ fn run_delivery(
                 progress(done, n);
                 feeder.send(b)
             })?;
-            video.judge(judge, &times, report);
+            // the file is closed before the checks' post pass: a check that fails, or takes long, leaves it whole
             report.encoder = feeder.finish()?;
+            video.judge(judge, &times, report);
             report.frames = n;
             report.passes = 1;
         }
@@ -1947,29 +1958,93 @@ impl ContrastPrefetch {
     }
 }
 
-/// The frames to measure a text's contrast at, of the (frame, opacity) it was seen in: those where it is at
-/// its most visible, all of them up to [`CONTRAST_PROBES`], else that many spread evenly from the first to
-/// the last, so a title held for minutes does not render every one of its frames twice more.
-fn probe_frames(seen: &[(usize, f64)]) -> Vec<(usize, f64)> {
-    let top = seen.iter().map(|s| s.1).fold(f64::MIN, f64::max);
-    let at_top: Vec<(usize, f64)> = seen.iter().filter(|s| s.1 >= top - 1e-3).copied().collect();
-    if at_top.len() <= CONTRAST_PROBES {
-        return at_top;
-    }
-    (0..CONTRAST_PROBES).map(|i| at_top[i * (at_top.len() - 1) / (CONTRAST_PROBES - 1)]).collect()
+/// Most probes of one output's contrast check, over all its texts. Each probe renders its frame once more without
+/// the text (and twice more when the text and its backdrop have the same colour), so the check's cost is bounded by
+/// this, or by the number of texts when there are more: each text is measured at least once.
+const CONTRAST_BUDGET: usize = 256;
+
+/// How many probes each of `texts` texts gets: [`CONTRAST_PROBES`] while the budget allows, else an equal share of
+/// [`CONTRAST_BUDGET`], and at least one.
+fn probe_allowance(texts: usize) -> usize {
+    (CONTRAST_BUDGET / texts.max(1)).clamp(1, CONTRAST_PROBES)
 }
 
-/// The same selected observations, grouped in time order without dropping any target.
+/// The (frame, opacity) observations of a text at its most visible.
+fn at_top(seen: &[(usize, f64)]) -> Vec<(usize, f64)> {
+    let top = seen.iter().map(|s| s.1).fold(f64::MIN, f64::max);
+    seen.iter().filter(|s| s.1 >= top - 1e-3).copied().collect()
+}
+
+/// The frames to measure a text's contrast at, of the (frame, opacity) it was seen in: those where it is at its most
+/// visible, all of them up to [`CONTRAST_PROBES`], else that many spread evenly from the first to the last, so a title
+/// held for minutes does not render every one of its frames twice more. Under a smaller `limit`, the first `limit` of
+/// those in coarse-to-fine order (both ends, then the middle, then the quarters, ...): the frames for a smaller limit
+/// are always among those for a larger one, so a prediction made with another limit still saves its renders.
+fn probe_frames(seen: &[(usize, f64)], limit: usize) -> Vec<(usize, f64)> {
+    let at_top = at_top(seen);
+    let full: Vec<(usize, f64)> = if at_top.len() <= CONTRAST_PROBES {
+        at_top
+    } else {
+        (0..CONTRAST_PROBES).map(|i| at_top[i * (at_top.len() - 1) / (CONTRAST_PROBES - 1)]).collect()
+    };
+    if full.len() <= limit {
+        return full;
+    }
+    let mut keep = coarse_to_fine(full.len());
+    keep.truncate(limit);
+    keep.sort_unstable();
+    keep.into_iter().map(|i| full[i]).collect()
+}
+
+/// The indices `0..n` in coarse-to-fine order: `0` and `n - 1`, then the middle of each gap, breadth first.
+fn coarse_to_fine(n: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = match n {
+        0 => return Vec::new(),
+        1 => return vec![0],
+        _ => vec![0, n - 1],
+    };
+    let mut gaps = std::collections::VecDeque::from([(0, n - 1)]);
+    while let Some((a, b)) = gaps.pop_front() {
+        if b - a < 2 {
+            continue;
+        }
+        let m = (a + b) / 2;
+        order.push(m);
+        gaps.push_back((a, m));
+        gaps.push_back((m, b));
+    }
+    order
+}
+
+/// The same selected observations, grouped in time order without dropping any target; every target shares the
+/// output's [`CONTRAST_BUDGET`].
 fn contrast_schedule(
     unprobed: std::collections::BTreeMap<sr_gpu::ContrastTarget, Vec<(usize, f64)>>,
 ) -> std::collections::BTreeMap<usize, Vec<(sr_gpu::ContrastTarget, f64)>> {
+    let limit = probe_allowance(unprobed.len());
     let mut schedule = std::collections::BTreeMap::<_, Vec<_>>::new();
     for (id, seen) in unprobed {
-        for (frame, opacity) in probe_frames(&seen) {
+        for (frame, opacity) in probe_frames(&seen, limit) {
             schedule.entry(frame).or_default().push((id.clone(), opacity));
         }
     }
     schedule
+}
+
+/// The texts the budget measures at fewer frames than [`CONTRAST_PROBES`] would have: (text, probes, frames at its
+/// most visible). The report says so, since a backdrop that changes between two probes is then not seen.
+fn thinned_contrasts(
+    unprobed: &std::collections::BTreeMap<sr_gpu::ContrastTarget, Vec<(usize, f64)>>,
+) -> Vec<(sr_gpu::ContrastTarget, usize, usize)> {
+    let limit = probe_allowance(unprobed.len());
+    unprobed
+        .iter()
+        .filter_map(|(id, seen)| {
+            let of = at_top(seen).len();
+            let got = of.min(limit);
+            (got < of.min(CONTRAST_PROBES)).then(|| (id.clone(), got, of))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -2010,7 +2085,7 @@ mod tests {
             .filter(|(_, t)| cache.planned.contains_key(&t.to_bits()))
             .map(|(k, _)| k)
             .collect();
-        assert_eq!(planned, probe_frames(&predicted).iter().map(|&(k, _)| k).collect::<Vec<_>>());
+        assert_eq!(planned, probe_frames(&predicted, CONTRAST_PROBES).iter().map(|&(k, _)| k).collect::<Vec<_>>());
         for &k in &planned {
             cache.measured.insert((times[k].to_bits(), id.clone()), Some(2.0));
         }
@@ -2053,7 +2128,63 @@ mod tests {
                     targets.iter().filter(|(target, _)| *target == id).map(move |(_, opacity)| (k, *opacity))
                 })
                 .collect();
-            assert_eq!(actual, probe_frames(&seen));
+            assert_eq!(actual, probe_frames(&seen, CONTRAST_PROBES));
+        }
+    }
+
+    /// The post pass of the contrast check renders each probe's frame without its text: its cost grew with the number of
+    /// texts times 32 probes each, which kept v0.1.4 at full CPU for about 15 minutes after the last frame of the Inova film
+    /// (`encode --strict`, PALS-Notes/projects/inova-institucional/film/GATES.md). The whole output has one budget.
+    #[test]
+    fn the_contrast_post_pass_is_bounded_whatever_the_number_of_texts() {
+        use sr_gpu::ContrastTarget;
+        let held = |texts: usize| -> std::collections::BTreeMap<ContrastTarget, Vec<(usize, f64)>> {
+            (0..texts).map(|i| (ContrastTarget::Node(format!("t{i}")), (0..1500).map(|k| (k, 1.0)).collect())).collect()
+        };
+        for texts in [1, 8, 40, 400, 1000] {
+            let unprobed = held(texts);
+            let schedule = contrast_schedule(unprobed.clone());
+            let probes: usize = schedule.values().map(Vec::len).sum();
+            assert!(probes <= CONTRAST_BUDGET.max(texts), "{texts} texts: {probes} probes");
+            // every text is still measured, at both ends of its hold when it has two probes
+            for id in unprobed.keys() {
+                let at: Vec<usize> =
+                    schedule.iter().filter(|(_, t)| t.iter().any(|(i, _)| i == id)).map(|(k, _)| *k).collect();
+                assert!(!at.is_empty(), "{texts} texts: {id} is not measured");
+                if at.len() > 1 {
+                    assert_eq!((at[0], at[at.len() - 1]), (0, 1499), "{texts} texts: {id}");
+                }
+            }
+            // a few texts keep every probe they had; more share the budget, and say so
+            let thinned = thinned_contrasts(&unprobed);
+            if texts * CONTRAST_PROBES <= CONTRAST_BUDGET {
+                assert_eq!(probes, texts * CONTRAST_PROBES);
+                assert!(thinned.is_empty());
+            } else {
+                assert_eq!(thinned.len(), texts, "{texts} texts");
+                assert!(thinned.iter().all(|(_, got, of)| *got < CONTRAST_PROBES && *of == 1500));
+            }
+        }
+    }
+
+    /// The prefetch during the main pass predicts the texts, and the post pass measures those actually seen: their
+    /// numbers can differ, and so can each text's share of the budget. A smaller share's frames are among a larger
+    /// one's, so what the prediction measured is reused.
+    #[test]
+    fn a_smaller_share_of_probes_is_a_subset_of_a_larger_one() {
+        let seen: Vec<(usize, f64)> = (0..1500).map(|k| (k, 1.0)).collect();
+        for n in [0, 1, 2, 3, 7, 32, 33, 100] {
+            let mut order = coarse_to_fine(n);
+            order.sort_unstable();
+            assert_eq!(order, (0..n).collect::<Vec<_>>(), "every index once for {n}");
+        }
+        for small in 1..=CONTRAST_PROBES {
+            let a = probe_frames(&seen, small);
+            assert_eq!(a.len(), small);
+            for large in small..=CONTRAST_PROBES {
+                let b = probe_frames(&seen, large);
+                assert!(a.iter().all(|f| b.contains(f)), "{small} probes are not among {large}");
+            }
         }
     }
 
@@ -2061,14 +2192,14 @@ mod tests {
     fn a_held_title_is_probed_a_bounded_number_of_times() {
         // a title fading in over a second, then held for five minutes at 30 fps
         let seen: Vec<(usize, f64)> = (0..9030).map(|k| (k, (k as f64 / 30.0).min(1.0))).collect();
-        let frames = probe_frames(&seen);
+        let frames = probe_frames(&seen, CONTRAST_PROBES);
         assert!(frames.len() <= CONTRAST_PROBES, "{} probe renders", frames.len());
         // both ends of the hold, and spread over it
         assert_eq!((frames[0], frames[frames.len() - 1]), ((30, 1.0), (9029, 1.0)));
         assert!(frames.windows(2).all(|w| w[1].0 > w[0].0 && w[1].0 - w[0].0 <= 9000 / (CONTRAST_PROBES - 1) + 1));
         // a short one is probed at every frame
-        assert_eq!(probe_frames(&seen[..40]), seen[30..40].to_vec());
-        assert!(probe_frames(&[]).is_empty());
+        assert_eq!(probe_frames(&seen[..40], CONTRAST_PROBES), seen[30..40].to_vec());
+        assert!(probe_frames(&[], CONTRAST_PROBES).is_empty());
     }
 
     #[test]
