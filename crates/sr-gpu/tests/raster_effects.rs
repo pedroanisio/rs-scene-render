@@ -42,6 +42,8 @@ mod resample;
 mod shaders;
 #[path = "raster_effects/shutter_angle_node.rs"]
 mod shutter_angle_node;
+#[path = "raster_effects/srep68_steps.rs"]
+mod srep68_steps;
 #[path = "raster_effects/stage_times.rs"]
 mod stage_times;
 #[path = "raster_effects/stencil_effects.rs"]

@@ -252,6 +252,8 @@ pub struct Document {
     index: Index,
     base_dir: PathBuf,
     warnings: Vec<Diagnostic>,
+    /// SHA-256 of the document's bytes as loaded.
+    source_sha256: [u8; 32],
 }
 
 /// A paint resolved against the document.
@@ -280,6 +282,11 @@ macro_rules! lookup {
 }
 
 impl Document {
+    /// SHA-256 of the document's bytes as loaded (the identity of its source, for caches keyed by content).
+    pub fn source_sha256(&self) -> [u8; 32] {
+        self.source_sha256
+    }
+
     /// Document version.
     pub fn version(&self) -> Version {
         self.scene.version
@@ -465,7 +472,8 @@ fn run(xml: &str, base_dir: PathBuf, opts: &LoadOptions, build: bool) -> Outcome
             Ok(scene) => {
                 let index = Index::build(&scene, ids);
                 let warnings = report.diagnostics.clone();
-                Outcome { report, document: Some(Document { scene, index, base_dir, warnings }) }
+                let source_sha256 = sha2::Digest::finalize(<sha2::Sha256 as sha2::Digest>::new_with_prefix(xml.as_bytes())).into();
+                Outcome { report, document: Some(Document { scene, index, base_dir, warnings, source_sha256 }) }
             }
             Err(e) => {
                 let path = element_path(doc.root_element());

@@ -750,4 +750,9 @@
       <sch:assert id="R54" test="/scene/audioMix/audioTrack[@id = current()/@source]">audiogram/@source names an audioTrack of audioMix.</sch:assert>
     </sch:rule>
   </sch:pattern>
+  <sch:pattern id="p-srep68">
+    <sch:rule context="effects/effect[@stepsPerFrame or @prewarm]">
+      <sch:assert id="STP1" test="@type='shader'">stepsPerFrame and prewarm apply to shader effects and stepping programs (SREP 69) only.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
 </sch:schema>

@@ -873,6 +873,12 @@ impl<'a> Eval<'a> {
                 "An ID reference list names at least one id.".into()
             });
         }
+        // SREP 68 (p-srep68): stepping applies to shader effects (and to stepping programs, SREP 69, not implemented)
+        if local == "effect" && parent_is("effects") && (a("stepsPerFrame").is_some() || a("prewarm").is_some()) {
+            self.check(a("type") == Some("shader"), n, "STP1", || {
+                "stepsPerFrame and prewarm apply to shader effects and stepping programs (SREP 69) only.".into()
+            });
+        }
         if local == "audiogram" && parent_is("assets") {
             self.check(a("source").is_some_and(|id| self.sets.audio_tracks.contains(id)), n, "R54", || {
                 "audiogram/@source names an audioTrack of audioMix.".into()
