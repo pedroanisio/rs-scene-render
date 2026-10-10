@@ -31,7 +31,8 @@ serde.workspace = true
 serde_json.workspace = true
 regex.workspace = true
 sha2.workspace = true
+# also in wgpu's tree: the compute node checks WGSL sources without a device (SREP 67, CMP11)
+naga = { version = "30", features = ["wgsl-in"] }
 
 [dev-dependencies]
 sr-sim = { path = "../sr-sim" }
-naga = { version = "30", features = ["wgsl-in"] }

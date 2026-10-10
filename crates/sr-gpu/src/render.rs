@@ -447,6 +447,9 @@ pub struct Renderer {
     /// store for this document once opened.
     checkpoint_dir: Option<std::path::PathBuf>,
     checkpoint_store: Option<Result<crate::checkpoints::Store, String>>,
+    /// Compute nodes (SREP 67): compiled programs by source, and each node's last picture with the key of its inputs.
+    compute_programs: crate::compute::Cache,
+    compute_textures: HashMap<std::sync::Arc<str>, (u64, Arc<Tex>)>,
     /// Tiled vector paths reused across frames.
     tiles: sr_vector::tile::TileCache,
     /// The frame rendered last (ISF feedback replays on a seek).
@@ -1038,6 +1041,8 @@ impl Renderer {
             persistent_ids: None,
             checkpoint_dir: std::env::var_os("SR_CHECKPOINT_DIR").filter(|v| !v.is_empty()).map(Into::into),
             checkpoint_store: None,
+            compute_programs: Default::default(),
+            compute_textures: HashMap::new(),
             tiles: Default::default(),
             last_frame: None,
             frame_bufs: None,
@@ -1208,6 +1213,129 @@ impl Renderer {
             ..Default::default()
         };
         let hash = h(&[root_hash, sr_eval::rng::hash_str(&n.id), img.key, hf(op), 0x5157]);
+        self.draw_cmd(
+            plan,
+            ctx,
+            i,
+            space,
+            d,
+            [0.0, 0.0, bw, bh],
+            [0.0, 0.0, 1.0, 1.0],
+            &n.world,
+            tex,
+            cmds,
+            hash,
+            false,
+        );
+    }
+
+    /// Runs a compute node and draws its tonemapped histogram over its width × height box (SREP 67).
+    #[allow(clippy::too_many_arguments)]
+    fn emit_compute(
+        &mut self,
+        plan: &mut Plan,
+        ctx: &Ctx,
+        i: usize,
+        space: &Space,
+        op: f64,
+        blend: u32,
+        seed: u32,
+        cmds: &mut Vec<Cmd>,
+        root_hash: u64,
+    ) {
+        let n = &ctx.g.nodes[i];
+        let (Some(c), Some([bw, bh])) = (n.elem.as_any().downcast_ref::<m::Compute>(), n.size) else { return };
+        let base = Self::base_dir(ctx.p);
+        let source = match sr_model::assets::resolve(&c.src, &base) {
+            sr_model::assets::Resolved::Local(path) => std::fs::read(&path).map_err(|e| (path, e.to_string())),
+            _ => {
+                plan.stats.errors.push(format!("{}: CMP10: compute src {:?} is not a local file", n.id, c.src));
+                return;
+            }
+        };
+        let bytes = match source {
+            Ok(b) => b,
+            Err((path, e)) => {
+                plan.stats.errors.push(format!("{}: CMP10: cannot read {}: {e}", n.id, path.display()));
+                return;
+            }
+        };
+        if let Some(want) = &c.sha256 {
+            let got: [u8; 32] = sha2::Digest::finalize(<sha2::Sha256 as sha2::Digest>::new_with_prefix(&bytes)).into();
+            if got != want.0 {
+                plan.stats.errors.push(format!("{}: CMP10: the SHA-256 of {} differs from @sha256", n.id, c.src));
+                return;
+            }
+        }
+        let Ok(user) = String::from_utf8(bytes) else {
+            plan.stats.errors.push(format!("{}: CMP11: {} is not UTF-8", n.id, c.src));
+            return;
+        };
+        let tm = match crate::compute::tonemap_of(c) {
+            Ok(t) => t,
+            Err(e) => {
+                plan.stats.errors.push(format!("{}: {e}", n.id));
+                return;
+            }
+        };
+        let (seed_lo, seed_hi) = crate::compute::seed_words(ctx.p.scene.project.seed, c.seed);
+        let job = crate::compute::Job {
+            width: c.width as u32,
+            height: c.height as u32,
+            invocations: c.invocations.min(u32::MAX as u64) as u32,
+            channels: if c.channels == m::Channels::V4 { 4 } else { 1 },
+            fraction_bits: c.fraction_bits.min(24) as u32,
+            frame: ctx.g.frame as i32,
+            time: ctx.g.time as f32,
+            seed: ((seed_hi as u64) << 32) | seed_lo as u64,
+            params: crate::compute::params_of(c),
+        };
+        let key = h(&[sr_eval::rng::hash_str(&user), sr_eval::rng::hash_str(&format!("{job:?}{tm:?}"))]);
+        let tex = match self.compute_textures.get(&n.id) {
+            Some((k, t)) if *k == key => t.clone(),
+            _ => {
+                let program = self.compute_programs.get(&self.gpu.device, &user);
+                let program = match program.as_ref() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        plan.stats.errors.push(format!("{}: {e}", n.id));
+                        return;
+                    }
+                };
+                let hist = match crate::compute::run(&self.gpu.device, &self.gpu.queue, program, &job) {
+                    Ok(hst) => hst,
+                    Err(e) => {
+                        plan.stats.errors.push(format!("{}: {e}", n.id));
+                        return;
+                    }
+                };
+                let picture =
+                    crate::compute::tonemap(&hist, job.width, job.height, job.channels, job.fraction_bits, &tm);
+                let working = self.working;
+                let px: Vec<[f32; 4]> = picture
+                    .iter()
+                    .map(|p| {
+                        // display-encoded code values, like a colour literal
+                        let s = working.from_literal([p[0], p[1], p[2], 1.0]);
+                        let a = p[3];
+                        [(s[0] * a) as f32, (s[1] * a) as f32, (s[2] * a) as f32, a as f32]
+                    })
+                    .collect();
+                let d = resources::Decoded { levels: resources::mips(job.width, job.height, px), note: None };
+                let t = Arc::new(resources::upload(&self.gpu.device, &self.gpu.queue, &self.bgl1, &d, "compute"));
+                self.compute_textures.insert(n.id.clone(), (key, t.clone()));
+                t
+            }
+        };
+        let d = Draw {
+            opacity: op as f32,
+            blend,
+            src_kind: src::TEXTURE,
+            seed,
+            uv_rect: [0.0, 0.0, 1.0, 1.0],
+            ..Default::default()
+        };
+        let hash = h(&[root_hash, sr_eval::rng::hash_str(&n.id), key, hf(op), 0xC0E7]);
         self.draw_cmd(
             plan,
             ctx,
@@ -2556,6 +2684,7 @@ impl Renderer {
             }
             "particleEmitter" | "flock" => self.emit_particles(plan, ctx, i, space, op, cmds, root_hash),
             "fluid" | "slime" | "erosion" => self.emit_sim_image(plan, ctx, i, space, op, blend, seed, cmds, root_hash),
+            "compute" => self.emit_compute(plan, ctx, i, space, op, blend, seed, cmds, root_hash),
             kind if sr_eval::draws_in_3d(kind) => self.three_run(plan, ctx, i, space, iso_op, cmds, root_hash),
             "adjustment" => self.adjust(plan, ctx, i, space, op, cmds, root_hash),
             _ => {}

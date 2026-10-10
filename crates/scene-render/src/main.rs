@@ -523,6 +523,43 @@ struct FileReport<'a> {
 /// property the element lacks), so that a document `validate` accepts is one `render` can compile; then the
 /// `SA01` findings of `safeArea@enforce` over the frames that matter. Also the information lines: one `SA02`
 /// per node carrying `safeAreaForce`, and how the frames were sampled.
+/// SREP 67's build-stage checks of every compute node: its source can be read and matches @sha256 (CMP10), and it
+/// compiles against the engine's prelude, defines sr_point and binds nothing in group 0 (CMP11). No device is needed.
+fn compute_findings(doc: &sr_model::Document) -> Vec<Diagnostic> {
+    use sr_model::element::Element;
+    let mut out = Vec::new();
+    let mut visit = |e: &dyn Element| {
+        let Some(c) = e.as_any().downcast_ref::<sr_model::model::Compute>() else { return };
+        let err = |code: &str, msg: String| Diagnostic::error(code, msg, c.loc, c.id.as_str());
+        let bytes = match sr_model::assets::resolve(&c.src, doc.base_dir()) {
+            sr_model::assets::Resolved::Local(path) => match std::fs::read(&path) {
+                Ok(b) => b,
+                Err(e) => {
+                    return out.push(err("CMP10", format!("compute {:?}: cannot read {}: {e}", c.id, path.display())))
+                }
+            },
+            _ => return out.push(err("CMP10", format!("compute {:?}: src {:?} is not a local file", c.id, c.src))),
+        };
+        if let Some(want) = &c.sha256 {
+            let got: [u8; 32] = sha2::Digest::finalize(<sha2::Sha256 as sha2::Digest>::new_with_prefix(&bytes)).into();
+            if got != want.0 {
+                return out
+                    .push(err("CMP10", format!("compute {:?}: the SHA-256 of {} differs from @sha256", c.id, c.src)));
+            }
+        }
+        match String::from_utf8(bytes) {
+            Ok(user) => {
+                if let Err(e) = sr_gpu::compute::check_source(&user) {
+                    out.push(err("CMP11", format!("compute {:?}: {e}", c.id)));
+                }
+            }
+            Err(_) => out.push(err("CMP11", format!("compute {:?}: {} is not UTF-8", c.id, c.src))),
+        }
+    };
+    sr_model::element::walk(&doc.scene as &dyn Element, &mut visit);
+    out
+}
+
 fn compile_findings(text: &str, opts: &LoadOptions) -> (Vec<Diagnostic>, Vec<String>) {
     let Ok(doc) = sr_model::load_str(text, opts) else { return (Vec::new(), Vec::new()) };
     // the document as authored, then each layout it declares: a layout has its own frame size, safe area and
@@ -531,6 +568,7 @@ fn compile_findings(text: &str, opts: &LoadOptions) -> (Vec<Diagnostic>, Vec<Str
         .chain(doc.scene.layouts.iter().flat_map(|l| l.layouts.iter()).map(|l| Some(l.id.clone())))
         .collect();
     let (mut found, mut info): (Vec<Diagnostic>, Vec<String>) = (Vec::new(), Vec::new());
+    found.extend(compute_findings(&doc));
     for layout in layouts {
         let eo = sr_eval::EvalOptions { layout: layout.clone(), ..Default::default() };
         let tag = |mut d: Diagnostic| {

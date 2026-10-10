@@ -5,6 +5,7 @@
 pub mod caption_dump;
 pub mod checkpoints;
 pub mod color;
+pub mod compute;
 pub mod drape;
 pub mod fx;
 pub mod geodesic;
