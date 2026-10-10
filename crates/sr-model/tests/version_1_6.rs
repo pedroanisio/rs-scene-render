@@ -22,8 +22,11 @@ fn a_version_after_1_6_is_not() {
     }
 }
 
-/// Every document of the conformance corpus validates the same way as 1.5 and as 1.6: the new version changes no rule
-/// other than the version gates of the 1.6 syntax itself.
+/// The version rules that refuse 1.6 syntax in earlier documents, one per SREP that adds syntax to 1.6.
+const GATES_1_6: &[&str] = &["V12"];
+
+/// Every document of the conformance corpus validates the same way as 1.5 and as 1.6, but for the version rules that
+/// refuse 1.6 syntax at 1.5 ([`GATES_1_6`]): the new version changes no other rule.
 #[test]
 fn the_corpus_validates_alike_at_1_5_and_1_6() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/corpus");
@@ -49,12 +52,11 @@ fn the_corpus_validates_alike_at_1_5_and_1_6() {
             let (Some(a), Some(b)) = (set("1.5"), set("1.6")) else { continue };
             let opts = sr_model::LoadOptions { verify_assets: false, base_dir: f.parent().map(Into::into) };
             let codes = |x: &str| {
-                // the version gates of 1.6 syntax (V12 to V16, SREPs 66 to 75) are the one intended difference
                 let mut c: Vec<String> = sr_model::validate_str(x, &opts)
                     .diagnostics
                     .iter()
                     .map(|d| d.code.clone())
-                    .filter(|c| !matches!(c.as_str(), "V12" | "V13" | "V14" | "V15" | "V16"))
+                    .filter(|c| !GATES_1_6.contains(&c.as_str()))
                     .collect();
                 c.sort();
                 c
