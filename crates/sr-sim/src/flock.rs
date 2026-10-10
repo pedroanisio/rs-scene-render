@@ -1,7 +1,7 @@
 //! Boids (Reynolds 1987, "Flocks, herds and schools: a distributed behavioral model"): each
 //! agent steers by separation, alignment and cohesion with the neighbours it perceives, with
 //! Reynolds' steering rule `steer = desired velocity − velocity`, clamped to a maximum force.
-//! Neighbours come from a uniform grid of `perception`-sized cells visited in a fixed order,
+//! Neighbours come from a uniform grid of cells at least `perception` wide, visited in a fixed order,
 //! and every agent updates from the previous step's state, so a run is deterministic.
 
 use crate::rng;
@@ -86,8 +86,15 @@ fn steer(d: [f64; 2], v: [f64; 2], s: &FlockSpec) -> [f64; 2] {
 /// (force fields).
 pub fn step(s: &FlockSpec, a: &mut Agents, dt: f64, extra: &mut dyn FnMut([f64; 2], [f64; 2]) -> [f64; 2]) {
     let n = a.x.len();
-    let cell = s.perception.max(1.0);
-    let (cols, rows) = (((s.size[0] / cell).ceil() as usize).max(1), ((s.size[1] / cell).ceil() as usize).max(1));
+    // Coarsen very large boxes instead of allocating a cell for every perception radius across them.
+    // Each counting-sort table stays below 8 MiB plus one entry on 64-bit platforms. The distance
+    // test below still uses the authored perception radius, so coarsening admits no extra neighbours.
+    const MAX_AXIS: usize = 1024;
+    let cell = s.perception.max(1.0).max(s.size[0] / MAX_AXIS as f64).max(s.size[1] / MAX_AXIS as f64);
+    let (cols, rows) = (
+        ((s.size[0] / cell).ceil() as usize).clamp(1, MAX_AXIS),
+        ((s.size[1] / cell).ceil() as usize).clamp(1, MAX_AXIS),
+    );
     let cell_of = |x: f64, y: f64| {
         let c = ((x / cell).floor().max(0.0) as usize).min(cols - 1);
         let r = ((y / cell).floor().max(0.0) as usize).min(rows - 1);
@@ -276,6 +283,25 @@ mod tests {
             let v = a.vx[i].hypot(a.vy[i]);
             assert!(v >= s.speed - 1e-6 && v <= s.max_speed + 1e-6, "{v}");
             assert!((0.0..=600.0).contains(&a.x[i]) && (0.0..=400.0).contains(&a.y[i]));
+        }
+    }
+
+    #[test]
+    fn huge_bounds_keep_perception_without_an_unbounded_grid() {
+        let small = FlockSpec { count: 4, bounds: Bounds::Steer, margin: 0.0, ..spec() };
+        let initial = Agents {
+            x: vec![10.0, 20.0, 30.0, 500.0],
+            y: vec![10.0, 20.0, 30.0, 300.0],
+            vx: vec![60.0, 0.0, -60.0, 0.0],
+            vy: vec![0.0, 60.0, 0.0, -60.0],
+        };
+        let mut expected = initial.clone();
+        step(&small, &mut expected, 1.0 / 60.0, &mut |_, _| [0.0; 2]);
+        for size in [[600.0, 1e20], [1e20, 400.0], [1e20, 1e20]] {
+            let large = FlockSpec { size, ..small.clone() };
+            let mut actual = initial.clone();
+            step(&large, &mut actual, 1.0 / 60.0, &mut |_, _| [0.0; 2]);
+            assert_eq!(actual, expected, "box {size:?} must not change which agents perceive each other");
         }
     }
 

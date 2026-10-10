@@ -55,6 +55,13 @@ fn an_infinite_body_on_an_ocean_is_no_crash() {
 }
 
 #[test]
+fn a_flock_with_huge_bounds_is_no_crash() {
+    let input = include_str!("crashes/flock-huge-bounds.scene.xml");
+    let k = quiet(|| sr_fuzz::guard("document", input, sr_fuzz::run_doc));
+    assert!(k.is_none(), "{}", k.map(|k| k.message).unwrap_or_default());
+}
+
+#[test]
 fn no_panics_in_a_short_campaign() {
     let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/corpus"));
     let seeds = sr_fuzz::corpus(root);
