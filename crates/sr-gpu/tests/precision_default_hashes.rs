@@ -94,7 +94,11 @@ fn the_default_precision_renders_as_before_on_the_reference_host() {
     let mut got = serde_json::Map::new();
     let mut adapter = String::new();
     for (name, project, extra, body) in documents() {
-        let d = doc(&project, &extra, &body);
+        let d = if extra.starts_with("<effects>") {
+            doc_with(&project, "", &body, &extra)
+        } else {
+            doc(&project, &extra, &body)
+        };
         let Some(r) = render_times(&d, &[1.0]) else { return };
         assert!(
             r.stats.errors.is_empty() && r.stats.unsupported.is_empty(),
