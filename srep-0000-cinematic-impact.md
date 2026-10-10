@@ -3014,10 +3014,12 @@ inner radius is at least 6M, the radius of the innermost stable circular orbit, 
 BH5: a camera with `geodesics="true"` needs a hole. BH6: with it the scene has no `object3D`, `particles3D`,
 `particleEmitter`, `ocean`, `fluid`, `flock`, `slime`, `erosion`, `pyro` or `medium`: it is an error and not a silence
 (2D layers, text, shapes, effects and adjustments are allowed: the image goes through the 2D chain). BH7: the camera is
-farther than 3M from the hole (only its authored `x y z` is checked). BH8: one such camera per scene. W03: a hole or a disk
-and no geodesic camera: they are not drawn. W04: `denoise="true"` on a geodesic camera, which does not denoise. W05:
+farther than 3M from the hole (only its authored `x y z` is checked). BH8: one such camera per scene. W11 (W03 before
+sr-core draft SREP 76; W03 is SREP 57's): a hole or a disk and no geodesic camera: they are not drawn. W12 (was W04):
+`denoise="true"` on a geodesic camera, which does not denoise. W05:
 lights in the scene, which are not used. The corpus holds one document for each rule and warning (tests/corpus,
-`bh1-version` to `bh8-two-cameras`, `w03-no-lens` to `w05-lights`).
+`bh1-version` to `bh8-two-cameras`, `w05-lights`, `w11-no-lens`, `w12-denoise`). BH1 admits version 1.3 or later
+(draft SREP 76, open issue 2).
 
 **Null geodesics.** The metric is `ds^2 = -(1 - 2M/r) dt^2 + dr^2 / (1 - 2M/r) + r^2 dOmega^2`. A light ray moves in a
 plane through the hole. With `u = 1/r`, `phi` the angle in that plane and `b = L/E` the impact parameter of the ray (its

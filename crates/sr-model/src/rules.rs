@@ -596,7 +596,10 @@ impl<'a> Eval<'a> {
         }
     }
 
-    /// BH1 to BH8 and W03 to W05: a Schwarzschild black hole, its disk and the camera that traces geodesics.
+    /// BH1 to BH8, W11, W12 and W05: a Schwarzschild black hole, its disk and the camera that traces geodesics.
+    ///
+    /// Draft SREP 76: BH1 admits version 1.3 or later (open issue 2), and the warnings that were W03 and W04, codes that
+    /// SREP 57 gives to generated markers, are W11 and W12 (open issue 1).
     fn black_hole(&mut self, n: Node, local: &str) {
         let root = n.document().root_element();
         let all = |name: &'static str| root.descendants().filter(move |d| d.is_element() && is(*d, name));
@@ -609,8 +612,8 @@ impl<'a> Eval<'a> {
             "camera" if n.has_attribute("geodesics") => {}
             _ => return,
         }
-        self.check(root.attribute("version") == Some("1.3"), n, "BH1", || {
-            "black holes require version=\"1.3\".".into()
+        self.check(!matches!(root.attribute("version"), Some("1.0" | "1.1" | "1.2")), n, "BH1", || {
+            "black holes require version=\"1.3\" or later.".into()
         });
         match local {
             "blackHole" => {
@@ -673,7 +676,7 @@ impl<'a> Eval<'a> {
                 if n.attribute("denoise") == Some("true") {
                     self.warn(
                         n,
-                        "W04",
+                        "W12",
                         "a camera with geodesics=\"true\" does not denoise: pathSamples are antialiasing samples."
                             .into(),
                     );
@@ -689,7 +692,7 @@ impl<'a> Eval<'a> {
         {
             self.warn(
                 n,
-                "W03",
+                "W11",
                 "no camera has geodesics=\"true\", so the black hole and its disk are not rendered.".into(),
             );
         }
@@ -998,13 +1001,16 @@ impl<'a> Eval<'a> {
                         && (d.attribute("primitive") == Some("volume") || d.attribute("volume").is_some()))
             });
             self.check(!uses_volume, n, "V8", || "volumetric assets and media require version=\"1.3\".".into());
+        }
+        // draft SREP 80, open issue 1: cells need version 1.3 or later
+        if local == "scene" && n.parent_element().is_none() && matches!(a("version"), Some("1.0" | "1.1" | "1.2")) {
             let uses_voxels = n.descendants().any(|d| {
                 is(d, "voxelAsset")
                     || (is(d, "object3D")
                         && (d.attribute("primitive") == Some("voxels") || d.attribute("voxels").is_some()))
             });
             self.check(!uses_voxels, n, "VOX1", || {
-                "voxel assets and the voxels primitive require version=\"1.3\".".into()
+                "voxel assets and the voxels primitive require version=\"1.3\" or later.".into()
             });
         }
 

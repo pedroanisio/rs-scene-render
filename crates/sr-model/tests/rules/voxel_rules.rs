@@ -81,9 +81,14 @@ fn the_palette_is_the_word_file_or_materials() {
 }
 
 #[test]
-fn the_voxels_need_version_one_point_three() {
+fn the_voxels_need_version_one_point_three_or_later() {
     let old = scene(FILE, SOLID).replace(r#"version="1.3""#, r#"version="1.2""#);
     assert!(codes(&old).contains(&"VOX1".into()));
+    // draft SREP 80, open issue 1: "1.3 or later"
+    for later in ["1.4", "1.5", "1.6"] {
+        let new = scene(FILE, SOLID).replace(r#"version="1.3""#, &format!(r#"version="{later}""#));
+        assert!(!codes(&new).contains(&"VOX1".into()), "{later}: {:?}", codes(&new));
+    }
 }
 
 #[test]

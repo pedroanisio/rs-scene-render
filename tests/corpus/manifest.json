@@ -15,6 +15,9 @@
     "bedresponse-value.scene.xml": [
       "S06"
     ],
+    "bh1-version-1.0.scene.xml": [
+      "BH1"
+    ],
     "bh1-version.scene.xml": [
       "BH1"
     ],
@@ -1269,6 +1272,7 @@
     "advected-volume.scene.xml": [],
     "baked-volume.scene.xml": [],
     "black-hole-disk-at-isco.scene.xml": [],
+    "black-hole-version-1.6.scene.xml": [],
     "black-hole-without-disk.scene.xml": [],
     "black-hole.scene.xml": [],
     "connector-points.scene.xml": [],
@@ -1348,6 +1352,7 @@
     "voxels-srvol-format.scene.xml": [],
     "voxels-srvol.scene.xml": [],
     "voxels-surface-memory.scene.xml": [],
+    "voxels-version-1.6.scene.xml": [],
     "voxels.scene.xml": [],
     "whitewater-checkpoint.scene.xml": [],
     "whitewater-foam-albedo.scene.xml": []
@@ -1392,12 +1397,6 @@
     "w03-marker-named-like-generated.scene.xml": [
       "W03"
     ],
-    "w03-no-lens.scene.xml": [
-      "W03"
-    ],
-    "w04-denoise.scene.xml": [
-      "W04"
-    ],
     "w04-poster-dangling.scene.xml": [
       "W04"
     ],
@@ -1424,6 +1423,12 @@
     ],
     "w10-scatter-black-albedo.scene.xml": [
       "W10"
+    ],
+    "w11-no-lens.scene.xml": [
+      "W11"
+    ],
+    "w12-denoise.scene.xml": [
+      "W12"
     ]
   }
 }

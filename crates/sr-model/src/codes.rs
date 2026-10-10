@@ -42,12 +42,12 @@ const FIXED: &[(&str, &str, &str)] = &[
     (
         "W03",
         "rules",
-        "A blackHole or an accretionDisk is in a scene where no camera has geodesics=\"true\": nothing draws them, and the lens is not rendered. Also used by canonical generated-marker validation when an explicit marker shadows a generated beat or bar marker.",
+        "Canonical generated-marker validation (SREP 57): an explicit marker shadows a generated beat or bar marker.",
     ),
     (
         "W04",
         "rules",
-        "A camera with geodesics=\"true\" has denoise=\"true\": it does not denoise; pathSamples are antialiasing samples. Also used by canonical generated-marker validation when a poster or thumbnail names no marker.",
+        "Canonical generated-marker validation (SREP 57): a poster or thumbnail names no marker.",
     ),
     ("W05", "rules", "A camera with geodesics=\"true\" is in a scene with lights: they are not used."),
     (
@@ -74,6 +74,16 @@ const FIXED: &[(&str, &str, &str)] = &[
         "W10",
         "rules",
         "A medium has scatterBounces above 1 and an albedo of black: it scatters no light, so the extra bounces have nothing to do.",
+    ),
+    (
+        "W11",
+        "rules",
+        "A blackHole or an accretionDisk is in a scene where no camera has geodesics=\"true\": nothing draws them, and the lens is not rendered (draft SREP 76; was W03).",
+    ),
+    (
+        "W12",
+        "rules",
+        "A camera with geodesics=\"true\" has denoise=\"true\": it does not denoise; pathSamples are antialiasing samples (draft SREP 76; was W04).",
     ),
     ("A01", "assets", "A referenced input file does not exist."),
     ("A02", "assets", "A file's SHA-256 digest differs from the declared sha256 or cacheSha256."),

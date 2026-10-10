@@ -2348,9 +2348,9 @@
 
   <xs:complexType name="blackHoleType">
     <xs:annotation><xs:documentation>
-      Version 1.3. A non-rotating, uncharged black hole in vacuum: the Schwarzschild solution, in units with G = c = 1,
+      Version 1.3 or later (BH1). A non-rotating, uncharged black hole in vacuum: the Schwarzschild solution, in units with G = c = 1,
       so that the mass is a length of scene units and the horizon is at r_s = 2 `mass` (BH1). One per scene (BH2). It is
-      drawn by a camera with `geodesics="true"`; without it nothing is drawn (W03). Its place is the origin of the
+      drawn by a camera with `geodesics="true"`; without it nothing is drawn (W11). Its place is the origin of the
       Schwarzschild coordinates; nothing else about it is authored.
     </xs:documentation></xs:annotation>
     <xs:attribute name="id" type="xs:ID" use="required"/>
@@ -2688,8 +2688,8 @@
         layers, text, shapes, effects and adjustments are allowed, and the image goes through the 2D chain. The camera's
         distance to the hole is the radius of the static observer. `fov`, `roll`, `target`, `yaw` and `pitch` are those of any
         camera and `pathSamples` is the number of antialiasing samples of a pixel; `denoise="true"` and lights are not
-        used (W04, W05). false (the default) is the camera there always was, and a `blackHole` or an `accretionDisk` with
-        it is not rendered (W03).
+        used (W12, W05). false (the default) is the camera there always was, and a `blackHole` or an `accretionDisk` with
+        it is not rendered (W11).
       </xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="pathSamples" default="64">
@@ -4539,7 +4539,7 @@
   </xs:complexType>
   <xs:complexType name="voxelAssetType">
     <xs:annotation><xs:documentation>
-      Version 1.3 (VOX1). A model of cells, each with a palette index 1 to 255: either a file (`src`, `format` vox, MagicaVoxel, or srvol, the
+      Version 1.3 or later (VOX1). A model of cells, each with a palette index 1 to 255: either a file (`src`, `format` vox, MagicaVoxel, or srvol, the
       engine's volume cache with the indices as exact values of the grid `voxelGrid`) or a closed mesh asset cut into cells (`fromMesh` and
       `cellSize`, the cells whose centres are inside the mesh, on a lattice of multiples of the cell size, by the test that the smoke's colliders use,
       with the mesh in the frame it is drawn in: scene units, an imported asset in metres being 100 to the metre, and scene axes, so `cellSize`

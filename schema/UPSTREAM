@@ -50,3 +50,15 @@ Additional local extensions accepted on 2026-10-09:
 - SREP 70: parametric paths, surfaces and heightfields, with V14, PAR1 and PAR2.
 - SREP 72: shader content rectangles, supersampling, edge blending and float32 working textures.
 - SREP 73: flock/@orientToVelocity and the INERT-I16 diagnostic for streak flocks.
+
+Prepared for the draft SREPs 76 to 81 (sr-core branch srep/upstream-engine-extensions at 04325ca; drafts awaiting
+acceptance, so this branch merges only after it). They track the draft SREP numbers:
+- SREP 76 open issue 2 and SREP 80 open issue 1: BH1 and VOX1 admit scene version 1.3 or later (refuse 1.0 to 1.2),
+  so a black hole or cells can sit in a 1.6 document. The drafts' syntax still reads version="1.3" exactly.
+- SREP 76 open issue 1: the black-hole warnings are W11 (was W03, a hole or disk no geodesic camera draws) and W12
+  (was W04, denoise on a geodesic camera); W03 and W04 are SREP 57's generated-marker warnings only. The XSD
+  documentation of blackHoleType, cameraType/@geodesics and voxelAssetType says so.
+- SREP 76 Semantics 8 and open issue 7 (no schema change): the geodesic pass divides the disk profile by its exact
+  maximum, (6/7)^(3/2) 7^(-1/4), not 0.4880.
+The SREP 40 gates V8, MSQ1, P3D1, OCN1, CRT1, FRX1 and GEO1 still require version="1.3" exactly; no draft changes them.
+A vendoring of the sr-core release that takes SREPs 76 to 81 replaces these.

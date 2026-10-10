@@ -559,8 +559,8 @@
     </sch:rule>
   </sch:pattern>
   <sch:pattern id="cinematic-voxels-version">
-    <sch:rule context="/scene[@version!='1.3']">
-      <sch:assert id="VOX1" test="not(assets/voxelAsset|.//object3D[@primitive='voxels' or @voxels])">voxel assets and the voxels primitive require version="1.3".</sch:assert>
+    <sch:rule context="/scene[@version='1.0' or @version='1.1' or @version='1.2']">
+      <sch:assert id="VOX1" test="not(assets/voxelAsset|.//object3D[@primitive='voxels' or @voxels])">voxel assets and the voxels primitive require version="1.3" or later.</sch:assert>
     </sch:rule>
   </sch:pattern>
   <sch:pattern id="cinematic-voxel-assets">
@@ -690,7 +690,7 @@
   </sch:pattern>
   <sch:pattern id="cinematic-black-hole-version">
     <sch:rule context="blackHole|accretionDisk|camera[@geodesics]">
-      <sch:assert id="BH1" test="/scene/@version='1.3'">black holes require version="1.3".</sch:assert>
+      <sch:assert id="BH1" test="not(/scene/@version='1.0' or /scene/@version='1.1' or /scene/@version='1.2')">black holes require version="1.3" or later.</sch:assert>
     </sch:rule>
   </sch:pattern>
   <sch:pattern id="cinematic-black-hole">

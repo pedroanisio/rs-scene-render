@@ -542,14 +542,14 @@ WARN_CASES = [
     ("a03-remote", ["A03"], sub('src="../media/clip.mp4"', 'src="https://cdn.example.com/clip.mp4"')),
     ("a04-sequence-hold", ["A04"], sub('first="1" last="5"', 'first="1" last="9" missingFrame="hold"')),
     ("w02-open-face", ["W02"], lambda _: PYRO.replace('width="8" height="8" depth="8" voxelSize="1"', 'width="64" height="64" depth="64" voxelSize="1" boundary="open"').replace('<pyroSource shape="sphere" radius="2"', '<pyroSource shape="sphere" y="-28" radius="2"')),
-    ("w04-denoise", ["W04"], lambda _: BLACKHOLE.replace('geodesics="true"', 'geodesics="true" denoise="true"')),
+    ("w12-denoise", ["W12"], lambda _: BLACKHOLE.replace('geodesics="true"', 'geodesics="true" denoise="true"')),
     ("w05-lights", ["W05"], lambda _: BLACKHOLE.replace('</composition>', '</composition><lights><light id="sun" type="directional"/></lights>')),
     ("w06-foam-material", ["W06"], lambda _: OCEAN.replace('</composition>', '<camera id="cam" renderer="pathtrace"/></composition>').replace('</ocean>', '<whitewater foamMode="albedo" foamMaterial="foam"/></ocean>').replace('<composition>', '<materials><material id="foam"/></materials><composition>')),
     ("w08-foam-unlit", ["W08"], lambda _: OCEAN.replace('</composition>', '<camera id="cam" renderer="pathtrace"/></composition>').replace('<ocean id="sea" ', '<ocean id="sea" material="glow" ').replace('</ocean>', '<whitewater foamMode="albedo"/></ocean>').replace('<composition>', '<materials><material id="glow" unlit="true"/></materials><composition>')),
     ("w10-scatter-black-albedo", ["W10"], lambda _: VOLUME.replace('<medium albedo="#000000" ', '<medium albedo="#000000" scatterBounces="4" ')),
     ("w07-foam-raster", ["W07"], lambda _: OCEAN.replace('</ocean>', '<whitewater foamMode="albedo"/></ocean>')),
     ("w09-voxel-cells-small", ["W09"], lambda _: VOXELS.replace('cellSize="2"', 'cellSize="0.25"', 1)),
-    ("w03-no-lens", ["W03"], lambda _: BLACKHOLE.replace(' geodesics="true"', '')),
+    ("w11-no-lens", ["W11"], lambda _: BLACKHOLE.replace(' geodesics="true"', '')),
     ("w01-non-finite", ["W01"], sub('<marker id="drop" time="4.2"', '<marker id="drop" time="4.2" duration="1"/>\n    <marker id="late" time="INF"')),
 ]
 
@@ -745,6 +745,14 @@ FLOCK_UPRIGHT = ('<scene version="1.6"><project width="64" height="64" fps="24" 
 VALID["flock-upright"] = FLOCK_UPRIGHT
 WARN_CASES += [
     ("inert-i16-streak-flock", ["INERT-I16"], lambda _: FLOCK_UPRIGHT.replace(' shape="disc"', '')),
+]
+
+# Draft SREPs 76 and 80 (open issues): BH1 and VOX1 admit version 1.3 or later, so a black hole and cells can sit in a
+# document of version 1.6 with the features that version gates; versions before 1.3 are still refused.
+VALID["black-hole-version-1.6"] = BLACKHOLE.replace('version="1.3"', 'version="1.6"')
+VALID["voxels-version-1.6"] = VOXELS.replace('version="1.3"', 'version="1.6"')
+CASES += [
+    ("bh1-version-1.0", ["BH1"], lambda _: BLACKHOLE.replace('version="1.3"', 'version="1.0"')),
 ]
 
 def write(path, text, expect):

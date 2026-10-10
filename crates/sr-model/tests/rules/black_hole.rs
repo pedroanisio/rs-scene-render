@@ -58,8 +58,27 @@ fn a_camera_without_geodesics_is_the_camera_there_always_was() {
     let xml = SCENE.replace(r#" geodesics="true""#, "");
     let doc = sr_model::load_str(&xml, &sr_model::LoadOptions::without_assets()).unwrap();
     assert!(!find::<Camera>(&doc).geodesics);
-    // and the hole and the disk are warned about, never silently dropped
-    assert_eq!(codes(&xml), ["W03", "W03"]);
+    // and the hole and the disk are warned about, never silently dropped (W11, SREP 76; W03 is SREP 57's)
+    assert_eq!(codes(&xml), ["W11", "W11"]);
+}
+
+#[test]
+fn denoise_on_a_geodesic_camera_is_warned_as_w12() {
+    let xml = SCENE.replace(r#"geodesics="true""#, r#"geodesics="true" denoise="true""#);
+    assert_eq!(codes(&xml), ["W12"]);
+}
+
+#[test]
+fn black_holes_need_version_1_3_or_later() {
+    // draft SREP 76, open issue 2: the gate is "1.3 or later", so a black hole can sit in a 1.6 document (V15, V16)
+    for later in ["1.3", "1.4", "1.5", "1.6"] {
+        let xml = SCENE.replace(r#"version="1.3""#, &format!(r#"version="{later}""#));
+        assert!(codes(&xml).is_empty(), "{later}: {:?}", codes(&xml));
+    }
+    for earlier in ["1.0", "1.1", "1.2"] {
+        let xml = SCENE.replace(r#"version="1.3""#, &format!(r#"version="{earlier}""#));
+        assert!(codes(&xml).contains(&"BH1".to_string()), "{earlier}");
+    }
 }
 
 #[test]
@@ -109,4 +128,14 @@ fn a_scene_that_only_draws_the_hole_is_valid_and_the_disk_is_bounded_by_the_orbi
     let at = SCENE.replace("<accretionDisk id=\"disk\"", "<accretionDisk id=\"disk\" innerRadius=\"9\"");
     assert!(codes(&at).is_empty(), "{:?}", codes(&at));
     assert!(codes(&at.replace(r#"outerRadius="30""#, r#"outerRadius="9""#)).contains(&"BH4".to_string()));
+}
+
+#[test]
+fn the_black_hole_warnings_have_codes_of_their_own() {
+    // draft SREP 76, open issue 1: W03 and W04 are SREP 57's generated-marker warnings
+    let summary = |code: &str| sr_model::codes::lookup(code).unwrap_or_else(|| panic!("{code} is explained")).summary;
+    assert!(summary("W11").contains("blackHole"));
+    assert!(summary("W12").contains("denoise"));
+    assert!(!summary("W03").contains("blackHole"));
+    assert!(!summary("W04").contains("geodesics"));
 }
