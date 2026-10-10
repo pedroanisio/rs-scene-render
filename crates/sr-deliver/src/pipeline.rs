@@ -52,7 +52,9 @@ pub struct Options {
 /// How many time segments of a video output render and encode at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Parallel {
-    /// 3 with a hardware encoder, otherwise half the cores (at most 4); fewer for short ranges.
+    /// The output is split by its duration alone (one chunk per 10 s, at most 12; one stream under 20 s), so the
+    /// file is the same on any machine; 3 chunks render at once with a hardware encoder, otherwise half the cores
+    /// (at most 4), one on a software adapter, and at most one per 20 s.
     #[default]
     Auto,
     /// Exactly this many (1 renders serially).
@@ -1140,20 +1142,19 @@ fn run_delivery(
         report.segments = 1;
         // llvmpipe already spreads one device over every core, so automatic parallelism would only add
         // devices competing for them; an explicit worker count is still honoured
-        let wanted_workers = if gpu.is_software() && matches!(opts.parallel, Parallel::Auto) {
-            1
-        } else {
-            segment_count(output, codec, opts, &ev, end - start).min(n as usize)
-        };
-        // the debug layers name every object through the Vulkan loader, which is not safe from several devices at once
-        let workers = if sr_gpu::gpu::debug_layers() && wanted_workers > 1 {
+        let host = if gpu.is_software() { 1 } else { host_workers(codec, opts) };
+        let observe = checks.flash_on() || checks.contrast_on();
+        let mut plan = segment_plan(opts.parallel, splittable(output, codec, &ev), host, end - start, n, observe);
+        // the debug layers name every object through the Vulkan loader, which is not safe from several devices at
+        // once: one worker renders the same chunks on the caller's device
+        if sr_gpu::gpu::debug_layers() && plan.workers > 1 {
             report.serial_because = Some(format!(
-                "GPU debug layers are on (SR_GPU_DEBUG / --debug-gpu): rendering with 1 worker instead of {wanted_workers}, as their object naming is not safe from several devices at once"
+                "GPU debug layers are on (SR_GPU_DEBUG / --debug-gpu): rendering with 1 worker instead of {}, as their object naming is not safe from several devices at once",
+                plan.workers
             ));
-            1
-        } else {
-            wanted_workers
-        };
+            plan.workers = 1;
+        }
+        let workers = plan.workers;
         if output.two_pass || fit.is_some() {
             // render once into a lossless intermediate, then encode it as often as needed
             let inter = tmp.join("intermediate.mkv");
@@ -1219,15 +1220,13 @@ fn run_delivery(
             }
             // the checks' post pass runs once the file is written: a check that fails, or takes long, leaves it whole
             video.judge(judge, &times, report);
-        } else if workers > 1 {
+        } else if plan.chunks > 1 {
             // Each worker renders contiguous chunks with its own encoder. Accessibility-enabled
             // chunks fit one bounded observation batch, so ordering does not serialize the workers.
             // Every chunk starts on a keyframe; stream copy joins them without re-encoding.
             use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
-            let chunks = (workers * 3).min(((end - start) / 10.0).floor() as usize).max(workers).min(n as usize);
-            let observe = checks.flash_on() || checks.contrast_on();
-            let chunks = if observe { chunks.max((n as usize).div_ceil(OBSERVATION_FRAMES)) } else { chunks };
-            let bounds: Vec<usize> = (0..=chunks).map(|i| (i as u64 * n / chunks as u64) as usize).collect();
+            let chunks = plan.chunks;
+            let bounds = plan.bounds(n);
             let ext = report.path.extension().and_then(|e| e.to_str()).unwrap_or("mp4").to_string();
             let parts: Vec<PathBuf> = (0..chunks).map(|i| tmp.join(format!("segment{i:04}.{ext}"))).collect();
             let part_spec = |i: usize| EncodeSpec {
@@ -1247,7 +1246,12 @@ fn run_delivery(
             // Create worker devices sequentially and keep them alive until every
             // worker has joined. Concurrent device creation crashed the Vulkan loader;
             // independent devices avoid allocation contention between renderers.
-            let worker_gpus: Vec<_> = (0..workers).map(|_| gpu.open_like()).collect::<Result<_, _>>()?;
+            // A single worker (a software adapter, the debug layers, a short programme) shares the caller's device.
+            let worker_gpus: Vec<_> = if workers == 1 {
+                vec![gpu.clone()]
+            } else {
+                (0..workers).map(|_| gpu.open_like()).collect::<Result<_, _>>()?
+            };
             // Fixed round-robin chunk ownership lets the coordinator drain each worker in time
             // order. Two queued batches per worker plus one being rendered: at most 384 flash
             // grids (about 11.4 MiB) per worker, independent of output duration.
@@ -1641,32 +1645,88 @@ fn text_fit_findings(ev: &Evaluator, times: &[f64], pinned: bool) -> Vec<crate::
     out
 }
 
-/// Segments to render `output` in at once: 1 unless it is a single-pass video file whose frames
-/// render the same from a cold start (no simulation). The accessibility checks compare frames across
-/// segments and do not limit the count: the segments' observations are judged together, in frame order.
-fn segment_count(output: &m::Output, codec: Codec, opts: &Options, ev: &Evaluator, duration: f64) -> usize {
-    if output.two_pass
+/// Whether `output` can render as time chunks joined without re-encoding: a single-pass video file whose frames
+/// render the same from a cold start (no simulation). The accessibility checks compare frames across chunks and do
+/// not prevent it: the chunks' observations are judged together, in frame order.
+fn splittable(output: &m::Output, codec: Codec, ev: &Evaluator) -> bool {
+    !(output.two_pass
         || output.max_file_size.is_some()
         || codec.is_sequence()
         || codec.is_audio_only()
         || matches!(codec, Codec::Gif | Codec::Apng | Codec::Webp)
-        || ev.has_simulation()
-    {
-        return 1;
+        || ev.has_simulation())
+}
+
+/// How many chunks this machine renders at once under `--parallel auto`: 3 with a hardware encoder, otherwise half
+/// the cores, at most 4. It sets concurrency only, never the split ([`segment_plan`]).
+fn host_workers(codec: Codec, opts: &Options) -> usize {
+    // measured on a 229 s programme: NVENC levels off at 3, libx264 (CPU-bound) at 4 on 8 cores
+    let hardware = sr_media::encode::choose_encoder(codec, opts.hardware)
+        .is_ok_and(|e| ["_nvenc", "_videotoolbox", "_qsv", "_amf", "_vaapi"].iter().any(|s| e.ends_with(s)));
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    if hardware {
+        3
+    } else {
+        (cores / 2).clamp(1, 4)
     }
-    let wanted = match opts.parallel {
-        Parallel::Count(n) => n as usize,
+}
+
+/// The time split of a video output and how many of its chunks render at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SegmentPlan {
+    /// Contiguous chunks, each encoded from a keyframe and joined without re-encoding (1: one stream, serially).
+    chunks: usize,
+    /// Chunks rendered at once.
+    workers: usize,
+}
+
+impl SegmentPlan {
+    /// The first frame of each chunk, then the frame count.
+    fn bounds(&self, frames: u64) -> Vec<usize> {
+        (0..=self.chunks).map(|i| (i as u64 * frames / self.chunks as u64) as usize).collect()
+    }
+}
+
+/// Splits `frames` frames lasting `duration` seconds. Under `auto` the split depends on the programme alone, so an
+/// output is byte-for-byte the same file on any machine: one chunk per 10 s, at most 12 (with the flash or contrast
+/// checks, also at most [`OBSERVATION_FRAMES`] frames each), and one stream under 20 s. `host` chunks render at
+/// once there, at most one per 20 s. An explicit count renders that many at once, each over three chunks of at least
+/// 10 s (`1` renders serially). `can_split` is false for outputs that render as one stream ([`splittable`]).
+fn segment_plan(
+    parallel: Parallel,
+    can_split: bool,
+    host: usize,
+    duration: f64,
+    frames: u64,
+    observe: bool,
+) -> SegmentPlan {
+    let serial = SegmentPlan { chunks: 1, workers: 1 };
+    if !can_split || frames < 2 {
+        return serial;
+    }
+    let frames_cap = frames.min(usize::MAX as u64) as usize;
+    let tens = (duration / 10.0).floor().max(0.0) as usize;
+    let observed = |chunks: usize| if observe { chunks.max(frames_cap.div_ceil(OBSERVATION_FRAMES)) } else { chunks };
+    match parallel {
         Parallel::Auto => {
-            // measured on a 229 s programme: NVENC levels off at 3, libx264 (CPU-bound) at 4 on 8 cores
-            let hardware = sr_media::encode::choose_encoder(codec, opts.hardware)
-                .is_ok_and(|e| ["_nvenc", "_videotoolbox", "_qsv", "_amf", "_vaapi"].iter().any(|s| e.ends_with(s)));
-            let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-            let n = if hardware { 3 } else { (cores / 2).clamp(1, 4) };
-            // every segment pays the renderer's start-up: keep them at least 20 s long
-            n.min((duration / 20.0).floor() as usize).max(1)
+            let chunks = tens.clamp(1, 12).min(frames_cap);
+            if chunks < 2 {
+                return serial;
+            }
+            let chunks = observed(chunks).min(frames_cap);
+            // every worker pays the renderer's start-up: keep each one busy for at least 20 s
+            let workers = host.min((duration / 20.0).floor() as usize).min(chunks).max(1);
+            SegmentPlan { chunks, workers }
         }
-    };
-    wanted.max(1)
+        Parallel::Count(n) => {
+            let workers = (n as usize).min(frames_cap).max(1);
+            if workers < 2 {
+                return serial;
+            }
+            let chunks = observed((workers * 3).min(tens).max(workers)).min(frames_cap);
+            SegmentPlan { chunks, workers }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2072,6 +2132,48 @@ fn thinned_contrasts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `--parallel auto` splits an output by the scene alone, so the file is the same on every machine (v0.2.1
+    /// pinned the encoders' threads for the same reason): the host only decides how many chunks render at once.
+    #[test]
+    fn the_automatic_split_depends_on_the_scene_not_on_the_host() {
+        for (duration, fps, observe) in
+            [(5.0, 30.0, false), (19.9, 30.0, false), (20.0, 30.0, false), (45.0, 24.0, false), (229.0, 60.0, false)]
+                .into_iter()
+                .chain([(45.0, 24.0, true), (229.0, 60.0, true), (600.0, 30.0, false)])
+        {
+            let frames = (duration * fps) as u64;
+            let plans: Vec<SegmentPlan> =
+                (1..=16).map(|host| segment_plan(Parallel::Auto, true, host, duration, frames, observe)).collect();
+            for p in &plans {
+                assert_eq!(p.chunks, plans[0].chunks, "{duration} s: the split must not follow the host: {plans:?}");
+                assert_eq!(p.bounds(frames), plans[0].bounds(frames), "{duration} s");
+                assert!(p.workers >= 1 && p.workers <= p.chunks.max(1), "{p:?}");
+            }
+            // chunks of at least 10 s, at most 12 of them (fewer frames than that: one per frame at most)
+            let c = plans[0].chunks;
+            if !observe {
+                assert!(c == 1 || duration / c as f64 >= 10.0, "{duration} s in {c} chunks");
+                assert!(c <= 12);
+            }
+            // the host decides concurrency, at most one worker per 20 s and per chunk: a 1-worker host renders the
+            // same chunks one after another
+            for (host, p) in (1..=16).zip(&plans) {
+                assert_eq!(p.workers, host.min((duration / 20.0) as usize).min(c).max(1), "host {host}: {p:?}");
+            }
+        }
+        // short programmes stay one stream; 20 s already splits in two
+        assert_eq!(segment_plan(Parallel::Auto, true, 4, 19.9, 597, false).chunks, 1);
+        assert_eq!(segment_plan(Parallel::Auto, true, 4, 20.0, 600, false).chunks, 2);
+        // an output that cannot be split stays one stream whatever is asked
+        let serial = SegmentPlan { chunks: 1, workers: 1 };
+        assert_eq!(segment_plan(Parallel::Auto, false, 8, 229.0, 13740, false), serial);
+        assert_eq!(segment_plan(Parallel::Count(4), false, 8, 229.0, 13740, false), serial);
+        // an explicit count keeps its own split
+        assert_eq!(segment_plan(Parallel::Count(1), true, 8, 229.0, 13740, false), serial);
+        let p = segment_plan(Parallel::Count(2), true, 1, 40.0, 40, false);
+        assert_eq!((p.chunks, p.workers), (4, 2));
+    }
 
     #[test]
     fn prefetched_contrast_only_reuses_exact_selected_samples() {
