@@ -532,3 +532,27 @@ fn ffmpegs_aac_encoder_runs_without_the_tools_that_click() {
     video.audio = Some((d.join("pns.wav"), "libopus".into(), 96_000));
     assert!(!after_codec(&video).iter().any(|a| a.starts_with("-aac_")));
 }
+
+/// libx264 and libx265 choose their thread counts from the host's cores, and their output depends on those counts: the
+/// same binary gave different MP4 bytes on an 8-core Intel VM (style3) and 6-core AMD VMs (Lula 3.0.0 rebuild, 6 of 32
+/// segments; reproduced 2026-10-09 with `ffmpeg -c:v libx264` at `-threads` auto, 6, 8, 9 and 12, where each fixed count
+/// gave the same bytes on both hosts). A fixed count makes an encode the same on every host.
+#[test]
+fn the_software_encoders_use_a_fixed_number_of_threads() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let d = dir();
+    let value_after = |args: &[String], flag: &str| args.iter().position(|a| a == flag).map(|k| args[k + 1].clone());
+    let h264 = spec(&d.join("threads.mp4"), Codec::H264, InputFormat::Nv12);
+    let (args, encoder) = h264.args().unwrap();
+    if encoder == "libx264" {
+        assert_eq!(value_after(&args, "-threads").as_deref(), Some(SOFTWARE_ENCODER_THREADS.to_string().as_str()));
+    }
+    let h265 = spec(&d.join("threads-hevc.mp4"), Codec::H265, InputFormat::Nv12);
+    if let Ok((args, "libx265")) = h265.args().as_ref().map(|(a, e)| (a.clone(), e.as_str())) {
+        let params = value_after(&args, "-x265-params").unwrap_or_default();
+        assert!(params.contains(&format!("pools={SOFTWARE_ENCODER_THREADS}")), "{params}");
+        assert!(params.contains("frame-threads="), "{params}");
+    }
+}
