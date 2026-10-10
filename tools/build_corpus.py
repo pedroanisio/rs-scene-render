@@ -747,6 +747,23 @@ WARN_CASES += [
     ("inert-i16-streak-flock", ["INERT-I16"], lambda _: FLOCK_UPRIGHT.replace(' shape="disc"', '')),
 ]
 
+# SREP 75: fractal assets (document version 1.6), V16 and FRC1. The centre is an xs:decimal, which sr-model reads at
+# any length; libxml2 (the oracle) refuses one of more than 24 digits, a limit XSD 1.0 allows (Part 2, 3.2.3: at least
+# 18), so these documents keep to 24 and the SREP's 33-digit centres are tested by sr-eval and sr-gpu only.
+FRACTAL = ('<scene version="1.6"><project width="64" height="64" fps="24" duration="1"/>'
+    '<assets><fractal id="f" kind="mandelbrot" width="16" height="16" centerX="-0.743643887037158704752191" '
+    'centerY="+.131825904205311970493132" zoom="6" maxIterations="100" colorMode="bands" palette="#FF0000FF #0000FFFF">'
+    '<animate property="zoom"><key time="0" value="6"/><key time="1" value="7"/></animate></fractal>'
+    '<fractal id="j" kind="julia" width="16" height="16" juliaX="-0.8" juliaY="0.156"/></assets>'
+    '<composition><layer id="l" asset="f"/><layer id="m" asset="j" x="20"/></composition></scene>\n')
+VALID["fractal"] = FRACTAL
+CASES += [
+    ("v16-fractal", ["V16"], lambda _: FRACTAL.replace('version="1.6"', 'version="1.5"')),
+    ("frc1-julia-without-c", ["FRC1"], lambda _: FRACTAL.replace(' juliaX="-0.8" juliaY="0.156"', ' juliaX="-0.8"')),
+    ("frc1-mandelbrot-with-c", ["FRC1"], lambda _: FRACTAL.replace('kind="mandelbrot"', 'kind="mandelbrot" juliaX="0" juliaY="0"')),
+    ("s06-decimal-exponent", ["S06"], lambda _: FRACTAL.replace('centerY="+.131825904205311970493132"', 'centerY="1.3e-1"')),
+]
+
 def write(path, text, expect):
     header = f"<!-- expect: {' '.join(expect) if expect else 'valid'} -->\n"
     body = text.split("\n", 1)[1] if text.startswith("<?xml") else text

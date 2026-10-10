@@ -1603,6 +1603,7 @@ impl Builder {
                     m::AssetsChild::Vector(x) => wh(Some(x.width as f64), Some(x.height as f64)),
                     m::AssetsChild::Lottie(x) => wh(Some(x.width as f64), Some(x.height as f64)),
                     m::AssetsChild::Generator(x) => wh(Some(x.width as f64), Some(x.height as f64)),
+                    m::AssetsChild::Fractal(x) => wh(Some(x.width as f64), Some(x.height as f64)),
                     m::AssetsChild::Chart(x) => wh(Some(x.width as f64), Some(x.height as f64)),
                     m::AssetsChild::Map(x) => wh(Some(x.width as f64), Some(x.height as f64)),
                     m::AssetsChild::Audiogram(x) => wh(Some(x.width as f64), Some(x.height as f64)),

@@ -798,4 +798,12 @@
       <sch:assert id="PAR2" test="(@primitive='parametric') = (count(parametricSurface) = 1) and (@primitive='heightfield') = (count(heightfield) = 1)">primitive="parametric" has exactly one parametricSurface and primitive="heightfield" exactly one heightfield; no other primitive has either.</sch:assert>
     </sch:rule>
   </sch:pattern>
+  <sch:pattern id="p-srep75">
+    <sch:rule context="/scene[@version='1.0' or @version='1.1' or @version='1.2' or @version='1.3' or @version='1.4' or @version='1.5']">
+      <sch:assert id="V16" test="not(assets/fractal)">fractal assets need version="1.6".</sch:assert>
+    </sch:rule>
+    <sch:rule context="assets/fractal">
+      <sch:assert id="FRC1" test="(@kind='julia') = (boolean(@juliaX) and boolean(@juliaY))">a julia fractal has juliaX and juliaY; a mandelbrot has neither.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
 </sch:schema>

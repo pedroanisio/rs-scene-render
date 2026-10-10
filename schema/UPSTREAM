@@ -50,3 +50,7 @@ Additional local extensions accepted on 2026-10-09:
 - SREP 70: parametric paths, surfaces and heightfields, with V14, PAR1 and PAR2.
 - SREP 72: shader content rectangles, supersampling, edge blending and float32 working textures.
 - SREP 73: flock/@orientToVelocity and the INERT-I16 diagnostic for streak flocks.
+- SREP 75 (draft, sr-core branch srep/drafts-2026-10): the fractal asset (fractalAssetType, in assetsType) and the
+  Schematron pattern p-srep75 (V16, FRC1), with the syntax of srep/srep-0075.md. The model generator of sr-model gains
+  the builtin xs:decimal, kept as its exact text. libxml2 (the oracle) refuses an xs:decimal of more than 24 digits, so
+  the SREP's kit documents, whose centres have 33, do not validate there; the corpus keeps to 24.

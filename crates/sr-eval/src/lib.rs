@@ -27,6 +27,7 @@ mod debris;
 pub mod eval;
 pub mod expr;
 pub mod font_policy;
+pub mod fractal;
 pub mod fracture;
 pub mod geo;
 mod group;

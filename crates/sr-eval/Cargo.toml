@@ -20,6 +20,8 @@ rayon.workspace = true
 regex.workspace = true
 thiserror.workspace = true
 libm.workspace = true
+# the reference orbits of deep fractal zooms in fixed point (SREP 75); already in the build through nalgebra's num
+num-bigint = "0.4"
 sr-vector.workspace = true
 sr-text.workspace = true
 sr-sim = { path = "../sr-sim" }

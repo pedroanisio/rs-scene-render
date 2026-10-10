@@ -361,6 +361,8 @@ pub struct Renderer {
     /// The last uploaded picture of each grid simulation: (content key, texture).
     sim_textures: HashMap<Arc<str>, (u64, Arc<Tex>)>,
     generators: HashMap<u64, Arc<Tex>>,
+    /// Computed fractal pictures (SREP 75), by the hash of everything they show.
+    fractals: HashMap<u64, Arc<Tex>>,
     subtree: HashMap<String, (u64, Arc<Tex>)>,
     used: std::collections::HashSet<String>,
     /// The frame each cache key was last used in (frames counted by `cache_frame`).
@@ -1057,6 +1059,7 @@ impl Renderer {
             image_notes: HashMap::new(),
             sim_textures: HashMap::new(),
             generators: HashMap::new(),
+            fractals: HashMap::new(),
             subtree: HashMap::new(),
             used: Default::default(),
             last_used: HashMap::new(),
@@ -1536,6 +1539,7 @@ impl Renderer {
                 self.video_texture(plan, n, &path, v.fps.as_f64(), space, transfer, v.alpha, rotation, blend)
             }
             AssetsChild::Generator(gen) => Some(self.generator_texture(plan, p, g, gen)),
+            AssetsChild::Fractal(fr) => self.fractal_texture(plan, g, fr, &n.id),
             AssetsChild::Generated(gm) if matches!(gm.kind.as_str(), "image" | "video") => {
                 // generated media renders from its verified cache file
                 let path = match sr_model::assets::resolve(&gm.cache, &base) {
@@ -1799,6 +1803,103 @@ impl Renderer {
         self.generators.insert(hash, target.clone());
         plan.gens.push(GenJob { target: target.clone(), bind });
         target
+    }
+
+    /// The picture of a fractal asset at this frame (SREP 75): every pixel's escape count, computed on the CPU in
+    /// IEEE doubles and fixed point (`sr_eval::fractal`), coloured in display-encoded values and converted to the working
+    /// space. `who` names the node that shows it, for errors.
+    fn fractal_texture(
+        &mut self,
+        plan: &mut Plan,
+        g: &FrameGraph,
+        fr: &m::FractalAsset,
+        who: &str,
+    ) -> Option<Arc<Tex>> {
+        let el = g.elements.iter().find(|e| &*e.key == fr.id.as_str());
+        let num = |name: &str, d: f64| el.and_then(|e| e.props.get(name)).and_then(Value::as_num).unwrap_or(d);
+        let (w, hgt) = (fr.width as u32, fr.height as u32);
+        if w > self.max_texture || hgt > self.max_texture {
+            plan.stats.errors.push(format!(
+                "{who}: fractal {} is {w} x {hgt}, beyond the device's {} texture limit",
+                fr.id, self.max_texture
+            ));
+            return None;
+        }
+        let julia = match (fr.kind, &fr.julia_x, &fr.julia_y) {
+            (m::FractalAssetKind::Julia, Some(x), Some(y)) => Some([x.clone(), y.clone()]),
+            _ => None,
+        };
+        let spec = sr_eval::fractal::Fractal {
+            julia,
+            width: w,
+            height: hgt,
+            center: [fr.center_x.clone(), fr.center_y.clone()],
+            span: num("span", fr.span.get()),
+            zoom: num("zoom", fr.zoom),
+            rotation: num("rotation", fr.rotation),
+            max_iterations: num("maxIterations", fr.max_iterations as f64).clamp(1.0, 1e8) as u64,
+            bailout: num("bailout", fr.bailout.get()),
+        };
+        let literal = |c: &sr_model::values::Color| -> [f64; 4] {
+            match c {
+                sr_model::values::Color::Rgba(c) => [c.r as f64, c.g as f64, c.b as f64, c.a as f64],
+                sr_model::values::Color::Token(t) => self.tokens.get(t).copied().unwrap_or([0.0, 0.0, 0.0, 1.0]),
+            }
+        };
+        let mut palette = Vec::new();
+        for tok in fr.palette.split_whitespace() {
+            match <sr_model::values::Color as sr_model::parse::ParseValue>::parse_value(tok) {
+                Ok(c) => palette.push(literal(&c)),
+                Err(_) => {
+                    plan.stats.errors.push(format!("{who}: fractal {} palette: {tok:?} is not a colour", fr.id));
+                    return None;
+                }
+            }
+        }
+        let inside = match el.and_then(|e| e.props.get("insideColor")) {
+            Some(Value::Color(c)) => *c,
+            _ => literal(&fr.inside_color),
+        };
+        let colouring = sr_eval::fractal::Colouring {
+            smooth: fr.color_mode == m::ColorMode::Smooth,
+            palette,
+            scale: num("paletteScale", fr.palette_scale.get()),
+            offset: num("paletteOffset", fr.palette_offset),
+            inside,
+            bailout: spec.bailout,
+        };
+        let hash = {
+            let mut f = Fnv(0xcbf2_9ce4_8422_2325);
+            f.str(&format!("{spec:?}"));
+            f.str(&format!("{colouring:?}"));
+            f.u64(u64::from(self.working.linear));
+            f.0
+        };
+        self.used.insert(format!("fractal:{hash}"));
+        if let Some(t) = self.fractals.get(&hash) {
+            plan.stats.cache_hits += 1;
+            return Some(t.clone());
+        }
+        let escapes = match sr_eval::fractal::escapes(&spec) {
+            Ok(e) => e,
+            Err(e) => {
+                plan.stats.errors.push(format!("{who}: {e}"));
+                return None;
+            }
+        };
+        let working = &self.working;
+        let px: Vec<[f32; 4]> = escapes
+            .iter()
+            .map(|e| {
+                let c = working.from_literal(colouring.colour(*e));
+                // premultiplied, as every source texture
+                [(c[0] * c[3]) as f32, (c[1] * c[3]) as f32, (c[2] * c[3]) as f32, c[3] as f32]
+            })
+            .collect();
+        let d = resources::Decoded { levels: vec![(w, hgt, px)], note: None };
+        let t = Arc::new(resources::upload(&self.gpu.device, &self.gpu.queue, &self.bgl1, &d, "fractal"));
+        self.fractals.insert(hash, t.clone());
+        Some(t)
     }
 
     // ---------------------------------------------------------- planning
@@ -3743,7 +3844,8 @@ impl Renderer {
         let mut generated = std::collections::HashSet::new();
         for key in p.assets.keys() {
             match self.asset(p, key).map(|a| a.0) {
-                Some(AssetsChild::Generator(_)) => {
+                // their pixels follow their animated attributes, not the clock (SREP 75 for fractals)
+                Some(AssetsChild::Generator(_) | AssetsChild::Fractal(_)) => {
                     generated.insert(key.to_string());
                 }
                 Some(AssetsChild::Image(_)) | None => {}
@@ -3892,6 +3994,7 @@ impl Renderer {
             }
             keep
         });
+        self.fractals.retain(|k, _| live.contains_key(&format!("fractal:{k}")));
         self.video_frames.retain(|k, _| live.contains_key(&format!("video:{k}")));
         self.video_previous.retain(|k, _| live.contains_key(&format!("video-previous:{k}")));
         // colour glyphs and raster map tiles: a map that pans or zooms shows new tiles every frame

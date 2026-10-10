@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 /// The version rules that refuse 1.6 syntax in earlier documents, one per SREP that adds syntax to 1.6.
-const GATES_1_6: &[&str] = &["V12", "V13", "V14"];
+const GATES_1_6: &[&str] = &["V12", "V13", "V14", "V16"];
 
 fn with_version(xml: &str, v: &str) -> Option<String> {
     let at = xml.find("<scene")?;

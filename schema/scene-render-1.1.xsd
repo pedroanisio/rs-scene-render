@@ -1062,6 +1062,36 @@
     <xs:attribute name="collectionIndex" type="xs:nonNegativeInteger" default="0"/>
     <xs:attributeGroup ref="assetProvenance"/>
   </xs:complexType>
+  <!-- ===================================================== SREP 75: fractal assets with deep-zoom precision -->
+  <xs:complexType name="fractalAssetType">
+    <xs:annotation><xs:documentation>Escape-time fractal image of width x height pixels. Each pixel shows the escape count
+  of its centre in exact arithmetic (up to 2^-20 of a pixel; SREP 75), whatever the zoom.</xs:documentation></xs:annotation>
+    <xs:group ref="animationElements" minOccurs="0" maxOccurs="unbounded"/>
+    <xs:attribute name="id" type="xs:ID" use="required"/>
+    <xs:attribute name="kind" use="required">
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="mandelbrot"/><xs:enumeration value="julia"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="width" type="xs:positiveInteger" use="required"/>
+    <xs:attribute name="height" type="xs:positiveInteger" use="required"/>
+    <xs:attribute name="centerX" type="xs:decimal" default="0"/>
+    <xs:attribute name="centerY" type="xs:decimal" default="0"/>
+    <xs:attribute name="juliaX" type="xs:decimal"/>
+    <xs:attribute name="juliaY" type="xs:decimal"/>
+    <xs:attribute name="span" type="positiveDecimal" default="4"/>
+    <xs:attribute name="zoom" type="xs:double" default="0"/>
+    <xs:attribute name="rotation" type="xs:double" default="0"/>
+    <xs:attribute name="maxIterations" default="1000">
+      <xs:simpleType><xs:restriction base="xs:positiveInteger"><xs:maxInclusive value="100000000"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="bailout" type="positiveDecimal" default="2"/>
+    <xs:attribute name="colorMode" default="smooth">
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="bands"/><xs:enumeration value="smooth"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="palette" type="xs:string" default="#000764FF #206BCBFF #EDFFFFFF #FFAA00FF #000200FF"/>
+    <xs:attribute name="paletteScale" type="positiveDecimal" default="0.05"/>
+    <xs:attribute name="paletteOffset" type="xs:double" default="0"/>
+    <xs:attribute name="insideColor" type="colorType" default="#000000FF"/>
+  </xs:complexType>
   <xs:complexType name="generatorAssetType">
     <xs:annotation><xs:documentation>Procedural image source; all parameters animate; noise kinds are seeded.</xs:documentation></xs:annotation>
     <xs:group ref="animationElements" minOccurs="0" maxOccurs="unbounded"/>
@@ -1483,6 +1513,8 @@
       <xs:element name="meshSequence" type="meshSequenceAssetType"/>
       <xs:element name="volume" type="volumeAssetType"/>
       <xs:element name="voxelAsset" type="voxelAssetType"/>
+      <!-- SREP 75 (draft; document version 1.6, local addition until an sr-core release) -->
+      <xs:element name="fractal" type="fractalAssetType"/>
     </xs:choice>
   </xs:complexType>
 

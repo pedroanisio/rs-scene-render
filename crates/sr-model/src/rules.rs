@@ -951,6 +951,20 @@ impl<'a> Eval<'a> {
                 "compute, iterate, error-diffusion and segmented-sort need version=\"1.6\".".into()
             });
         }
+        // SREP 75 (p-srep75)
+        if local == "scene"
+            && n.parent_element().is_none()
+            && matches!(a("version"), Some("1.0" | "1.1" | "1.2" | "1.3" | "1.4" | "1.5"))
+        {
+            let uses = kids(n, "assets").any(|s| has_kid(s, "fractal"));
+            self.check(!uses, n, "V16", || "fractal assets need version=\"1.6\".".into());
+        }
+        if local == "fractal" && parent_is("assets") {
+            let julia = a("kind") == Some("julia");
+            self.check(julia == (has("juliaX") && has("juliaY")), n, "FRC1", || {
+                "a julia fractal has juliaX and juliaY; a mandelbrot has neither.".into()
+            });
+        }
         if local == "iterate" {
             let num = |k: &str| a(k).and_then(|v| v.trim().parse::<f64>().ok());
             let ok = match (num("checkEvery"), num("steps")) {

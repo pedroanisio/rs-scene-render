@@ -188,6 +188,17 @@ fn check_builtin(b: Builtin, v: &str) -> Result<(), String> {
             }
         }
         Builtin::Double => parse_xsd_double(v).map(|_| ()).ok_or_else(|| format!("{v:?} is not a number")),
+        // [+-]? (digits (. digits?)? | . digits), of any length: no exponent, INF or NaN
+        Builtin::Decimal => {
+            let body = v.strip_prefix(['+', '-']).unwrap_or(v);
+            let (int, frac) = body.split_once('.').unwrap_or((body, ""));
+            let digits = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+            if (int.is_empty() && frac.is_empty()) || !digits(int) || !digits(frac) {
+                Err(format!("{v:?} is not a decimal"))
+            } else {
+                Ok(())
+            }
+        }
         Builtin::Boolean => match v {
             "true" | "false" | "1" | "0" => Ok(()),
             _ => Err(format!("{v:?} is not a boolean (true, false, 1 or 0)")),

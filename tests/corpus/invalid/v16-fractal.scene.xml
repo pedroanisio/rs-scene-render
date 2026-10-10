@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- expect: V16 -->
+<scene version="1.5"><project width="64" height="64" fps="24" duration="1"/><assets><fractal id="f" kind="mandelbrot" width="16" height="16" centerX="-0.743643887037158704752191" centerY="+.131825904205311970493132" zoom="6" maxIterations="100" colorMode="bands" palette="#FF0000FF #0000FFFF"><animate property="zoom"><key time="0" value="6"/><key time="1" value="7"/></animate></fractal><fractal id="j" kind="julia" width="16" height="16" juliaX="-0.8" juliaY="0.156"/></assets><composition><layer id="l" asset="f"/><layer id="m" asset="j" x="20"/></composition></scene>

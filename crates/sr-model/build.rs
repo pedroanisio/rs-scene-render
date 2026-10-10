@@ -26,6 +26,7 @@ const UNBOUNDED: u32 = u32::MAX;
 const BUILTINS: &[(&str, &str)] = &[
     ("string", "String"),
     ("double", "Double"),
+    ("decimal", "Decimal"),
     ("boolean", "Boolean"),
     ("integer", "Integer"),
     ("int", "Int"),
@@ -583,7 +584,8 @@ fn root_builtin(s: &Schema, mut i: usize) -> &'static str {
 
 fn builtin_rust(b: &str) -> &'static str {
     match b {
-        "String" | "AnyUri" | "DateTime" | "Id" | "IdRef" | "NcName" | "NmToken" => "String",
+        // an xs:decimal keeps its exact text: a binary float would round it (SREP 75)
+        "String" | "Decimal" | "AnyUri" | "DateTime" | "Id" | "IdRef" | "NcName" | "NmToken" => "String",
         "IdRefs" | "NmTokens" => "Vec<String>",
         "Double" => "f64",
         "Boolean" => "bool",

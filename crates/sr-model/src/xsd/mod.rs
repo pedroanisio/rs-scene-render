@@ -17,6 +17,8 @@ pub const UNBOUNDED: u32 = u32::MAX;
 pub enum Builtin {
     String,
     Double,
+    /// `xs:decimal`: kept as its exact text (SREP 75).
+    Decimal,
     Boolean,
     Integer,
     Int,

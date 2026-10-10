@@ -385,6 +385,12 @@
     "crt9-capture-without-source.scene.xml": [
       "CRT9"
     ],
+    "frc1-julia-without-c.scene.xml": [
+      "FRC1"
+    ],
+    "frc1-mandelbrot-with-c.scene.xml": [
+      "FRC1"
+    ],
     "frx1.scene.xml": [
       "FRX1"
     ],
@@ -1014,6 +1020,9 @@
     "s06-colour.scene.xml": [
       "S06"
     ],
+    "s06-decimal-exponent.scene.xml": [
+      "S06"
+    ],
     "s06-double.scene.xml": [
       "S06"
     ],
@@ -1093,6 +1102,9 @@
     ],
     "v14-path.scene.xml": [
       "V14"
+    ],
+    "v16-fractal.scene.xml": [
+      "V16"
     ],
     "v2-outputs.scene.xml": [
       "V2"
@@ -1283,6 +1295,7 @@
     "crater.scene.xml": [],
     "ejecta-crater.scene.xml": [],
     "flock-upright.scene.xml": [],
+    "fractal.scene.xml": [],
     "fracture-contact-tuned.scene.xml": [],
     "fracture-contact.scene.xml": [],
     "fracture.scene.xml": [],
