@@ -35,6 +35,8 @@ pub mod pieces;
 pub mod prim;
 pub mod sampling;
 pub mod sequence;
+pub mod sky;
+pub mod subsurface;
 pub mod terrain;
 pub mod usdc;
 pub mod voxel;

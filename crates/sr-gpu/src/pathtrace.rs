@@ -51,6 +51,10 @@ pub struct PtMat {
     /// unit for each colour channel (from the attenuation colour and distance), then the albedo of the foam
     /// mixed into the surface (0 when none).
     pub attenuation: [f32; 4],
+    /// SREP 71 subsurface: the profile's shape parameter d per channel (scene units), the lobe's weight
+    pub sss: [f32; 4],
+    /// The subsurface albedo (linear), unused.
+    pub sss_color: [f32; 4],
 }
 
 /// Beer-Lambert coefficients per scene unit: the light left after `distance` units is `color`.
@@ -340,6 +344,15 @@ fn build_inner(scene: &Scene3, cache: &mut BuildCache, take: bool) -> (PtScene, 
                 a[3] = m.foam_mix.map_or(0.0, |f| f.albedo.clamp(0.0, 1.0));
                 a
             },
+            sss: {
+                let d = sr_3d::subsurface::shape_parameters(
+                    m.subsurface_radius,
+                    m.subsurface_radius_scale,
+                    m.subsurface_color,
+                );
+                [d[0], d[1], d[2], m.subsurface.clamp(0.0, 1.0)]
+            },
+            sss_color: [m.subsurface_color[0], m.subsurface_color[1], m.subsurface_color[2], 0.0],
         });
         if reused.is_some() {
             continue;
@@ -517,6 +530,8 @@ fn build_inner(scene: &Scene3, cache: &mut BuildCache, take: bool) -> (PtScene, 
             borders: [[0.0; 4]; 6],
             texture_params: [0.0; 4],
             attenuation: [0.0; 4],
+            sss: [0.0; 4],
+            sss_color: [0.0; 4],
         });
     }
     if s.pos.is_empty() {
@@ -1019,6 +1034,8 @@ struct Params {
     /// Global pixel origin (xy) and extent (zw) of the working tile.
     tile: [u32; 4],
     media: [u32; 4],
+    /// SREP 71 procedural sky (sr_3d::sky::Sky::uniforms); sky[1][3] is 1 when the dome is one
+    sky: [[f32; 4]; 5],
 }
 
 /// Compute pipelines of the shader variant with light grids.
@@ -1839,6 +1856,7 @@ pub(crate) fn render_cached(
         out: [scene.encode_srgb as u32 as f32, 0.0, 0.0, 0.0],
         tile: [tile.origin[0], tile.origin[1], tile.size[0], tile.size[1]],
         media,
+        sky: scene.env.as_ref().and_then(|e| e.sky).map(|s| s.uniforms()).unwrap_or([[0.0; 4]; 5]),
     };
 
     // the grids are built once, before the tiles

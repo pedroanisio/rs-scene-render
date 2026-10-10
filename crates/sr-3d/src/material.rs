@@ -62,6 +62,12 @@ pub struct MaterialParams {
     pub unevenness_seed: u32,
     /// The share of foam of each vertex (in its colour's alpha) mixes the material toward the foam's; none leaves the material as it is.
     pub foam_mix: Option<FoamMix>,
+    /// Subsurface scattering (SREP 71): the weight of the subsurface lobe in the diffuse base, its albedo (linear), its
+    /// mean free path in scene units and the per-channel scale of that path. See [`crate::subsurface`].
+    pub subsurface: f32,
+    pub subsurface_color: [f32; 3],
+    pub subsurface_radius: f32,
+    pub subsurface_radius_scale: [f32; 3],
 }
 
 impl Default for MaterialParams {
@@ -103,6 +109,11 @@ impl Default for MaterialParams {
             unevenness_scale: 8.0,
             unevenness_seed: 0,
             foam_mix: None,
+            subsurface: 0.0,
+            // #CCCCCC decoded
+            subsurface_color: [0.603_827_3; 3],
+            subsurface_radius: 10.0,
+            subsurface_radius_scale: [1.0, 0.5, 0.25],
         }
     }
 }

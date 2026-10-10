@@ -28,6 +28,8 @@ struct Frame {
     sh: array<vec4<f32>, 9>,
     // world → environment rotation of the dome
     env_rot: mat4x4<f32>,
+    // SREP 71 procedural sky (sr_3d::sky::Sky::uniforms); sky[1].w is 1 when the dome is one
+    sky: array<vec4<f32>, 5>,
 };
 
 struct Light {

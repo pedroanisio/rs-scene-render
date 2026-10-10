@@ -76,7 +76,7 @@ fn plane_of(
 fn scene(eng: &ThreeEngine, draws: Vec<Draw3>, dome: Option<f32>, sun: bool, eye: Vec3) -> Scene3 {
     let env = dome.map(|l| {
         let e = sr_3d::env::Equirect { width: 64, height: 32, rgb: vec![[l, l, l]; 64 * 32] };
-        Env3 { env: eng.upload_env(&e), intensity: 1.0, rotation: Mat4::IDENTITY, visible: true }
+        Env3 { env: eng.upload_env(&e), intensity: 1.0, rotation: Mat4::IDENTITY, visible: true, sky: None }
     });
     let lights = if sun {
         vec![Light3 {

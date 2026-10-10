@@ -436,6 +436,8 @@ pub struct Renderer {
     text: crate::text::TextCache,
     /// The current mesh key of each clay object (its old meshes are dropped when it changes).
     clay_keys: HashMap<Arc<str>, String>,
+    /// The visible procedural sky of the last frame without a 3D pass, by its key (SREP 71).
+    sky_bg: Option<(u64, Arc<Tex>)>,
     /// The surface of each voxels object between frames, by node id.
     voxel_surfaces: HashMap<(Arc<str>, Option<usize>), render_three::VoxelState>,
     glyph_tex: HashMap<u64, Option<Arc<Tex>>>,
@@ -1113,6 +1115,7 @@ impl Renderer {
             svgs: HashMap::new(),
             text: Default::default(),
             clay_keys: HashMap::new(),
+            sky_bg: None,
             voxel_surfaces: HashMap::new(),
             glyph_tex: HashMap::new(),
             burn_captions: None,
@@ -1694,6 +1697,108 @@ impl Renderer {
     }
 
     fn generator_texture(&mut self, plan: &mut Plan, p: &Program, g: &FrameGraph, gen: &m::GeneratorAsset) -> Arc<Tex> {
+        self.generator_texture_keyed(plan, p, g, gen).0
+    }
+
+    /// The picture of a generator asset at this frame as RGBA texels in the working representation (premultiplied),
+    /// with its key (the hash of everything it is drawn from) and size: a material map fed by a generator (SREP 71).
+    /// A generator that this frame is the first to need is drawn at once, rather than with the frame's other
+    /// generators, so that it can be read back.
+    fn generator_texels(
+        &mut self,
+        plan: &mut Plan,
+        p: &Program,
+        g: &FrameGraph,
+        gen: &m::GeneratorAsset,
+    ) -> (u64, [u32; 2], Vec<[f32; 4]>) {
+        let before = plan.gens.len();
+        let (tex, hash) = self.generator_texture_keyed(plan, p, g, gen);
+        if plan.gens.len() > before {
+            self.draw_generator_now(plan, before);
+        }
+        (hash, tex.size, self.fx.read_texels(&tex))
+    }
+
+    /// Draws `plan.gens[k]` now, in a submission of its own, with the paints planned so far.
+    fn draw_generator_now(&self, plan: &Plan, k: usize) {
+        use wgpu::util::DeviceExt;
+        let d = &self.gpu.device;
+        let buffer = |label: &str, bytes: &[u8], usage: wgpu::BufferUsages| {
+            let mut contents = bytes.to_vec();
+            contents.resize(contents.len().max(16).div_ceil(256) * 256, 0);
+            d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: &contents, usage })
+        };
+        let draws = buffer("gen draws", bytemuck::bytes_of(&Draw::default()), wgpu::BufferUsages::UNIFORM);
+        let masks = buffer("gen masks", bytemuck::bytes_of(&Mask::default()), wgpu::BufferUsages::STORAGE);
+        let edges = buffer("gen edges", &[0u8; 16], wgpu::BufferUsages::STORAGE);
+        let paints = buffer("gen paints", bytemuck::cast_slice(&plan.paints.paints), wgpu::BufferUsages::STORAGE);
+        let stops = buffer("gen stops", bytemuck::cast_slice(&plan.paints.stops), wgpu::BufferUsages::STORAGE);
+        let bg0 = d.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("gen frame"),
+            layout: &self.bgl0,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &draws,
+                        offset: 0,
+                        size: std::num::NonZeroU64::new(std::mem::size_of::<Draw>() as u64),
+                    }),
+                },
+                wgpu::BindGroupEntry { binding: 1, resource: masks.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: edges.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: paints.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: stops.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.samp) },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.samp_repeat) },
+                wgpu::BindGroupEntry { binding: 7, resource: self.globals.as_entire_binding() },
+            ],
+        });
+        let pair = d.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("gen backdrop+matte"),
+            layout: &self.bgl2,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&self.dummy.view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.dummy.view) },
+            ],
+        });
+        let gj = &plan.gens[k];
+        let mut enc = d.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("generator now") });
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("generator now"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &gj.target.view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.generator);
+            pass.set_bind_group(0, &bg0, &[0]);
+            pass.set_bind_group(1, &self.dummy.bind, &[]);
+            pass.set_bind_group(2, &pair, &[]);
+            pass.set_bind_group(3, &gj.bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        self.gpu.queue.submit([enc.finish()]);
+    }
+
+    /// [`Self::generator_texture`] with the key of its picture.
+    fn generator_texture_keyed(
+        &mut self,
+        plan: &mut Plan,
+        p: &Program,
+        g: &FrameGraph,
+        gen: &m::GeneratorAsset,
+    ) -> (Arc<Tex>, u64) {
         let key = gen.id.as_str();
         let el = g.elements.iter().find(|e| &*e.key == key);
         let num = |name: &str, d: f64| el.and_then(|e| e.props.get(name)).and_then(Value::as_num).unwrap_or(d);
@@ -1779,7 +1884,7 @@ impl Renderer {
         self.used.insert(format!("gen:{hash}"));
         if let Some(t) = self.generators.get(&hash) {
             plan.stats.cache_hits += 1;
-            return t.clone();
+            return (t.clone(), hash);
         }
         // from the pool, where an evicted generator texture goes: an animated generator is a new entry
         // every frame, and takes the texture of the one that left the cache
@@ -1798,7 +1903,7 @@ impl Renderer {
         });
         self.generators.insert(hash, target.clone());
         plan.gens.push(GenJob { target: target.clone(), bind });
-        target
+        (target, hash)
     }
 
     // ---------------------------------------------------------- planning
@@ -3440,6 +3545,12 @@ impl Renderer {
             }
             _ => (src::PAINT, plan.paints.solid(&self.working, [0.0, 0.0, 0.0, 1.0]), self.dummy.clone()),
         };
+        // a visible procedural sky that no 3D pass draws takes the background's place (SREP 71)
+        let sky = self.sky_background(ctx, space);
+        let (kind, tex) = match &sky {
+            Some((t, _)) => (src::TEXTURE, t.clone()),
+            None => (kind, tex),
+        };
         let (_, first_vertex) = self.push_quad(
             plan,
             space,
@@ -3461,7 +3572,7 @@ impl Renderer {
         let hash = {
             let mut f = Fnv(0xcbf2_9ce4_8422_2325);
             f.value(&g.background);
-            h(&[f.0, hf(g.size[0]), hf(g.size[1]), elements_hash(&g.elements)])
+            h(&[f.0, hf(g.size[0]), hf(g.size[1]), elements_hash(&g.elements), sky.map_or(0, |s| s.1)])
         };
         cmds.push(Cmd {
             draw: (plan.draws.len() - 1) as u32,

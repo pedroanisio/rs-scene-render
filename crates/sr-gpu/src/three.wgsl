@@ -30,6 +30,10 @@ struct Material {
     finish: vec4<f32>,
     sampling: array<vec4<u32>, 6>,
     borders: array<vec4<f32>, 6>,
+    // SREP 71 subsurface: shape parameter d per channel (scene units), weight of the lobe
+    sss: vec4<f32>,
+    // subsurface albedo (linear rgb), unused
+    sss_color: vec4<f32>,
 };
 
 @group(1) @binding(0) var<uniform> mat: Material;
@@ -284,7 +288,22 @@ struct Surface {
     f90: vec3<f32>,
     occlusion: f32,
     specular_weight: f32,
+    // curvature of the surface (1 / radius, scene units) for the subsurface lobe
+    curv: f32,
 };
+
+// The weight of the subsurface lobe (SREP 71), 0 when the material has none.
+fn sss_weight() -> f32 {
+    return select(mat.sss.w, 0.0, PLAIN_MATERIAL);
+}
+
+// The diffuse albedo for uniform light (ambient and image-based): the profile spreads a uniform irradiance unchanged,
+// so the subsurface lobe reflects its own albedo.
+fn uniform_albedo(s: Surface) -> vec3<f32> {
+    let w = sss_weight();
+    if (w > 0.0) { return mix(s.albedo, mat.sss_color.rgb, w); }
+    return s.albedo;
+}
 
 fn luma(c: vec3<f32>) -> f32 {
     return dot(c, vec3(0.2126, 0.7152, 0.0722));
@@ -299,7 +318,7 @@ fn shade_light(li: Light, s: Surface, ty: u32) -> vec3<f32> {
         // as a uniform environment of this radiance (split sum, as the dome), in proportion to metalness
         let nv = max(dot(s.n, s.v), 1e-3);
         let lut = textureSampleLevel(brdf_lut, clamp_smp, vec2(nv, s.rough), 0.0).rg;
-        let diff = s.albedo * (1.0 - s.metallic) * (1.0 - mat.p2.z) * li.flags.x;
+        let diff = uniform_albedo(s) * (1.0 - s.metallic) * (1.0 - mat.p2.z) * li.flags.x;
         let spec = (s.f0 * lut.x + s.f90 * lut.y) * s.specular_weight * s.metallic * li.flags.y;
         return (diff + spec) * radiance * s.occlusion;
     }
@@ -337,7 +356,14 @@ fn shade_light(li: Light, s: Surface, ty: u32) -> vec3<f32> {
         radiance = radiance * ies_factor(li, l);
     }
     let nl = dot(s.n, l);
-    if (nl <= 0.0) { return vec3(0.0); }
+    let sss = sss_weight();
+    if (nl <= 0.0) {
+        if (sss <= 0.0) { return vec3(0.0); }
+        // past the terminator only the subsurface lobe reflects (SREP 71)
+        let kd = (vec3(1.0) - s.f0) * (1.0 - s.metallic) * (1.0 - mat.p2.z);
+        let lobe = sss_lobe3(nl, s.curv, mat.sss.xyz);
+        return sss * kd * mat.sss_color.rgb / PI * lobe * radiance * li.flags.x;
+    }
     let nv = max(dot(s.n, s.v), 1e-4);
     let h = normalize(l + s.v);
     let nh = max(dot(s.n, h), 0.0);
@@ -355,16 +381,27 @@ fn shade_light(li: Light, s: Surface, ty: u32) -> vec3<f32> {
     }
     let kd = (vec3(1.0) - f) * (1.0 - s.metallic) * (1.0 - mat.p2.z);
     var out = (kd * s.albedo / PI) * li.flags.x + spec * s.specular_weight * li.flags.y;
+    // the layers above the base scale it
+    var layers = 1.0;
     // sheen
     if (!PLAIN_MATERIAL && max(mat.sheen.r, max(mat.sheen.g, mat.sheen.b)) > 0.0) {
-        out = out * (1.0 - 0.157 * max(mat.sheen.r, max(mat.sheen.g, mat.sheen.b)));
+        layers = 1.0 - 0.157 * max(mat.sheen.r, max(mat.sheen.g, mat.sheen.b));
+        out = out * layers;
         out += mat.sheen.rgb * d_charlie(nh, mat.sheen.w) * v_neubelt(nl, nv);
     }
     // clearcoat on top
     if (!PLAIN_MATERIAL && mat.p2.x > 0.0) {
         let ca = max(mat.p2.y * mat.p2.y, 1e-3);
         let fc = f_schlick(vec3(0.04), vec3(1.0), vh).x * mat.p2.x;
+        layers = layers * (1.0 - fc);
         out = out * (1.0 - fc) + vec3(fc * d_ggx(nh, ca) * v_smith(nl, nv, ca));
+    }
+    if (sss > 0.0) {
+        // SREP 71: the diffuse base is (1 − w) · Lambert + w · the subsurface lobe
+        let lambert = kd * s.albedo / PI * nl;
+        let kd_sss = (vec3(1.0) - s.f0) * (1.0 - s.metallic) * (1.0 - mat.p2.z);
+        let lobe = kd_sss * mat.sss_color.rgb / PI * sss_lobe3(nl, s.curv, mat.sss.xyz);
+        return out * radiance * nl + (lobe - lambert) * sss * layers * radiance * li.flags.x;
     }
     return out * radiance * nl;
 }
@@ -428,6 +465,8 @@ fn surface(i: VOut, front: bool) -> Surface {
     var s: Surface;
     // the screen footprint of a pixel in the object's scene units (derivatives outside any branch)
     let footprint = max(length(fwidth(i.local)), 1e-6);
+    // the change of the normal across the pixel over the distance it spans: 1 / ρ on a sphere of radius ρ
+    s.curv = length(fwidth(normalize(i.normal))) / max(length(fwidth(i.world)), 1e-6);
     let fade = clamp(vec3(mat.finish.y, mat.finish.y * 0.5, mat.finish.y * 0.25) / footprint - vec3(1.0), vec3(0.0), vec3(1.0));
     let bits = select(u32(mat.aniso.w), 0u, PLAIN_MATERIAL);
     var base = mat.base_color * i.color;
@@ -702,7 +741,7 @@ fn fs_main(i: VOut, @builtin(front_facing) front: bool) -> FOut {
         let pre = env_sample(r, s.rough * (fr.params2.w - 1.0));
         let spec = pre * (s.f0 * lut.x + s.f90 * lut.y) * s.specular_weight;
         let fr_avg = s.f0 + (1.0 - s.f0) * pow(1.0 - nv, 5.0);
-        let diff = sh_irradiance(s.n) * s.albedo * (1.0 - s.metallic) * (1.0 - mat.p2.z) * (vec3(1.0) - fr_avg);
+        let diff = sh_irradiance(s.n) * uniform_albedo(s) * (1.0 - s.metallic) * (1.0 - mat.p2.z) * (vec3(1.0) - fr_avg);
         var ibl = (diff + spec) * s.occlusion * ao;
         if (!PLAIN_MATERIAL && mat.p2.x > 0.0) {
             let fc = (0.04 + 0.96 * pow(1.0 - nv, 5.0)) * mat.p2.x;
@@ -783,5 +822,9 @@ fn vs_full(@builtin(vertex_index) vi: u32) -> BgOut {
 fn fs_dome(i: BgOut) -> @location(0) vec4<f32> {
     let far = fr.inv_view_proj * vec4(i.ndc, 0.0001, 1.0);
     let dir = far.xyz / far.w - fr.eye.xyz;
+    if (fr.sky[1].w > 0.5) {
+        // a procedural sky (SREP 71), exact per pixel
+        return vec4(sky_radiance(normalize((fr.env_rot * vec4(dir, 0.0)).xyz), fr.sky) * fr.params.w, 1.0);
+    }
     return vec4(textureSampleLevel(sky_tex, env_smp, env_uv(dir), 0.0).rgb * fr.params.w, 1.0);
 }

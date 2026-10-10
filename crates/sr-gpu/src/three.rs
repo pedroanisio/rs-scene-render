@@ -254,6 +254,9 @@ pub struct Env3 {
     /// Environment → world rotation: the dome's yaw, pitch and roll.
     pub rotation: Mat4,
     pub visible: bool,
+    /// A procedural sky (SREP 71): `env` is its baked image for lighting, and the visible background and the path
+    /// tracer evaluate the sky itself.
+    pub sky: Option<sr_3d::sky::Sky>,
 }
 
 /// One splat cloud.
@@ -437,6 +440,7 @@ struct FrameU {
     fx: [f32; 4],
     sh: [[f32; 4]; 9],
     env_rot: [[f32; 4]; 4],
+    sky: [[f32; 4]; 5],
 }
 
 #[repr(C)]
@@ -470,6 +474,10 @@ struct MaterialU {
     finish: [f32; 4],
     sampling: [[u32; 4]; 6],
     borders: [[f32; 4]; 6],
+    /// SREP 71 subsurface: the profile's shape parameter d per channel (scene units), the lobe's weight
+    sss: [f32; 4],
+    /// the subsurface albedo (linear), unused
+    sss_color: [f32; 4],
 }
 
 #[repr(C)]
@@ -553,6 +561,12 @@ fn material_u(m: &MaterialParams, maps: &Maps) -> MaterialU {
         finish: [m.unevenness, m.unevenness_scale.max(1e-6), f32::from_bits(m.unevenness_seed), 0.0],
         sampling: std::array::from_fn(|i| [maps[i].as_ref().and_then(|t| t.sampler).map_or(0, |s| s.flags()), 0, 0, 0]),
         borders: std::array::from_fn(|i| maps[i].as_ref().and_then(|t| t.sampler).map_or([0.0; 4], |s| s.border)),
+        sss: {
+            let d =
+                sr_3d::subsurface::shape_parameters(m.subsurface_radius, m.subsurface_radius_scale, m.subsurface_color);
+            [d[0], d[1], d[2], m.subsurface]
+        },
+        sss_color: [m.subsurface_color[0], m.subsurface_color[1], m.subsurface_color[2], 0.0],
     }
 }
 
@@ -576,6 +590,7 @@ fn plain_material(draw: &Draw3) -> bool {
         && m.sheen_color == [0.0; 3]
         && m.iridescence == 0.0
         && m.transmission == 0.0
+        && m.subsurface == 0.0
 }
 
 /// GPU state of the 3D renderer.
@@ -1980,6 +1995,7 @@ impl ThreeEngine {
             ],
             sh,
             env_rot: env.map(|e| e.rotation.transpose()).unwrap_or(Mat4::IDENTITY).to_cols_array_2d(),
+            sky: env.and_then(|e| e.sky).map(|s| s.uniforms()).unwrap_or([[0.0; 4]; 5]),
         };
         let buf = |data: &[u8], usage: wgpu::BufferUsages, label: &str| {
             d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: data, usage })
@@ -3581,6 +3597,16 @@ fn fs_conversion_probe(i: PostOut) -> @location(0) vec4<f32> {{
         assert!(!bounds_outside_clip(lo, hi, Mat4::from_translation(Vec3::splat(f32::INFINITY)), perspective));
         let huge = Mat4::from_translation(Vec3::splat(1e20));
         assert!(!bounds_outside_clip(lo, hi, huge, huge.inverse()));
+    }
+
+    #[test]
+    fn the_shared_subsurface_quantiles_are_sr_3d_s() {
+        // sampling.wgsl's SSS_Q is sr_3d::subsurface::QUANTILES (the shaders of both 3D renderers include it)
+        let src = include_str!("sampling.wgsl");
+        let start = src.find("const SSS_Q = array<f32, 16>(").expect("SSS_Q") + "const SSS_Q = array<f32, 16>(".len();
+        let end = start + src[start..].find(')').unwrap();
+        let q: Vec<f32> = src[start..end].split(',').map(|v| v.trim().parse().unwrap()).collect();
+        assert_eq!(q.as_slice(), sr_3d::subsurface::QUANTILES.as_slice());
     }
 
     #[test]

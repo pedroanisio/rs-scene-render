@@ -531,6 +531,60 @@ impl Renderer {
         }
     }
 
+    /// A material map read from a generator or image asset named `#id` (SREP 71, Semantics 3). An image asset is its
+    /// file. A generator is its picture at its declared size and the frame's time, turned into the 8-bit display-sRGB
+    /// pixels an image file has, so that a colour slot decodes it to linear and a data slot reads its code values, as
+    /// for a file.
+    fn asset_map_texture(
+        &mut self,
+        plan: &mut Plan,
+        ctx: &Ctx,
+        asset: &str,
+        srgb: bool,
+        owner: &str,
+    ) -> Option<Arc<crate::three::TexGpu>> {
+        let Some((a, doc)) = crate::text::asset_of(ctx.p, asset) else {
+            plan.stats.errors.push(format!("{owner}: material map #{asset} names no asset"));
+            return None;
+        };
+        match a {
+            m::AssetsChild::Image(img) => {
+                let base = ctx.p.base_dirs.get(doc).cloned().unwrap_or_default();
+                self.map_texture(plan, &base, &img.src, srgb, owner)
+            }
+            m::AssetsChild::Generator(gen) => {
+                let gen = gen.clone();
+                let (hash, [w, h], texels) = self.generator_texels(plan, ctx.p, ctx.g, &gen);
+                let prefix = format!("genmap:{}|{srgb}|", gen.id);
+                let key = format!("{prefix}{hash:016x}");
+                if let Some(t) = self.three_engine().textures.get(&key) {
+                    return Some(t.clone());
+                }
+                let mut rgba = Vec::with_capacity(texels.len() * 4);
+                for px in &texels {
+                    let a = px[3].clamp(0.0, 1.0);
+                    let straight = if a > 0.0 { [px[0] / a, px[1] / a, px[2] / a] } else { [0.0; 3] };
+                    let d = self.working.to_display_srgb(straight.map(|v| v as f64));
+                    rgba.extend(d.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8));
+                    rgba.push((a * 255.0).round() as u8);
+                }
+                let engine = self.three_engine();
+                // an animated generator is a new picture every frame: keep only the current one
+                engine.textures.retain(|k, _| !k.starts_with(&prefix));
+                let t = engine.upload_rgba8(w, h, &rgba, srgb);
+                engine.textures.insert(key, t.clone());
+                Some(t)
+            }
+            other => {
+                plan.stats.errors.push(format!(
+                    "{owner}: material map #{asset} is a {} asset, not a generator or an image",
+                    other.element_name()
+                ));
+                None
+            }
+        }
+    }
+
     /// A document material (animated values at this frame) with its maps.
     fn document_material(&mut self, plan: &mut Plan, ctx: &Ctx, id: &str) -> Option<(MaterialParams, Maps)> {
         let mat = ctx.p.scene.materials.as_ref()?.materials.iter().find(|m| m.id == id)?;
@@ -586,6 +640,17 @@ impl Renderer {
             unevenness_seed: a.num("unevennessSeed", 0.0) as u32,
             displacement_scale: a.num("displacementScale", 0.0) as f32,
             uv_scale: [a.num("uvScaleX", 1.0) as f32, a.num("uvScaleY", 1.0) as f32],
+            subsurface: a.num("subsurface", 0.0) as f32,
+            subsurface_color: {
+                let c = col(self, "subsurfaceColor", [0.8, 0.8, 0.8, 1.0]);
+                [c[0], c[1], c[2]]
+            },
+            subsurface_radius: a.num("subsurfaceRadius", 10.0) as f32,
+            subsurface_radius_scale: a
+                .nums("subsurfaceRadiusScale")
+                .filter(|v| v.len() == 3)
+                .map(|v| [v[0] as f32, v[1] as f32, v[2] as f32])
+                .unwrap_or([1.0, 0.5, 0.25]),
             ..Default::default()
         };
         let mut maps: Maps = Default::default();
@@ -598,7 +663,11 @@ impl Renderer {
             (5, "displacementMap", false),
         ] {
             if let Some(uri) = a.str(name) {
-                maps[slot] = self.map_texture(plan, &base, &uri, srgb, id);
+                maps[slot] = match uri.trim().strip_prefix('#') {
+                    // a generator or image asset of the document (SREP 71)
+                    Some(asset) => self.asset_map_texture(plan, ctx, asset, srgb, id),
+                    None => self.map_texture(plan, &base, &uri, srgb, id),
+                };
             }
         }
         if let Some(uri) = a.str("materialX") {
@@ -2138,6 +2207,27 @@ impl Renderer {
             let world = Self::pose_world(ctx.g, &ls.lights, l, &a, 0);
             let dir = world.transform_vector3(Vec3::Z).normalize();
             let right = world.transform_vector3(Vec3::X).normalize();
+            if kind == "dome" && a.str("sky").as_deref() == Some("gradient") {
+                // a procedural sky (SREP 71): baked for image-based lighting; drawn and path traced from its formula
+                let sky = self.dome_sky(&a);
+                let key = format!("sky:{:?}", sky.uniforms());
+                let e = match self.three_engine().envs.get(&key) {
+                    Some(e) => e.clone(),
+                    None => {
+                        let e = self.three_engine().upload_env(&sky.equirect(SKY_BAKE_WIDTH));
+                        self.three_engine().envs.insert(key, e.clone());
+                        e
+                    }
+                };
+                env = Some(Env3 {
+                    env: e,
+                    intensity: scale * color[1].max(color[0]).max(color[2]),
+                    rotation: Mat4::from_quat(world.to_scale_rotation_translation().1),
+                    visible: flag(&a, "environmentVisible", false),
+                    sky: Some(sky),
+                });
+                continue;
+            }
             if kind == "dome" {
                 let Some(uri) = a.str("environment") else {
                     // a dome without an image lights uniformly, like an ambient light
@@ -2176,6 +2266,7 @@ impl Renderer {
                         intensity: scale * color[1].max(color[0]).max(color[2]),
                         rotation: Mat4::from_quat(world.to_scale_rotation_translation().1),
                         visible: flag(&a, "environmentVisible", false),
+                        sky: None,
                     });
                 }
                 continue;
@@ -2222,6 +2313,95 @@ impl Renderer {
             out.push(lt);
         }
         (out, env)
+    }
+
+    /// The procedural sky of a dome light at this frame (SREP 71, Semantics 2), in linear working values.
+    fn dome_sky(&self, a: &Attrs) -> sr_3d::sky::Sky {
+        let c3 = |name: &str, d: u32| {
+            let lit = [(d >> 16) & 255, (d >> 8) & 255, d & 255].map(|v| v as f64 / 255.0);
+            let c = self.working_color(a.paint(name), self.literal_linear([lit[0], lit[1], lit[2], 1.0]));
+            [c[0], c[1], c[2]]
+        };
+        let sun = c3("sunColor", 0xFFFFFF).map(|c| c * a.num("sunIntensity", 0.0) as f32);
+        sr_3d::sky::Sky::new(
+            c3("skyZenith", 0x3A6EA5),
+            c3("skyHorizon", 0xC8D8E8),
+            c3("skyGround", 0x4A4038),
+            a.num("skyExponent", 0.5) as f32,
+            a.num("sunAzimuth", 0.0),
+            a.num("sunElevation", 45.0),
+            a.num("sunSize", 0.53),
+            sun,
+        )
+    }
+
+    /// The visible procedural sky of a frame that has no 3D pass to draw it (SREP 71): an empty composition under a
+    /// dome with `sky="gradient"` and `environmentVisible="true"`. The sky is evaluated per pixel along the frame
+    /// camera's rays, as the 3D pass's background is, scaled by the dome's intensity and the camera's exposure, and
+    /// stored in the working representation. With its cache key. Lens distortion and depth of field, which have no
+    /// effect on a sky at infinity but its distortion, are not applied here.
+    pub(super) fn sky_background(&mut self, ctx: &Ctx, space: &Space) -> Option<(Arc<resources::Tex>, u64)> {
+        let g = ctx.g;
+        if (0..g.nodes.len()).any(|j| sr_eval::draws_in_3d(g.nodes[j].kind) && visible3(g, j)) {
+            return None;
+        }
+        let ls = ctx.p.scene.lights.as_ref()?;
+        let l = ls.lights.iter().find(|l| l.r#type == m::LightKind::Dome && l.sky == m::Sky::Gradient)?;
+        let a = Attrs { e: l as &dyn Element, props: element_props(g, &l.id) };
+        if !flag(&a, "environmentVisible", false) {
+            return None;
+        }
+        let sky = self.dome_sky(&a);
+        let mut color = self.working_color(a.paint("color"), self.literal_linear([1.0; 4]));
+        if let Some(k) = a.opt("colorTemperature") {
+            let w = self.lin_srgb(sr_3d::light::kelvin_to_rgb(k));
+            for c in 0..3 {
+                color[c] *= w[c];
+            }
+        }
+        let scale = a.num("intensity", 1.0) as f32 * 2f32.powf(a.num("exposure", 0.0) as f32);
+        let intensity = scale * color[1].max(color[0]).max(color[2]);
+        let world = Self::pose_world(g, &ls.lights, l, &a, 0);
+        let to_env = Mat4::from_quat(world.to_scale_rotation_translation().1).transpose();
+        let (cam, ex, cam_size) = self.camera3(g, ctx.p, [g.size[0] as f32, g.size[1] as f32]);
+        let vp = Self::clip_fix(space, cam_size) * cam.view_proj();
+        let inv = vp.inverse();
+        let [w, hgt] = space.size;
+        let key = h(&[
+            h(&sky.uniforms().iter().flatten().map(|v| v.to_bits() as u64).collect::<Vec<_>>()),
+            h(&inv.to_cols_array().map(|v| v.to_bits() as u64)),
+            h(&to_env.to_cols_array().map(|v| v.to_bits() as u64)),
+            (intensity * ex.exposure).to_bits() as u64,
+            ((w as u64) << 32) | hgt as u64,
+            self.working.linear as u64,
+        ]);
+        if let Some((k, t)) = &self.sky_bg {
+            if *k == key {
+                return Some((t.clone(), key));
+            }
+        }
+        let gain = intensity * ex.exposure;
+        let mut px = Vec::with_capacity((w * hgt) as usize);
+        for y in 0..hgt {
+            for x in 0..w {
+                let ndc = glam::Vec4::new(
+                    2.0 * (x as f32 + 0.5) / w as f32 - 1.0,
+                    1.0 - 2.0 * (y as f32 + 0.5) / hgt as f32,
+                    0.0001,
+                    1.0,
+                );
+                let far = inv * ndc;
+                let dir = far.truncate() / far.w - cam.eye;
+                let d = to_env.transform_vector3(dir).normalize_or_zero();
+                let c = sky.radiance(d) * gain;
+                let st = self.working.store([c.x as f64, c.y as f64, c.z as f64, 1.0]);
+                px.push([st[0] as f32, st[1] as f32, st[2] as f32, 1.0]);
+            }
+        }
+        let decoded = resources::Decoded { levels: vec![(w, hgt, px)], note: None };
+        let t = Arc::new(resources::upload(&self.gpu.device, &self.gpu.queue, &self.bgl1, &decoded, "sky"));
+        self.sky_bg = Some((key, t.clone()));
+        Some((t, key))
     }
 
     /// Applies a light's transform constraints: look-at aims it, copy-position moves it to the
@@ -3172,6 +3352,9 @@ impl Renderer {
         self.frame_three = None;
     }
 }
+
+/// Width of the image a procedural sky is baked into for image-based lighting (the lighting chain is at most 512 wide).
+const SKY_BAKE_WIDTH: u32 = 512;
 
 fn visible3(g: &FrameGraph, j: usize) -> bool {
     g.nodes[j].draw && flag(&attrs(&g.nodes[j]), "visible", true)

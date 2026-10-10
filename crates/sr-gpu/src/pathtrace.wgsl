@@ -30,6 +30,8 @@ struct Params {
     tile: vec4<u32>,
     // Packed medium row offset, domain count, conservative sample budget, reserved.
     media: vec4<u32>,
+    // SREP 71 procedural sky (sr_3d::sky::Sky::uniforms); sky[1].w is 1 when the dome is one
+    sky: array<vec4<f32>, 5>,
 };
 
 struct Mat {
@@ -42,6 +44,10 @@ struct Mat {
     borders: array<vec4<f32>, 6>,
     // absorption coefficient per unit inside the enclosed medium (rgb)
     attenuation: vec4<f32>,
+    // SREP 71 subsurface: shape parameter d per channel (scene units), weight
+    sss: vec4<f32>,
+    // subsurface albedo (linear rgb), unused
+    sss_color: vec4<f32>,
 };
 
 struct Node {
@@ -291,9 +297,14 @@ fn env_radiance(d: vec3<f32>, diffuse: vec3<f32>, specular: vec3<f32>) -> vec3<f
     var c = vec3(0.0);
     if (pp.env.x > 0.5) {
         let r = normalize((pp.env_rot * vec4(d, 0.0)).xyz);
-        let u = (atan2(r.x, r.z) + PI) / (2.0 * PI);
-        let v = acos(clamp(-r.y, -1.0, 1.0)) / PI;
-        c = textureSampleLevel(env_tex, smp, vec2(u, v), 0.0).rgb * pp.env.y;
+        if (pp.sky[1].w > 0.5) {
+            // a procedural sky (SREP 71), from its formula
+            c = sky_radiance(r, pp.sky) * pp.env.y;
+        } else {
+            let u = (atan2(r.x, r.z) + PI) / (2.0 * PI);
+            let v = acos(clamp(-r.y, -1.0, 1.0)) / PI;
+            c = textureSampleLevel(env_tex, smp, vec2(u, v), 0.0).rgb * pp.env.y;
+        }
     }
     for (var li = 0u; li < u32(pp.ambient.w); li++) {
         let light = plights[li];
@@ -716,6 +727,16 @@ fn radiance(px: vec2<f32>, pix: u32, first: bool) -> vec4<f32> {
         }
         only_glass = false;
         if (bounce >= max_b) { break; }
+        // SREP 71: the subsurface lobe's weight, and the curvature of the hit triangle from its vertex normals
+        let sss = m.sss.w;
+        var curv = 0.0;
+        if (sss > 0.0) {
+            for (var e = 0u; e < 3u; e++) {
+                let e1 = (e + 1u) % 3u;
+                let dp = length(hit_position(hit, e1) - hit_position(hit, e));
+                curv += length(normalize(hit_normal(hit, e1)) - normalize(hit_normal(hit, e))) / max(dp, 1e-6) / 3.0;
+            }
+        }
         // next-event estimation toward every analytic light
         let nl_count = u32(pp.ambient.w);
         for (var li = 0u; li < nl_count; li++) {
@@ -725,25 +746,41 @@ fn radiance(px: vec2<f32>, pix: u32, first: bool) -> vec4<f32> {
             let ls = light_sample(lt, p);
             let l = ls.xyz;
             let nl = dot(n, l);
-            if (nl <= 0.0) { continue; }
+            if (nl <= 0.0 && sss <= 0.0) { continue; }
             let rad = light_radiance(lt, l, ls.w);
             if (max(rad.r, max(rad.g, rad.b)) <= 0.0) { continue; }
             var visible = 1.0;
             if (lt.size.y > 0.5 && m.extra.z > 0.5) { visible = visibility(p + ng * 1e-2, l, ls.w - 2e-2); }
             if (HAS_MEDIA && m.extra.z > 0.5) { visible *= volume_transmittance(p + ng * 1e-2, l, ls.w - 2e-2); }
-            var c = thr * bsdf(s, n, v, l, light_lobes(lt)) * nl * rad * visible;
+            var c = vec3(0.0);
+            if (sss > 0.0) {
+                // the diffuse base is (1 − w) · Lambert + w · the subsurface lobe, which reaches past the terminator
+                let lobes = light_lobes(lt);
+                var f = vec3(0.0);
+                if (nl > 0.0) {
+                    f = bsdf(s, n, v, l, vec2(0.0, lobes.y)) * nl + bsdf(s, n, v, l, vec2(lobes.x, 0.0)) * nl * (1.0 - sss);
+                }
+                let kd_sss = (vec3(1.0) - s.f0) * (1.0 - s.metallic) * (1.0 - s.trans);
+                f += kd_sss * m.sss_color.rgb / PI * sss_lobe3(nl, curv, m.sss.xyz) * sss * lobes.x;
+                c = thr * f * rad * visible;
+            } else {
+                c = thr * bsdf(s, n, v, l, light_lobes(lt)) * nl * rad * visible;
+            }
             // clamp rare fireflies from indirect paths
             if (bounce > 0u) { c = min(c, vec3(20.0)); }
             col += c;
         }
-        // continue the path by sampling the BSDF
-        let l = sample_dir(s, n, v);
-        let pdf = pdf_of(s, n, v, l);
+        // continue the path by sampling the BSDF; light arriving from all around reaches the subsurface lobe
+        // with its own albedo (a uniform irradiance spreads unchanged)
+        var sc = s;
+        if (sss > 0.0) { sc.albedo = mix(s.albedo, m.sss_color.rgb, sss); }
+        let l = sample_dir(sc, n, v);
+        let pdf = pdf_of(sc, n, v, l);
         let nl = dot(n, l);
         if (pdf <= 1e-8 || nl <= 0.0) { break; }
         let occlusion = 1.0 + m.texture_params.w * (map_sample(m.maps[3], uv[3], m.borders[3]).r - 1.0);
-        let diffuse = bsdf(s, n, v, l, vec2(1.0, 0.0));
-        let specular = bsdf(s, n, v, l, vec2(0.0, 1.0));
+        let diffuse = bsdf(sc, n, v, l, vec2(1.0, 0.0));
+        let specular = bsdf(sc, n, v, l, vec2(0.0, 1.0));
         let total = diffuse + specular;
         ambient_diffuse = diffuse / max(total, vec3(1e-20));
         ambient_specular = specular / max(total, vec3(1e-20));
