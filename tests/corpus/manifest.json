@@ -515,6 +515,24 @@
     "msq4.scene.xml": [
       "MSQ4"
     ],
+    "mtx1-basecolormap.scene.xml": [
+      "MTX1-baseColorMap"
+    ],
+    "mtx1-displacementmap.scene.xml": [
+      "MTX1-displacementMap"
+    ],
+    "mtx1-emissivemap.scene.xml": [
+      "MTX1-emissiveMap"
+    ],
+    "mtx1-metallicroughnessmap.scene.xml": [
+      "MTX1-metallicRoughnessMap"
+    ],
+    "mtx1-normalmap.scene.xml": [
+      "MTX1-normalMap"
+    ],
+    "mtx1-occlusionmap.scene.xml": [
+      "MTX1-occlusionMap"
+    ],
     "ocean-density-zero.scene.xml": [
       "S06"
     ],
@@ -1049,6 +1067,12 @@
       "S10",
       "R54"
     ],
+    "sky1-not-dome.scene.xml": [
+      "SKY1"
+    ],
+    "sky2-environment.scene.xml": [
+      "SKY2"
+    ],
     "solid-colliders-blob.scene.xml": [
       "P3D6",
       "PYRO8"
@@ -1334,6 +1358,7 @@
     "repeat-points-neutral-steps.scene.xml": [],
     "repeat-points.scene.xml": [],
     "solid-colliders.scene.xml": [],
+    "srep71-subsurface-sky-maps.scene.xml": [],
     "stroke-text.scene.xml": [],
     "text3d-tracking.scene.xml": [],
     "thermal-volume.scene.xml": [],

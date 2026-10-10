@@ -302,7 +302,9 @@ fn scene_inputs(
                 continue;
             }
             if let Some(sr_model::element::AttrValue::Str(s)) = e.get_attr(attr) {
-                add(&s);
+                if !sr_model::assets::is_document_reference(e.element_name(), attr, &s) {
+                    add(&s);
+                }
             }
         }
     });

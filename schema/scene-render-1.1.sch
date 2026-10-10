@@ -798,4 +798,40 @@
       <sch:assert id="PAR2" test="(@primitive='parametric') = (count(parametricSurface) = 1) and (@primitive='heightfield') = (count(heightfield) = 1)">primitive="parametric" has exactly one parametricSurface and primitive="heightfield" exactly one heightfield; no other primitive has either.</sch:assert>
     </sch:rule>
   </sch:pattern>
+  <sch:pattern id="p-srep71">
+    <sch:rule context="lights/light[@sky and @sky != 'none']">
+      <sch:assert id="SKY1" test="@type='dome'">sky applies to dome lights only.</sch:assert>
+      <sch:assert id="SKY2" test="not(@environment)">a dome has either an environment image or a procedural sky, not both.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
+  <sch:pattern id="p-srep71-baseColorMap">
+    <sch:rule context="material[starts-with(@baseColorMap, '#')]">
+      <sch:assert id="MTX1-baseColorMap" test="/scene/assets/generator[@id = substring(current()/@baseColorMap, 2)] or /scene/assets/image[@id = substring(current()/@baseColorMap, 2)]">a material map that starts with # names a generator or image asset of the document.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
+  <sch:pattern id="p-srep71-normalMap">
+    <sch:rule context="material[starts-with(@normalMap, '#')]">
+      <sch:assert id="MTX1-normalMap" test="/scene/assets/generator[@id = substring(current()/@normalMap, 2)] or /scene/assets/image[@id = substring(current()/@normalMap, 2)]">a material map that starts with # names a generator or image asset of the document.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
+  <sch:pattern id="p-srep71-metallicRoughnessMap">
+    <sch:rule context="material[starts-with(@metallicRoughnessMap, '#')]">
+      <sch:assert id="MTX1-metallicRoughnessMap" test="/scene/assets/generator[@id = substring(current()/@metallicRoughnessMap, 2)] or /scene/assets/image[@id = substring(current()/@metallicRoughnessMap, 2)]">a material map that starts with # names a generator or image asset of the document.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
+  <sch:pattern id="p-srep71-occlusionMap">
+    <sch:rule context="material[starts-with(@occlusionMap, '#')]">
+      <sch:assert id="MTX1-occlusionMap" test="/scene/assets/generator[@id = substring(current()/@occlusionMap, 2)] or /scene/assets/image[@id = substring(current()/@occlusionMap, 2)]">a material map that starts with # names a generator or image asset of the document.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
+  <sch:pattern id="p-srep71-emissiveMap">
+    <sch:rule context="material[starts-with(@emissiveMap, '#')]">
+      <sch:assert id="MTX1-emissiveMap" test="/scene/assets/generator[@id = substring(current()/@emissiveMap, 2)] or /scene/assets/image[@id = substring(current()/@emissiveMap, 2)]">a material map that starts with # names a generator or image asset of the document.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
+  <sch:pattern id="p-srep71-displacementMap">
+    <sch:rule context="material[starts-with(@displacementMap, '#')]">
+      <sch:assert id="MTX1-displacementMap" test="/scene/assets/generator[@id = substring(current()/@displacementMap, 2)] or /scene/assets/image[@id = substring(current()/@displacementMap, 2)]">a material map that starts with # names a generator or image asset of the document.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
 </sch:schema>

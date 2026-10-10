@@ -183,6 +183,14 @@ pub fn is_output_side(element: &str, attr: &str) -> bool {
     (element, attr) == ("output", "report")
 }
 
+/// Whether `value` of `element/@attr` names something of the document rather than a file: a material map that begins
+/// with `#` reads the generator or image asset with that id (SREP 71, rule MTX1).
+pub fn is_document_reference(element: &str, attr: &str, value: &str) -> bool {
+    element == "material"
+        && crate::rules::MATERIAL_MAP_RULES.iter().any(|(a, _)| *a == attr)
+        && value.trim_start().starts_with('#')
+}
+
 /// Verifies every input file of `doc`, resolving relative references
 /// against `base_dir`, and appends diagnostics.
 pub fn verify(doc: &Document<'_>, base_dir: &Path, out: &mut Vec<Diagnostic>) {
@@ -206,6 +214,9 @@ pub fn verify(doc: &Document<'_>, base_dir: &Path, out: &mut Vec<Diagnostic>) {
                 continue;
             }
             let Some(value) = n.attribute(attr) else { continue };
+            if is_document_reference(name, attr, value) {
+                continue;
+            }
             if name == "volume" && n.attribute("format") == Some("srvseq") && attr == "src" {
                 match resolve(value, base_dir) {
                     Resolved::Local(path) => {

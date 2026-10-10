@@ -244,6 +244,8 @@ struct Sets<'a> {
     dynamic_pyro_geometry: HashSet<&'a str>,
     geo_assets: Vec<&'a str>,
     image_assets: HashSet<&'a str>,
+    /// `@id` of every `/scene/assets/generator`.
+    generator_assets: HashSet<&'a str>,
     layered_images: HashSet<&'a str>,
     /// Image, image sequence, video and generator assets (sprites).
     sprite_assets: HashSet<&'a str>,
@@ -373,6 +375,9 @@ fn build_sets<'a>(scene: Option<Node<'a, '_>>) -> Sets<'a> {
             s.assets.insert(i);
             if is(a, "image") || is(a, "imageSequence") || is(a, "video") || is(a, "generator") {
                 s.sprite_assets.insert(i);
+            }
+            if is(a, "generator") {
+                s.generator_assets.insert(i);
             }
             if is(a, "image") {
                 s.image_assets.insert(i);
@@ -506,6 +511,17 @@ fn non_decreasing(n: Node, child: &str, attr: &str) -> bool {
 }
 
 // ------------------------------------------------------------------ evaluation
+
+/// The material map attributes and their SREP 71 rule ids: a value that begins with `#` names a generator or image
+/// asset of the document.
+pub const MATERIAL_MAP_RULES: [(&str, &str); 6] = [
+    ("baseColorMap", "MTX1-baseColorMap"),
+    ("normalMap", "MTX1-normalMap"),
+    ("metallicRoughnessMap", "MTX1-metallicRoughnessMap"),
+    ("occlusionMap", "MTX1-occlusionMap"),
+    ("emissiveMap", "MTX1-emissiveMap"),
+    ("displacementMap", "MTX1-displacementMap"),
+];
 
 struct Eval<'a> {
     sets: Sets<'a>,
@@ -981,6 +997,22 @@ impl<'a> Eval<'a> {
             self.check(ok, n, "STP1", || {
                 "stepsPerFrame and prewarm apply to shader effects and stepping programs (SREP 69) only.".into()
             });
+        }
+        // SREP 71 (p-srep71 and one pattern per map attribute)
+        if local == "light" && parent_is("lights") && a("sky").is_some_and(|v| v != "none") {
+            self.check(a("type") == Some("dome"), n, "SKY1", || "sky applies to dome lights only.".into());
+            self.check(a("environment").is_none(), n, "SKY2", || {
+                "a dome has either an environment image or a procedural sky, not both.".into()
+            });
+        }
+        if local == "material" {
+            for (attr, code) in MATERIAL_MAP_RULES {
+                let Some(id) = a(attr).and_then(|v| v.strip_prefix('#')) else { continue };
+                let ok = self.sets.generator_assets.contains(id) || self.sets.image_assets.contains(id);
+                self.check(ok, n, code, || {
+                    "a material map that starts with # names a generator or image asset of the document.".into()
+                });
+            }
         }
         if local == "audiogram" && parent_is("assets") {
             self.check(a("source").is_some_and(|id| self.sets.audio_tracks.contains(id)), n, "R54", || {

@@ -51,6 +51,8 @@ const HANDWRITTEN: &[(&str, &str)] = &[
     ("timecodeType", "crate::values::Timecode"),
     ("languageTagType", "crate::values::LanguageTag"),
     ("numberListType", "Vec<f64>"),
+    ("unitTripleType", "Vec<f64>"),
+    ("unitTripleType.base", "Vec<f64>"),
     ("colorListType", "Vec<crate::values::Color>"),
     ("audioRoleListType", "Vec<String>"),
     ("pointType", "crate::values::Point2"),
@@ -130,6 +132,8 @@ enum SKind {
         max_excl: Option<f64>,
         pattern: Option<String>,
         max_len: Option<usize>,
+        /// `xs:length`: characters, or items of a list base
+        len: Option<usize>,
     },
     Union(Vec<usize>),
     List(usize),
@@ -245,11 +249,21 @@ impl<'a, 'i> Parser<'a, 'i> {
         let body = xs_children(n).find(|c| local(*c) != "annotation").expect("empty simpleType");
         let kind = match local(body) {
             "restriction" => {
-                let base = self.type_ref(body.attribute("base").expect("restriction base"));
+                // a restriction names its base or holds it as an anonymous simple type (a list of fixed length)
+                let base = match body.attribute("base") {
+                    Some(b) => self.type_ref(b),
+                    None => {
+                        let inner = xs_children(body)
+                            .find(|c| local(*c) == "simpleType")
+                            .expect("restriction base or simpleType");
+                        self.simple_type(inner, format!("{name}.base"), None)
+                    }
+                };
                 let mut enums = Vec::new();
                 let (mut min_incl, mut max_incl, mut min_excl, mut max_excl) = (None, None, None, None);
                 let mut pattern = None;
                 let mut max_len = None;
+                let mut len = None;
                 for f in xs_children(body) {
                     let v = f.attribute("value").unwrap_or_default();
                     match local(f) {
@@ -263,11 +277,12 @@ impl<'a, 'i> Parser<'a, 'i> {
                             pattern = Some(v.to_string())
                         }
                         "maxLength" => max_len = Some(v.parse().unwrap()),
-                        "annotation" => {}
+                        "length" => len = Some(v.parse().unwrap()),
+                        "annotation" | "simpleType" => {}
                         other => panic!("unsupported facet {other} in {name}"),
                     }
                 }
-                SKind::Restr { base, enums, min_incl, max_incl, min_excl, max_excl, pattern, max_len }
+                SKind::Restr { base, enums, min_incl, max_incl, min_excl, max_excl, pattern, max_len, len }
             }
             "union" => {
                 let members = body
@@ -784,8 +799,8 @@ fn emit_tables(s: &Schema) -> String {
     for d in &s.simple {
         let kind = match &d.kind {
             SKind::Builtin(b) => format!("SimpleKind::Builtin(Builtin::{b})"),
-            SKind::Restr { base, enums, min_incl, max_incl, min_excl, max_excl, pattern, max_len } => format!(
-                "SimpleKind::Restriction(Restriction {{ base: {base}, enums: &{enums:?}, min_inclusive: {}, max_inclusive: {}, min_exclusive: {}, max_exclusive: {}, pattern: {}, max_length: {} }})",
+            SKind::Restr { base, enums, min_incl, max_incl, min_excl, max_excl, pattern, max_len, len } => format!(
+                "SimpleKind::Restriction(Restriction {{ base: {base}, enums: &{enums:?}, min_inclusive: {}, max_inclusive: {}, min_exclusive: {}, max_exclusive: {}, pattern: {}, max_length: {}, length: {} }})",
                 fmt_opt_f64(*min_incl),
                 fmt_opt_f64(*max_incl),
                 fmt_opt_f64(*min_excl),
@@ -795,6 +810,10 @@ fn emit_tables(s: &Schema) -> String {
                     None => "None".into(),
                 },
                 match max_len {
+                    Some(l) => format!("Some({l})"),
+                    None => "None".into(),
+                },
+                match len {
                     Some(l) => format!("Some({l})"),
                     None => "None".into(),
                 },

@@ -747,6 +747,21 @@ WARN_CASES += [
     ("inert-i16-streak-flock", ["INERT-I16"], lambda _: FLOCK_UPRIGHT.replace(' shape="disc"', '')),
 ]
 
+# SREP 71: subsurface, the procedural sky and generator-fed maps; no version gate (new attributes, neutral defaults)
+SREP71 = ('<scene version="1.6"><project width="64" height="64" fps="24" duration="1"/>'
+    '<assets><generator id="g" kind="noise" width="16" height="16"/><image id="im" src="../media/logo.png" width="16" height="16"/></assets>'
+    '<materials><material id="m" subsurface="0.5" subsurfaceColor="#E0F0D0FF" subsurfaceRadius="20" subsurfaceRadiusScale="1 0.5 0.25" {maps}/></materials>'
+    '<composition><object3D id="o" primitive="sphere" radius="20" x="32" y="32" material="m"/></composition>'
+    '<lights><light id="d" type="dome" sky="gradient" skyZenith="#2050A0" skyHorizon="#C0D0E0" skyGround="#403020" skyExponent="1" '
+    'sunAzimuth="10" sunElevation="5" sunSize="5" sunColor="#FF0000" sunIntensity="1" environmentVisible="true"/>{lights}</lights></scene>\n')
+VALID["srep71-subsurface-sky-maps"] = SREP71.format(maps='baseColorMap="#g" normalMap="#im" displacementMap="#g" displacementScale="2"', lights='')
+CASES += [
+    ("sky1-not-dome", ["SKY1"], lambda _: SREP71.format(maps='', lights='<light id="k" type="directional" sky="gradient"/>')),
+    ("sky2-environment", ["SKY2"], lambda _: SREP71.format(maps='', lights='').replace('environmentVisible="true"', 'environment="../media/studio.hdr"')),
+]
+for _attr in ["baseColorMap", "normalMap", "metallicRoughnessMap", "occlusionMap", "emissiveMap", "displacementMap"]:
+    CASES.append((f"mtx1-{_attr.lower()}", [f"MTX1-{_attr}"], lambda _, a=_attr: SREP71.format(maps=f'{a}="#m"', lights='')))
+
 def write(path, text, expect):
     header = f"<!-- expect: {' '.join(expect) if expect else 'valid'} -->\n"
     body = text.split("\n", 1)[1] if text.startswith("<?xml") else text

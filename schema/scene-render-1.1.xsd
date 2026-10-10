@@ -34,6 +34,10 @@
   <xs:simpleType name="unitDecimal">
     <xs:restriction base="xs:double"><xs:minInclusive value="0"/><xs:maxInclusive value="1"/></xs:restriction>
   </xs:simpleType>
+  <xs:simpleType name="unitTripleType">
+    <xs:annotation><xs:documentation>Three numbers in [0, 1] (SREP 71).</xs:documentation></xs:annotation>
+    <xs:restriction><xs:simpleType><xs:list itemType="unitDecimal"/></xs:simpleType><xs:length value="3"/></xs:restriction>
+  </xs:simpleType>
   <xs:simpleType name="signedUnitDecimal">
     <xs:restriction base="xs:double"><xs:minInclusive value="-1"/><xs:maxInclusive value="1"/></xs:restriction>
   </xs:simpleType>
@@ -1526,6 +1530,7 @@
     <xs:attribute name="anisotropy" type="signedUnitDecimal" default="0"/>
     <xs:attribute name="anisotropyRotation" type="xs:double" default="0"/>
     <xs:attribute name="dispersion" type="nonNegativeDecimal" default="0"/>
+    <!-- a map attribute that begins with # names a generator or image asset of the document (SREP 71, MTX1) -->
     <xs:attribute name="baseColorMap" type="xs:anyURI"/>
     <xs:attribute name="normalMap" type="xs:anyURI"/>
     <xs:attribute name="normalScale" type="xs:double" default="1"/>
@@ -1545,6 +1550,13 @@
       scale).</xs:documentation></xs:annotation>
     </xs:attribute>
     <xs:attribute name="unevennessSeed" type="xs:nonNegativeInteger" default="0"/>
+    <!-- SREP 71: subsurface scattering, after OpenPBR -->
+    <xs:attribute name="subsurface" type="unitDecimal" default="0"/>
+    <xs:attribute name="subsurfaceColor" type="colorType" default="#CCCCCCFF"/>
+    <xs:attribute name="subsurfaceRadius" type="nonNegativeDecimal" default="10">
+      <xs:annotation><xs:documentation>Mean free path in scene units (pixels), multiplied per channel by subsurfaceRadiusScale.</xs:documentation></xs:annotation>
+    </xs:attribute>
+    <xs:attribute name="subsurfaceRadiusScale" type="unitTripleType" default="1 0.5 0.25"/>
     <xs:attribute name="materialX" type="xs:anyURI"/>
   </xs:complexType>
   <xs:complexType name="materialsType">
@@ -3533,6 +3545,19 @@
          shadow map cannot resolve -->
     <xs:attribute name="contactShadows" type="xs:boolean" default="false"/>
     <xs:attribute name="contactShadowLength" type="positiveDecimal" default="20"/>
+    <!-- SREP 71: a procedural sky (type="dome" only) -->
+    <xs:attribute name="sky" default="none">
+      <xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="none"/><xs:enumeration value="gradient"/></xs:restriction></xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="skyZenith" type="colorType" default="#3A6EA5FF"/>
+    <xs:attribute name="skyHorizon" type="colorType" default="#C8D8E8FF"/>
+    <xs:attribute name="skyGround" type="colorType" default="#4A4038FF"/>
+    <xs:attribute name="skyExponent" type="positiveDecimal" default="0.5"/>
+    <xs:attribute name="sunAzimuth" type="xs:double" default="0"/>
+    <xs:attribute name="sunElevation" type="xs:double" default="45"/>
+    <xs:attribute name="sunSize" type="nonNegativeDecimal" default="0.53"/>
+    <xs:attribute name="sunColor" type="colorType" default="#FFFFFFFF"/>
+    <xs:attribute name="sunIntensity" type="nonNegativeDecimal" default="0"/>
   </xs:complexType>
   <xs:complexType name="lightsType">
     <xs:sequence><xs:element name="light" type="lightType" maxOccurs="unbounded"/></xs:sequence>

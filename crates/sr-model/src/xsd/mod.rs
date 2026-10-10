@@ -52,6 +52,8 @@ pub struct Restriction {
     pub pattern: Option<&'static str>,
     /// `xs:maxLength` in characters.
     pub max_length: Option<usize>,
+    /// `xs:length`: characters, or the number of items when the base is a list.
+    pub length: Option<usize>,
 }
 
 /// Variety of a simple type.

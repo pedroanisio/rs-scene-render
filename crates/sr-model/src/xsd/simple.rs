@@ -124,6 +124,16 @@ fn check_normalized(ty: usize, v: &str) -> Result<(), String> {
                     return Err(format!("value has {n} characters; the maximum is {max}"));
                 }
             }
+            if let Some(len) = r.length {
+                let n = if matches!(SIMPLE_TYPES[r.base].kind, SimpleKind::List(_)) {
+                    v.split(' ').filter(|t| !t.is_empty()).count()
+                } else {
+                    v.chars().count()
+                };
+                if n != len {
+                    return Err(format!("{v:?} has length {n}; the length must be {len}"));
+                }
+            }
             if r.pattern.is_some() && !patterns()[&ty].is_match(v) {
                 return Err(format!("{v:?} is not a valid {}", describe(ty)));
             }
