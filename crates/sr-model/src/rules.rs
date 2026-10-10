@@ -815,6 +815,17 @@ impl<'a> Eval<'a> {
         });
     }
 
+    /// p-srep70 (SREP 70): parametric shapes, parametric surfaces and heightfields need version 1.6.
+    fn parametric_version(&mut self, scene: Node) {
+        let v14 = scene.descendants().any(|d| {
+            (is(d, "shape") && d.attribute("shape") == Some("parametric"))
+                || (is(d, "object3D") && matches!(d.attribute("primitive"), Some("parametric" | "heightfield")))
+        });
+        self.check(!v14, scene, "V14", || {
+            "parametric shapes, parametric surfaces and heightfields need version=\"1.6\".".into()
+        });
+    }
+
     /// p1: what version="1.0" documents cannot use.
     fn version_1_0(&mut self, n: Node) {
         self.check(!V1_SECTIONS.iter().any(|s| has_kid(n, s)), n, "V1", || {
@@ -1169,6 +1180,11 @@ impl<'a> Eval<'a> {
                 let v10 =
                     n.descendants().any(|d| is(d, "points") && d.parent_element().is_some_and(|p| is(p, "repeat")));
                 self.check(!v10, n, "V10", || "points in a repeat needs version=\"1.2\".".into());
+                self.parametric_version(n);
+            }
+            // p-srep70 (SREP 70): the version gate of documents from 1.2 to 1.5
+            "scene" if n.parent_element().is_none() && matches!(a("version"), Some("1.2" | "1.3" | "1.4" | "1.5")) => {
+                self.parametric_version(n);
             }
             // p2
             "vector" => {
@@ -1203,10 +1219,20 @@ impl<'a> Eval<'a> {
                 // p73 (SREP 17): a shape on a region takes its box from it, others need their own
                 match a("region") {
                     Some(region) => self.region_shape(n, region),
-                    None => self.check(has("width") && has("height"), n, "C69", || {
-                        "shape needs @width and @height unless it takes its box from @region.".into()
-                    }),
+                    None => self.check(
+                        a("shape") == Some("parametric") || (has("width") && has("height")),
+                        n,
+                        "C69",
+                        || {
+                            "shape needs @width and @height unless it takes its box from @region or is parametric."
+                                .into()
+                        },
+                    ),
                 }
+                // p-srep70 (SREP 70)
+                self.check((a("shape") == Some("parametric")) == (kids(n, "parametricPath").count() == 1), n, "PAR1", || {
+                    "a shape with shape=\"parametric\" has exactly one parametricPath, and only such a shape has one.".into()
+                });
             }
             // p4
             "mask" => {
@@ -1666,6 +1692,15 @@ impl<'a> Eval<'a> {
             }
             // p5, p26
             "object3D" => {
+                // p-srep70 (SREP 70)
+                let one = |name: &str| kids(n, name).count() == 1;
+                let par2 = (a("primitive") == Some("parametric")) == one("parametricSurface")
+                    && (a("primitive") == Some("heightfield")) == one("heightfield");
+                self.check(par2, n, "PAR2", || {
+                    "primitive=\"parametric\" has exactly one parametricSurface and primitive=\"heightfield\" exactly one \
+                     heightfield; no other primitive has either."
+                        .into()
+                });
                 let static_inputs = a("primitive") != Some("globe")
                     || !n.children().any(|c| {
                         matches!(

@@ -543,6 +543,13 @@ WARN_CASES = [
     ("w01-non-finite", ["W01"], sub('<marker id="drop" time="4.2"', '<marker id="drop" time="4.2" duration="1"/>\n    <marker id="late" time="INF"')),
 ]
 
+# SREP 70: a parametric curve, a parametric surface and a heightfield, in version 1.6
+PARAMETRIC = ('<scene version="1.6"><project width="64" height="64" fps="24" duration="1"/>'
+    '<materials><material id="m" baseColor="#FF0000" unlit="true"/></materials><composition>'
+    '<shape id="curve" shape="parametric" stroke="#FFFFFF" strokeWidth="2"><parametricPath x="32 + 20 * Math.cos(t)" y="32 + 10 * Math.sin(t)" t0="0" t1="6.283185307179586" samples="64" closed="true"/></shape>'
+    '<object3D id="surface" primitive="parametric" material="m" x="32" y="32"><parametricSurface x="u" y="v" z="0" u0="-8" u1="8" v0="-4" v1="4" uSamples="4" vSamples="4"/></object3D>'
+    '<object3D id="ground" primitive="heightfield" material="m" x="32" y="48" rotationX="90"><heightfield height="2 * Math.sin(x / 4)" width="16" depth="8" xSamples="8" zSamples="4"/></object3D>'
+    '</composition></scene>\n')
 VALID = {
     "solid-colliders": SOLID_COLLIDERS,
     "fracture": FRACTURE,
@@ -558,6 +565,7 @@ VALID = {
     "ocean-depth-filtered-drag": OCEAN_COUPLED.replace('<ocean ', '<ocean bedResponse="depthFiltered" bodyDrag="2" '),
     "model-select": MODEL_SELECT,
     "repeat-points": POINTS,
+    "parametric": PARAMETRIC,
     "repeat-points-neutral-steps": POINTS.replace('<repeat id="r"', '<repeat id="r" from="0" step="1"'),
     "connector": CONNECTOR,
     "connector-points": CONNECTOR.replace(' to="b"', ' toX="50%" toY="100%"').replace('route="orthogonal"', 'route="curved" bend="-20"').replace(' label="note"', ''),
@@ -681,6 +689,18 @@ CASES.append(("openvdb-format", ["S06"], lambda _: VALID["openvdb"].replace('for
 CASES += [
     ("r53-empty-list", ["S06", "R53"], lambda _: MINIMAL.replace('<composition/>', '<composition><group id="g" effects=""/></composition>')),
     ("r54-audiogram-source", ["R54"], lambda _: MINIMAL.replace('<composition/>', '<assets><audiogram id="a" source="wrong" width="32" height="32"/></assets><composition><group id="wrong"/></composition>')),
+]
+
+# SREP 70: the version gate V14, PAR1 and PAR2, and C69's exemption of parametric shapes
+CASES += [
+    ("v14-path", ["V14"], lambda _: PARAMETRIC.replace('version="1.6"', 'version="1.5"')),
+    ("v14-heightfield", ["V14"], lambda _: re.sub(r'<shape id="curve".*?</shape>|<object3D id="surface".*?</object3D>', '', PARAMETRIC).replace('version="1.6"', 'version="1.2"')),
+    ("par1-missing", ["PAR1"], lambda _: re.sub(r'<parametricPath [^>]*/>', '', PARAMETRIC)),
+    ("par1-other-shape", ["PAR1"], lambda _: PARAMETRIC.replace('shape="parametric"', 'shape="rect" width="4" height="4"')),
+    ("par1-two", ["PAR1"], lambda _: re.sub(r'(<parametricPath [^>]*/>)', r'\1\1', PARAMETRIC)),
+    ("par2-missing", ["PAR2"], lambda _: re.sub(r'<parametricSurface [^>]*/>', '', PARAMETRIC)),
+    ("par2-other-primitive", ["PAR2"], lambda _: PARAMETRIC.replace('primitive="heightfield"', 'primitive="plane"')),
+    ("par2-crossed", ["PAR2"], lambda _: PARAMETRIC.replace('primitive="parametric"', 'primitive="heightfield"')),
 ]
 
 def write(path, text, expect):

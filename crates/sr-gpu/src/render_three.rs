@@ -718,6 +718,22 @@ impl Renderer {
         if kind == "clay" {
             return self.clay_mesh(n);
         }
+        // a parametric surface or heightfield is the mesh the evaluator sampled at this time (SREP 70); none when its
+        // expressions did not compile, which validation reports
+        if matches!(kind.as_str(), "parametric" | "heightfield") {
+            let pm = n.param_mesh.as_ref()?;
+            if pm.mesh.indices.is_empty() {
+                return None;
+            }
+            if let Some((key, m)) = self.three_engine().param_meshes.get(&n.id) {
+                if *key == pm.key {
+                    return Some(m.clone());
+                }
+            }
+            let m = self.three_engine().upload_mesh(&pm.mesh.vertices, &pm.mesh.indices);
+            self.three_engine().param_meshes.insert(n.id.clone(), (pm.key, m.clone()));
+            return Some(m);
+        }
         let key = match kind.as_str() {
             "text" => format!(
                 "text|{}|{:?}|{:?}|{depth}|{bevel}|{}",

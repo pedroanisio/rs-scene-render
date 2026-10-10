@@ -122,6 +122,9 @@ pub enum Var {
     PointAngle,
     PointU,
     PointRandom,
+    /// SREP 70: the sampling variable `k` of a parametric curve (`t`), surface (`u`, `v`) or heightfield (`x`, `z`),
+    /// defined in those expressions only ([`Resolver::sample_names`]).
+    Sample(u8),
 }
 
 /// `loopIn`/`loopOut` modes (After Effects names).
@@ -240,6 +243,11 @@ pub trait Resolver {
     /// `pointU` and `pointRandom` are defined (SREP 26). Elsewhere they are unknown names.
     fn point_names(&self) -> bool {
         false
+    }
+    /// The sampling variables of a parametric geometry expression (SREP 70), in [`Var::Sample`] order: `["t"]` for a
+    /// curve, `["u", "v"]` for a surface, `["x", "z"]` for a heightfield. Elsewhere none.
+    fn sample_names(&self) -> &'static [&'static str] {
+        &[]
     }
 }
 
@@ -655,6 +663,9 @@ impl<'r> Compiler<'r> {
                     "pointAngle" if self.resolver.point_names() => Var::PointAngle,
                     "pointU" if self.resolver.point_names() => Var::PointU,
                     "pointRandom" if self.resolver.point_names() => Var::PointRandom,
+                    other if self.resolver.sample_names().contains(&other) => {
+                        Var::Sample(self.resolver.sample_names().iter().position(|s| *s == other).unwrap_or(0) as u8)
+                    }
                     _ => {
                         let hint = crate::suggest(
                             name,

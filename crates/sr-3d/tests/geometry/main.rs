@@ -4,6 +4,7 @@ mod crater;
 mod fracture;
 mod fracture_surface;
 mod occupancy;
+mod parametric_grid;
 mod pieces;
 mod pieces_sections;
 mod terrain;

@@ -637,6 +637,9 @@ pub struct ThreeEngine {
     mat_binds: HashMap<[u64; 6], wgpu::BindGroup>,
     /// Meshes keyed by the caller.
     pub meshes: HashMap<String, Arc<MeshGpu>>,
+    /// The mesh of each parametric surface or heightfield node (SREP 70) with its content key: one upload per node,
+    /// replaced when the sampled mesh changes, so an animated surface holds one mesh, not one per frame.
+    pub param_meshes: HashMap<Arc<str>, (u64, Arc<MeshGpu>)>,
     /// Textures keyed by the caller.
     pub textures: HashMap<String, Arc<TexGpu>>,
     pub(crate) drape_order: std::collections::VecDeque<String>,
@@ -1236,6 +1239,7 @@ impl ThreeEngine {
             cmp_smp,
             mat_binds: HashMap::new(),
             meshes: HashMap::new(),
+            param_meshes: HashMap::new(),
             textures: HashMap::new(),
             drape_order: Default::default(),
             envs: HashMap::new(),

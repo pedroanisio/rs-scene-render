@@ -35,6 +35,7 @@ mod joints;
 pub mod layout;
 pub mod mesh_sequence;
 pub mod ocean;
+pub mod parametric;
 pub mod particles3d;
 pub mod path;
 pub mod pending;

@@ -169,8 +169,9 @@ pub fn primitive(a: &Attrs, kind: &str, w: f64, h: f64) -> Result<Path, String> 
             0.0,
         ),
         "line" => shapes::line(w, h),
-        // a stroke-text shape's outline is the path data the evaluator laid out (the `path` property)
-        "path" | "stroke-text" => match a.str("path") {
+        // a stroke-text shape's outline is the path data the evaluator laid out (the `path` property), and so is a
+        // parametric shape's: its sampled curve (SREP 70)
+        "path" | "stroke-text" | "parametric" => match a.str("path") {
             Some(d) => Path::parse(&d).map_err(|e| e.to_string())?,
             None => return Err("shape=\"path\" needs @path".into()),
         },
@@ -259,9 +260,15 @@ pub fn shape_scene(n: &FrameNode, paint: &mut PaintFn, tol: f64) -> Result<Scene
     let a = Attrs { e, props: Some(&n.props) };
     let [w, h] = n.size.unwrap_or([a.num("width", 0.0), a.num("height", 0.0)]);
     let kind = a.str("shape").unwrap_or_else(|| "rect".into());
+    // the box: a parametric shape's is the bounding box of its points (SREP 70), any other's is (0, 0, w, h)
+    let box_rect = match (kind.as_str(), n.param_box) {
+        ("parametric", Some([x0, y0, x1, y1])) => [x0, y0, x1 - x0, y1 - y0],
+        _ => [0.0, 0.0, w, h],
+    };
     let base = primitive(&a, &kind, w, h)?;
     let mut items = vec![Item::new(base)];
-    let ctx = modifiers::Ctx { center: p(w * 0.5, h * 0.5), time: n.local_time, tol };
+    let center = p(box_rect[0] + box_rect[2] * 0.5, box_rect[1] + box_rect[3] * 0.5);
+    let ctx = modifiers::Ctx { center, time: n.local_time, tol };
     let mut k = 0;
     for c in children(e) {
         if !is(c, "shapeModifier") {
@@ -279,7 +286,6 @@ pub fn shape_scene(n: &FrameNode, paint: &mut PaintFn, tol: f64) -> Result<Scene
         if a.str("trimMode").as_deref() == Some("sequential") { TrimMode::Sequential } else { TrimMode::Simultaneous };
     let trimmed = ts > 0.0 || te < 1.0;
     let rule_ = rule(a.str("fillRule"), FillRule::NonZero);
-    let box_rect = [0.0, 0.0, w, h];
     // stroke-text is open strokes: it has no inside to fill
     let fill = if kind == "stroke-text" { None } else { a.paint("fill").and_then(|v| paint(&v, box_rect)) };
     let stroke_paint = a.paint("stroke").and_then(|v| paint(&v, box_rect));
