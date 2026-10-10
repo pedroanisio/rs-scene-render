@@ -892,7 +892,9 @@ impl Builder<'_> {
         let key = format!("{}|{}|{}", e.element_id().unwrap_or(""), cx.node, code_hash);
         // SREP 68: the steps this evaluation takes, and those the pair has taken before it
         let (mut steps, mut taken) = (1u64, 0u64);
-        if !persistent.is_empty() {
+        // SREP 67: inside an iterate the state starts from zero at every frame and does not carry over
+        let iterating = cx.iterate.filter(|_| !persistent.is_empty());
+        if !persistent.is_empty() && iterating.is_none() {
             // every read within a frame sees the history as it stood when the frame began
             let before = self.eng.feedback_at(&key, cx.frame);
             let per_frame = step_attr(e, a, "stepsPerFrame", 1, 10_000).max(1);
@@ -928,6 +930,45 @@ impl Builder<'_> {
             }
         }
         let empty = self.empty();
+        if let Some(spec) = iterating {
+            // SREP 67, Semantics 4: `steps` steps from the zero state (fewer when it converges), run as one loop when the
+            // passes are recorded, so a ceiling of millions of steps is not millions of recorded passes; stepsPerFrame and
+            // prewarm are ignored; FRAMEINDEX counts the steps from 0
+            let mut loop_passes = Vec::new();
+            let mut sizes = [w, h];
+            for (i, ps) in passes.iter().enumerate() {
+                let pw = glsl::isf_size(ps.get("WIDTH"), &names, w);
+                let ph = glsl::isf_size(ps.get("HEIGHT"), &names, h);
+                let extra: HashMap<&'static str, Vec<f64>> =
+                    [("RENDERSIZE", vec![pw as f64, ph as f64]), ("PASSINDEX", vec![i as f64])].into();
+                loop_passes.push(crate::fx::LoopPass {
+                    block: run.block(&program, &extra),
+                    target: ps.get("TARGET").and_then(|t| t.as_str()).map(String::from),
+                    out: [self.tex([pw, ph]), self.tex([pw, ph])],
+                });
+                sizes = [pw, ph];
+            }
+            let taken = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            self.eng.iterations.push((format!("{}|{}", e.element_id().unwrap_or(""), cx.node), taken.clone()));
+            let run_loop = crate::fx::LoopRun {
+                pipe: pipe.clone(),
+                program: program.clone(),
+                passes: loop_passes,
+                inputs: textures.clone(),
+                persistent: persistent.clone(),
+                empty: empty.clone(),
+                spec,
+                taken,
+            };
+            let mut out = self.tex(sizes);
+            self.passes.push(Pass::looped(run_loop, out.clone()));
+            if sizes != [w, h] {
+                let rs = self.internal("resize", RESIZE);
+                let b = rs.program.block();
+                out = self.custom(&rs, b, vec![out], [w, h]);
+            }
+            return Ok(self.convert(&out, None, &space, &working, false));
+        }
         let mut out = inp.clone();
         let mut sizes = [w, h];
         let per_frame = step_attr(e, a, "stepsPerFrame", 1, 10_000).max(1) as f64;

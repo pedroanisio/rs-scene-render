@@ -1206,6 +1206,7 @@ fn strip(n: &Node) -> Node {
         Node::Group(g) => g.children.retain(|c| !matches!(c, m::GroupChild::Node(_))),
         Node::Sequence(g) => g.children.retain(|c| !matches!(c, m::GroupChild::Node(_))),
         Node::Repeat(r) => r.children.retain(|c| !matches!(c, m::RepeatChild::Node(_))),
+        Node::Iterate(r) => r.children.retain(|c| !matches!(c, m::IterateChild::Node(_))),
         _ => {}
     }
     n
@@ -1512,6 +1513,12 @@ impl Builder {
                     let c = self.instantiate(&kids, Some(idx), ctx);
                     self.nodes[idx as usize].children = c;
                     self.place_sequence(idx, s);
+                }
+                // SREP 67: an iterate holds its nodes like a group; the renderer steps their stateful effects
+                Node::Iterate(_) => {
+                    let kids = node_children(n);
+                    let c = self.instantiate(&kids, Some(idx), ctx);
+                    self.nodes[idx as usize].children = c;
                 }
                 Node::Repeat(r) => self.repeat(idx, r, n, ctx),
                 Node::Connector(c) => self.connector(idx, c, ctx),

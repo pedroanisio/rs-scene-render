@@ -77,6 +77,8 @@ pub struct RenderStats {
     pub replayed_frames: usize,
     pub replay_draws: usize,
     pub replay_fx_passes: usize,
+    /// The stateful shaders inside an `iterate` (effect and node) and the steps each took this frame (SREP 67).
+    pub iterate_steps: Vec<(String, u64)>,
     /// Saved states of stateful effects (SREP 68 checkpoints on disk) loaded for a seek, and seeks that found none.
     pub checkpoint_hits: usize,
     pub checkpoint_misses: usize,
@@ -3281,6 +3283,16 @@ impl Renderer {
         let interval = fps.round().max(1.0) as i64;
         let (mut replayed, mut replay_draws, mut replay_fx) = (0usize, 0usize, 0usize);
         let (mut hits, mut misses) = (0usize, 0usize);
+        // stateful effects that are all inside an `iterate` start from zero at every frame (SREP 67): nothing to replay
+        let persistent = persistent && {
+            let base = Self::base_dir(p);
+            let (ids, _) = self.persistent_ids.get_or_insert_with(|| {
+                let ids = crate::shader::persistent_effects(p, &base);
+                let local = node_local_replay(p, &ids);
+                (ids, local)
+            });
+            carries_state(g, ids)
+        };
         if persistent && self.last_frame != Some(g.frame) && self.last_frame != Some(g.frame - 1) {
             if let Some(pv) = provider.as_mut() {
                 let base = Self::base_dir(p);
@@ -3319,7 +3331,12 @@ impl Renderer {
                 }
             }
         }
+        self.fx.iterations.clear();
         let mut out = self.render_graph(g, p, provider);
+        out.stats.iterate_steps = std::mem::take(&mut self.fx.iterations)
+            .into_iter()
+            .map(|(who, n)| (who, n.load(std::sync::atomic::Ordering::Relaxed)))
+            .collect();
         out.stats.replayed_frames = replayed;
         out.stats.replay_draws = replay_draws;
         out.stats.replay_fx_passes = replay_fx;
@@ -4413,6 +4430,23 @@ fn node_local_replay(p: &Program, ids: &std::collections::HashSet<String>) -> bo
             .into_iter()
             .filter(|c| c.element_name() == "param")
             .any(|c| matches!(c.get_attr("value"), Some(AttrValue::Str(v)) if names_a_node(&v)))
+    })
+}
+
+/// Whether a node of `g` has a stateful effect outside any `iterate`: then its state carries from frame to frame.
+fn carries_state(g: &FrameGraph, ids: &std::collections::HashSet<String>) -> bool {
+    g.nodes.iter().any(|n| {
+        let stateful = render_fx::effect_ids(&*n.elem).iter().any(|id| ids.contains(id));
+        let mut k = n.parent;
+        let mut iterated = false;
+        while let Some(j) = k {
+            if g.nodes[j as usize].kind == "iterate" {
+                iterated = true;
+                break;
+            }
+            k = g.nodes[j as usize].parent;
+        }
+        stateful && !iterated
     })
 }
 

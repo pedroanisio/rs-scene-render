@@ -199,6 +199,8 @@ pub struct Pass {
     /// A CPU operation from `src` to `out` (same size): the work recorded before it is submitted, `src` read back, the
     /// operation run and `out` written (SREP 67 serial operations).
     pub cpu: Option<CpuOp>,
+    /// The steps of a stateful shader inside an `iterate`, run as a loop when recorded (SREP 67, Semantics 4).
+    pub looped: Option<Box<LoopRun>>,
     /// What the pass belongs to (a node or adjustment id), for GPU timings.
     pub label: String,
 }
@@ -388,6 +390,7 @@ impl Pass {
             clear: true,
             custom: Some(Box::new(bind)),
             cpu: None,
+            looped: None,
             label: String::new(),
         }
     }
@@ -406,6 +409,7 @@ impl Pass {
             clear: false,
             custom: None,
             cpu: Some(op),
+            looped: None,
             label: String::new(),
         }
     }
@@ -413,6 +417,59 @@ impl Pass {
 
 /// An operation on the texels of a texture of the given size, in place.
 pub type CpuOp = Arc<dyn Fn(&mut [[f32; 4]], [u32; 2]) + Send + Sync>;
+
+/// The `iterate` around a node (SREP 67, Semantics 4): steps, and the convergence stop.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IterateSpec {
+    pub steps: u64,
+    pub converged: bool,
+    pub tolerance: f64,
+    pub check_every: u64,
+}
+
+/// One ISF pass of a looped stateful shader: its uniform block (FRAMEINDEX is written per step), the persistent or
+/// plain buffer it writes, and its two targets (ping-pong, so a pass never reads the texture it writes).
+pub struct LoopPass {
+    pub block: Vec<u8>,
+    pub target: Option<String>,
+    pub out: [Arc<Tex>; 2],
+}
+
+/// The steps of a stateful shader inside an `iterate`, from the zero state: its program, its passes, the fixed inputs by
+/// sampler name, and where its last output and the steps it took go.
+pub struct LoopRun {
+    pub pipe: Arc<crate::shader::CustomPipe>,
+    pub program: crate::glsl::Program,
+    pub passes: Vec<LoopPass>,
+    pub inputs: HashMap<String, Arc<Tex>>,
+    /// The persistent buffers, compared for convergence.
+    pub persistent: Vec<String>,
+    pub empty: Arc<Tex>,
+    pub spec: IterateSpec,
+    /// Steps taken, written when the loop has run.
+    pub taken: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl Pass {
+    /// A looped stateful shader writing its last output into `out`.
+    pub fn looped(run: LoopRun, out: Arc<Tex>) -> Pass {
+        Pass {
+            entry: Entry::Copy,
+            params: Params::default(),
+            src: out.clone(),
+            aux: Aux::None,
+            aux2: None,
+            lut: None,
+            out,
+            additive: false,
+            clear: false,
+            custom: None,
+            cpu: None,
+            looped: Some(Box::new(run)),
+            label: String::new(),
+        }
+    }
+}
 
 /// An effect program built from its source: the program, the directory its relative files resolve
 /// against, and the source hash.
@@ -464,6 +521,8 @@ pub struct FxEngine {
     /// Persistent ISF buffers by effect instance (latest), their state at the start of the
     /// current frame, and checkpoints by frame.
     pub(crate) feedback: HashMap<String, crate::shader::Feedback>,
+    /// The looped stateful shaders of the frame being rendered (SREP 67 iterate): effect and node, and the steps taken.
+    pub(crate) iterations: Vec<(String, Arc<std::sync::atomic::AtomicU64>)>,
     pub(crate) feedback_frame: (i64, HashMap<String, crate::shader::Feedback>),
     pub(crate) checkpoints: std::collections::BTreeMap<i64, HashMap<String, crate::shader::Feedback>>,
     /// Images uploaded for shader samplers, by path.
@@ -566,6 +625,7 @@ impl FxEngine {
             programs: HashMap::new(),
             sources: HashMap::new(),
             feedback: HashMap::new(),
+            iterations: Vec::new(),
             feedback_frame: (i64::MIN, HashMap::new()),
             checkpoints: std::collections::BTreeMap::new(),
             images: HashMap::new(),
@@ -694,6 +754,66 @@ impl FxEngine {
         );
     }
 
+    /// Runs a looped stateful shader (SREP 67, Semantics 4): `spec.steps` steps from the zero state, fewer when it
+    /// converges, then copies the last output into `out`. Returns the passes recorded.
+    fn run_loop(&mut self, enc: &mut wgpu::CommandEncoder, l: &LoopRun, out: &Tex) -> usize {
+        let mut cur = l.inputs.clone();
+        let mut last: Option<Arc<Tex>> = None;
+        let mut previous: Option<Vec<Vec<[f32; 4]>>> = None;
+        let (mut taken, mut n) = (0u64, 0usize);
+        let frame_index = l.program.uniform("FRAMEINDEX").cloned();
+        for step in 0..l.spec.steps {
+            for p in &l.passes {
+                let target = p.out[(step % 2) as usize].clone();
+                let mut block = p.block.clone();
+                if let Some(u) = &frame_index {
+                    l.program.write(&mut block, u, &[step as f64]);
+                }
+                let textures =
+                    l.program.samplers.iter().map(|s| cur.get(s).cloned().unwrap_or_else(|| l.empty.clone())).collect();
+                self.record_custom(enc, &crate::shader::CustomBind { pipe: l.pipe.clone(), block, textures }, &target);
+                n += 1;
+                if let Some(t) = &p.target {
+                    cur.insert(t.clone(), target.clone());
+                }
+                last = Some(target);
+            }
+            taken = step + 1;
+            let check = l.spec.converged && taken % l.spec.check_every.max(1) == 0;
+            // bounded command buffers: submit every 64 steps, and before a convergence check
+            if taken % 64 == 0 || check {
+                let done = std::mem::replace(enc, self.device.create_command_encoder(&Default::default()));
+                self.queue.submit([done.finish()]);
+            }
+            if check {
+                let now: Vec<Vec<[f32; 4]>> =
+                    l.persistent.iter().filter_map(|t| cur.get(t)).map(|t| self.read_texels(t)).collect();
+                if let Some(before) = &previous {
+                    let diff = before
+                        .iter()
+                        .zip(&now)
+                        .flat_map(|(a, b)| a.iter().zip(b))
+                        .flat_map(|(a, b)| (0..4).map(move |c| (a[c] - b[c]).abs()))
+                        .fold(0.0f32, f32::max);
+                    if diff as f64 <= l.spec.tolerance {
+                        break;
+                    }
+                }
+                previous = Some(now);
+            }
+        }
+        l.taken.store(taken, std::sync::atomic::Ordering::Relaxed);
+        if let Some(t) = last {
+            let size = wgpu::Extent3d {
+                width: t.size[0].min(out.size[0]),
+                height: t.size[1].min(out.size[1]),
+                depth_or_array_layers: 1,
+            };
+            enc.copy_texture_to_texture(t.tex.as_image_copy(), out.tex.as_image_copy(), size);
+        }
+        n
+    }
+
     pub fn record(&mut self, enc: &mut wgpu::CommandEncoder, passes: &[Pass]) -> usize {
         self.record_scissored(enc, passes, true)
     }
@@ -705,8 +825,9 @@ impl FxEngine {
             let align = self.device.limits().min_uniform_buffer_offset_alignment as usize;
             std::mem::size_of::<Params>().div_ceil(align) * align
         };
-        let fixed: Vec<usize> =
-            (0..passes.len()).filter(|&i| passes[i].custom.is_none() && passes[i].cpu.is_none()).collect();
+        let fixed: Vec<usize> = (0..passes.len())
+            .filter(|&i| passes[i].custom.is_none() && passes[i].cpu.is_none() && passes[i].looped.is_none())
+            .collect();
         let params_buf = (!fixed.is_empty()).then(|| {
             let mut bytes = vec![0u8; stride * fixed.len()];
             for (slot, &i) in fixed.iter().enumerate() {
@@ -722,6 +843,10 @@ impl FxEngine {
         let mut slot = 0u32;
         let mut groups: HashMap<[usize; 5], wgpu::BindGroup> = HashMap::new();
         for p in passes {
+            if let Some(l) = &p.looped {
+                n += self.run_loop(enc, l, &p.out);
+                continue;
+            }
             if let Some(op) = &p.cpu {
                 // what was recorded so far runs first: the operation reads its result
                 let done = std::mem::replace(enc, self.device.create_command_encoder(&Default::default()));
@@ -1283,6 +1408,8 @@ pub struct Cx<'a> {
     pub frame_size: [f64; 2],
     /// The node the effect runs on (keys persistent ISF buffers).
     pub node: String,
+    /// The `iterate` the node is inside, if any (SREP 67).
+    pub iterate: Option<IterateSpec>,
     /// Named sampler inputs (nodes, image assets) covering the offscreen, stored working premultiplied.
     pub named: HashMap<String, Arc<Tex>>,
     /// The audio mix, when the render has one (ISF audio inputs).
@@ -1432,6 +1559,7 @@ impl Builder<'_> {
             clear: true,
             custom: None,
             cpu: None,
+            looped: None,
             label: String::new(),
         });
         out
@@ -2398,6 +2526,7 @@ impl Builder<'_> {
             clear: first,
             custom: None,
             cpu: None,
+            looped: None,
             label: String::new(),
         });
     }
@@ -2417,6 +2546,7 @@ impl Builder<'_> {
             clear: first,
             custom: None,
             cpu: None,
+            looped: None,
             label: String::new(),
         });
     }
@@ -3285,6 +3415,7 @@ mod tests {
                     clear: k == 0,
                     custom: None,
                     cpu: None,
+                    looped: None,
                     label: String::new(),
                 });
             }
@@ -3362,6 +3493,7 @@ mod tests {
             clear: true,
             custom: None,
             cpu: None,
+            looped: None,
             label: String::new(),
         };
         let render = |engine: &mut FxEngine, pass: &Pass| {

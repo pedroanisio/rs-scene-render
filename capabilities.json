@@ -46,11 +46,6 @@
       "construct": "compute",
       "status": "reported",
       "note": "SREP 67 is accepted and not implemented by this engine yet: the element is reported (E22) and draws nothing"
-    },
-    {
-      "construct": "iterate",
-      "status": "reported",
-      "note": "SREP 67 is accepted and not implemented by this engine yet: the element is reported (E22) and draws nothing"
     }
   ]
 }
