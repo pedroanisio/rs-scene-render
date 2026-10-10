@@ -41,6 +41,16 @@
       "construct": "scene360/@layout=fisheye-180",
       "status": "approximate",
       "note": "the frames are drawn; no spherical metadata is written, as it needs a mesh projection"
+    },
+    {
+      "construct": "compute",
+      "status": "reported",
+      "note": "SREP 67 is accepted and not implemented by this engine yet: the element is reported (E22) and draws nothing"
+    },
+    {
+      "construct": "iterate",
+      "status": "reported",
+      "note": "SREP 67 is accepted and not implemented by this engine yet: the element is reported (E22) and draws nothing"
     }
   ]
 }

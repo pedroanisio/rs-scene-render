@@ -750,4 +750,19 @@
       <sch:assert id="R54" test="/scene/audioMix/audioTrack[@id = current()/@source]">audiogram/@source names an audioTrack of audioMix.</sch:assert>
     </sch:rule>
   </sch:pattern>
+  <sch:pattern id="p-srep67">
+    <sch:rule context="/scene[@version='1.0' or @version='1.1' or @version='1.2' or @version='1.3' or @version='1.4' or @version='1.5']">
+      <sch:assert id="V13" test="not(.//compute or .//iterate or effects/effect[@type='error-diffusion' or @type='segmented-sort'])">compute, iterate, error-diffusion and segmented-sort need version="1.6".</sch:assert>
+    </sch:rule>
+    <sch:rule context="iterate">
+      <sch:assert id="ITR1" test="number(@checkEvery) &lt;= number(@steps) or not(@checkEvery)">iterate/@checkEvery is at most @steps.</sch:assert>
+      <sch:assert id="ITR2" test="not(.//iterate)">iterate does not nest.</sch:assert>
+    </sch:rule>
+    <sch:rule context="compute">
+      <sch:assert id="CMP13" test="count(tonemap) &lt;= 1">compute has at most one tonemap.</sch:assert>
+    </sch:rule>
+    <sch:rule context="effects/effect[@type='segmented-sort']">
+      <sch:assert id="SRT1" test="number(@low) &lt;= number(@high) or not(@low) or not(@high)">segmented-sort needs low &lt;= high.</sch:assert>
+    </sch:rule>
+  </sch:pattern>
 </sch:schema>

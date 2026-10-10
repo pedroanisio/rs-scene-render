@@ -1218,6 +1218,7 @@ impl Renderer {
             additive: false,
             clear: true,
             custom: None,
+            cpu: None,
             label: String::new(),
         });
         let (passes, temps, problems) =

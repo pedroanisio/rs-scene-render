@@ -23,7 +23,12 @@ pub struct Pending {
 }
 
 /// The pending SREPs. One row each; the gap branches delete their own.
-pub const PENDING: &[Pending] = &[];
+pub const PENDING: &[Pending] = &[Pending {
+    srep: 67,
+    what: "compute accumulation with a density tonemap, and iterate",
+    elements: &["compute", "iterate"],
+    attributes: &[],
+}];
 
 fn same(value: &AttrValue, default: &str) -> bool {
     match (value, default.parse::<f64>()) {

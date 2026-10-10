@@ -26,3 +26,13 @@ Local addition ahead of an sr-core release: document version 1.6 (scene/@version
 is "1.6"), with no 1.6 syntax. It is the base on which the branches of the SREPs accepted on 2026-10-09 (66 to 75) add
 their own syntax and version rules; a 1.6 document holding 1.5 content validates and renders as the same document at
 1.5. The capability manifest still names the vendored release 1.5.0. A vendoring of sr-core 1.6.0 replaces this.
+
+Added here ahead of an sr-core release: SREP 67 (accepted 2026-10-09). This covers compute, iterate and tonemap
+(computeType, densityTonemapType, iterateType), the effect types error-diffusion and segmented-sort with their attributes,
+and the Schematron pattern p-srep67 (V13, ITR1, ITR2, SRT1). Three local differences from the SREP's text exist because
+of the model generator of sr-model:
+- computeType's content is a choice instead of the sequence (param*, tonemap?, behaviour*), with CMP13 keeping one
+  tonemap at most;
+- the union of tonemap/@reference is named densityReferenceType;
+- its keyword is named densityReferenceKeyword.
+Every document valid under the SREP is valid here.

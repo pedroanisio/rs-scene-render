@@ -63,6 +63,7 @@ const HANDWRITTEN: &[(&str, &str)] = &[
     ("paintRefType", "crate::values::PaintRef"),
     ("paintType", "crate::values::Paint"),
     ("expressionString", "String"),
+    ("densityReferenceType", "String"),
 ];
 
 /// Attribute names too generic to name an anonymous enumeration on their own.
