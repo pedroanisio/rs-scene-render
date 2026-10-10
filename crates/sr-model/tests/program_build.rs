@@ -79,7 +79,9 @@ fn a_data_program_feeds_a_repeat() {
 fn failures_carry_their_codes() {
     assert_eq!(codes(&doc(&program("srep66-loop", r#" fuel="100000""#, ""))), ["PRG12"]);
     assert_eq!(codes(&doc(&program("srep66-wasi", "", ""))), ["PRG11"]);
-    assert_eq!(codes(&doc(&program("srep66-bad-output", "", ""))), ["PRG14"]);
+    // an invalid fragment can break several rules; each is reported as PRG14 at the program
+    let bad = codes(&doc(&program("srep66-bad-output", "", "")));
+    assert!(!bad.is_empty() && bad.iter().all(|c| c == "PRG14"), "{bad:?}");
     let collision = doc(&(program("srep66-rect", "", "") + r#"<shape id="g1" shape="rect" width="1" height="1"/>"#));
     assert!(codes(&collision).iter().all(|c| c == "PRG14") && !codes(&collision).is_empty(), "{:?}", codes(&collision));
     let pinned = program("srep66-rect", &format!(r#" outputSha256="{}""#, "1".repeat(64)), "");
