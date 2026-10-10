@@ -683,6 +683,11 @@ CASES += [
     ("r54-audiogram-source", ["R54"], lambda _: MINIMAL.replace('<composition/>', '<assets><audiogram id="a" source="wrong" width="32" height="32"/></assets><composition><group id="wrong"/></composition>')),
 ]
 
+# SREP 68: stepsPerFrame and prewarm apply to shader effects only
+CASES += [
+    ("stp1-not-a-shader", ["STP1"], lambda _: '<scene version="1.6"><project width="64" height="64" fps="10" duration="1"/><composition><shape id="s" shape="rect" width="10" height="10" fill="#FFFFFF" effects="fx"/></composition><effects><effect id="fx" type="blur" stepsPerFrame="2"/></effects></scene>\n'),
+]
+
 def write(path, text, expect):
     header = f"<!-- expect: {' '.join(expect) if expect else 'valid'} -->\n"
     body = text.split("\n", 1)[1] if text.startswith("<?xml") else text
