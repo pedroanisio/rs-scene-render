@@ -351,8 +351,11 @@ enum Command {
         #[arg(long)]
         no_upload: bool,
         /// Time segments of a video output rendered and encoded at once, then joined without
-        /// re-encoding: `auto`, the default (3 with a hardware encoder, else half the cores up to
-        /// 4, fewer for short ranges), or a count; 1 renders serially.
+        /// re-encoding. `auto`, the default, splits by the programme alone (one segment per 10 s,
+        /// at most 12, at most 128 frames each with flash or contrast checks, one stream under
+        /// 20 s), so the file is the same on any machine; the machine only sets how many render at
+        /// once (3 with a hardware encoder, else half the cores up to 4, one on a software adapter,
+        /// at most one per 20 s). N renders N at once over three segments each; 1 renders serially.
         #[arg(long, value_name = "auto|N", value_parser = parse_parallel, default_value = "auto")]
         parallel: sr_deliver::Parallel,
         /// Parameter value, repeatable: --param id=value.
