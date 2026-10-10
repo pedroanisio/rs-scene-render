@@ -407,6 +407,55 @@ fn undefined_transition_types_follow_the_python_renderer() {
 
 /// Geometric transitions, in frame pixels, at p = ½ with no softness (b is
 /// blue at x ≥ 32, a is red; the frame is 64 × 32 with its centre at (32, 16)).
+/// `morph` displaces by the luminance difference while crossfading (README, Limitations): with Δ = 0.1·(Y_b − Y_a)
+/// of the frame along both axes (Y the Rec. 709 luminance of each side's straight colour at the pixel), a is read at
+/// uv + p·Δ and b at uv − (1 − p)·Δ, and the two mix at p. A red picture (Y 0.2126) turning into a white one (Y 1)
+/// at p = ½ shifts a by 0.0394 of the frame (2.52 px of 64 across, 1.26 px of 32 down) and b by the same towards
+/// the top left: a leaves the frame's last two columns and b its first three, where a crossfade shows both.
+#[test]
+fn morph_displaces_by_the_luminance_difference_unlike_a_crossfade() {
+    let Some(_) = gpu() else { return };
+    let render = |kind: &str| {
+        let body = format!(
+            r#"<layer id="a" asset="red" x="0" y="0" scaleX="16" scaleY="8" end="2"/>
+               <layer id="b" asset="white" x="0" y="0" scaleX="16" scaleY="8" start="2"/>
+               <transition type="{kind}" from="a" to="b" duration="1" curve="linear"/>"#
+        );
+        render_times(&doc_with("", "", &body, ""), &[2.0]).unwrap()
+    };
+    let (morph, fade) = (render("morph"), render("crossfade"));
+    assert!(problems(&morph).is_empty(), "{:?}", problems(&morph));
+    // away from the edges both read a and b where they lie: the crossfade
+    for x in [8, 32, 56] {
+        assert!(close(morph.at(x, 16), fade.at(x, 16), 2e-2), "x {x}: {:?} vs {:?}", morph.at(x, 16), fade.at(x, 16));
+    }
+    // the crossfade is opaque everywhere, with b's green
+    for x in [0, 1, 62, 63] {
+        let f = fade.at(x, 16);
+        assert!(f[3] > 0.97 && f[1] > 0.3, "crossfade at x {x}: {f:?}");
+    }
+    // a is read 2.52 px to the right: columns 62 and 63 read a beyond the frame (transparent), 59 and 60 still inside
+    for x in [62, 63] {
+        let m = morph.at(x, 16);
+        assert!(m[3] < 0.6, "x {x}: a is displaced out of the frame, only b at p = 1/2 is left: {m:?}");
+    }
+    for x in [59, 60] {
+        assert!(morph.at(x, 16)[3] > 0.97, "x {x}: a still covers it: {:?}", morph.at(x, 16));
+    }
+    // b is read 2.52 px to the left: columns 0 and 1 read b beyond the frame, so only red is left (no green)
+    for x in [0, 1] {
+        let m = morph.at(x, 16);
+        assert!(m[1] < 0.03 && m[3] < 0.6, "x {x}: b is displaced out of the frame, only a is left: {m:?}");
+    }
+    for x in [3, 4] {
+        let m = morph.at(x, 16);
+        assert!(m[1] > 0.3 && m[3] > 0.97, "x {x}: b still covers it: {m:?}");
+    }
+    // vertically the shift is 1.26 px: row 31 loses a, row 0 loses b
+    assert!(morph.at(32, 31)[3] < 0.6 && morph.at(32, 30)[3] > 0.97, "{:?}", morph.at(32, 31));
+    assert!(morph.at(32, 0)[1] < 0.03 && morph.at(32, 1)[1] > 0.3, "{:?}", morph.at(32, 0));
+}
+
 #[test]
 fn transitions_follow_d19_coordinates() {
     let Some(_) = gpu() else { return };

@@ -1664,6 +1664,11 @@ fn fs_trans(in: VOut) -> @location(0) vec4<f32> {
             let xy = vec2<i32>(floor(uv * fdims()));
             return textureLoad(src, (xy + o) / bs, 0);
         }
+        case 33u: { // morph: both displaced by Δ = 0.1·(Y_b − Y_a) of the frame on each axis, a by p·Δ and b by
+                    // −(1 − p)·Δ, Y the Rec. 709 luminance of each side's straight colour, then crossfaded
+            let dlt = vec2(0.1 * (luma(unpre(T(uv))) - luma(unpre(F(uv)))));
+            return mix(F(uv + dlt * p), T(uv - dlt * (1.0 - p)), p);
+        }
         default: { return mix(F(uv), T(uv), p); }
     }
 }
