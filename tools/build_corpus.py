@@ -724,8 +724,11 @@ def with_small_cells(text, expect):
 
 def oracle_codes(expected, blind=False):
     """Translate Rust diagnostics into the independent schema oracle's scope."""
-    codes = {code for code in expected if not code.startswith(("S", "A", "W"))}
-    if not blind and any(code.startswith("S") for code in expected):
+    # structural (S01...), asset (A01...) and warning (W01...) codes are a letter and digits; a Schematron id may start
+    # with one of those letters too (SRT1 and STP1 of SREPs 67 and 68)
+    outside = re.compile(r"[SAW]\d")
+    codes = {code for code in expected if not outside.match(code)}
+    if not blind and any(re.match(r"S\d", code) for code in expected):
         codes.add("XSD")
     return sorted(codes)
 
