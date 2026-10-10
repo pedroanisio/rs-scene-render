@@ -41,7 +41,7 @@ fn the_corpus_validates_alike_at_1_5_and_1_6() {
             let head_end = at + xml[at..].find('>').unwrap();
             let set = |v: &str| {
                 let head = &xml[at..head_end];
-                let Some(i) = head.find("version=\"") else { return None };
+                let i = head.find("version=\"")?;
                 let j = i + 9 + head[i + 9..].find('"').unwrap();
                 Some(format!("{}{v}{}", &xml[..at + i + 9], &xml[at + j..]))
             };
