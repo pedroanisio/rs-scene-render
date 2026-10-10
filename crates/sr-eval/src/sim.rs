@@ -100,7 +100,7 @@ pub(crate) fn text(e: &dyn Element, n: &str) -> Option<String> {
     }
 }
 
-fn flag(e: &dyn Element, n: &str, d: bool) -> bool {
+pub(crate) fn flag(e: &dyn Element, n: &str, d: bool) -> bool {
     match e.get_attr(n) {
         Some(AttrValue::Bool(b)) => b,
         Some(AttrValue::Str(s)) => s == "true",

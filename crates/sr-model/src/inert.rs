@@ -4,8 +4,8 @@
 //! only less than its author thought, so strict checks never count these findings. The table is closed; a rule is
 //! added only by an SREP.
 //!
-//! Rules I1 to I7 are properties of the document alone and are found here, during validation, on the source
-//! elements: an attribute is inert only where the author wrote it. Rule I8 needs the nodes' windows on the
+//! Rules I1 to I7 and I16 (SREP 73) are properties of the document alone and are found here, during validation, on
+//! the source elements: an attribute is inert only where the author wrote it. Rule I8 needs the nodes' windows on the
 //! composition timeline, which the evaluator computes, and is found there (`sr-eval`).
 //!
 //! A rule never fires on an attribute whose value can change: one an `animate`, `expression` or `link` child
@@ -48,6 +48,9 @@ pub const I11: &str = "INERT-I11";
 pub const I12: &str = "INERT-I12";
 /// `INERT-I13` (SREP 34): an effect attribute its type does not read.
 pub const I13: &str = "INERT-I13";
+/// `INERT-I16` (SREP 73): `orientToVelocity="false"` on a streak flock, which is drawn along the velocity whatever
+/// the value.
+pub const I16: &str = "INERT-I16";
 /// `MASK-MISS` (SREP 34): a rect or ellipse mask that adds or intersects and lies wholly outside its node's box, so
 /// the node shows nothing. A warning, not an inert finding: the mask has the strongest effect possible.
 pub const MASK_MISS: &str = "MASK-MISS";
@@ -67,6 +70,7 @@ pub const RULES: &[(&str, &str)] = &[
     (I11, "An `effect` of type `displacement-map`, `difference-key` or `shader` whose `source` names a node with opacity 0 for the whole of its window: it contributes nothing; `visible=\"false\"` at opacity 1 keeps a map off screen (information, SREP 34)."),
     (I12, "A `key` with `overshoot` on a segment whose curve is not back-*, or `period` on one whose curve is not elastic-* (information, SREP 34)."),
     (I13, "An `effect` carrying an attribute its `type` does not read (`id`, `type`, `enabled` and `mix` are read by every type) (information, SREP 34)."),
+    (I16, "A `flock` with `orientToVelocity=\"false\"` whose `shape` is `streak` (the default): a streak is drawn along the velocity whatever the value (information, SREP 73)."),
     (MASK_MISS, "A `mask` of type rect or ellipse, mode add or intersect, not inverted, whose box lies entirely outside the box of the node it masks, in the node's own coordinates: the node shows nothing (warning, SREP 34; `measured` is how far outside, in pixels)."),
 ];
 
@@ -99,6 +103,9 @@ pub fn validate(doc: &Document<'_>, types: &ElementTypes, out: &mut Vec<Diagnost
         }
         if name == "layer" {
             cx.audio(n, out);
+        }
+        if name == "flock" {
+            cx.flock_orient(n, out);
         }
     }
 }
@@ -255,6 +262,17 @@ impl<'a> Cx<'a> {
             ["matteMode", "matteVisible"].into_iter().filter(|a| n.has_attribute(*a) && !self.dynamic(n, a)).collect();
         if !set.is_empty() {
             push(out, I6, n, format!("{} without @matte", attrs(&set)));
+        }
+    }
+
+    /// I16 (SREP 73).
+    fn flock_orient(&self, n: Node, out: &mut Vec<Diagnostic>) {
+        let upright = matches!(n.attribute("orientToVelocity").map(str::trim), Some("false" | "0"));
+        if !upright || self.dynamic(n, "orientToVelocity") || self.dynamic(n, "shape") {
+            return;
+        }
+        if self.value(n, "shape").map(str::trim) == Some("streak") {
+            push(out, I16, n, "@orientToVelocity false on a streak flock: a streak is drawn along the velocity".into());
         }
     }
 

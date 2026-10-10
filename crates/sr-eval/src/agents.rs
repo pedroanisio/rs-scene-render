@@ -13,7 +13,7 @@ use sr_sim::{erosion, flock, fluid, slime};
 
 use crate::eval::{Affine, FrameGraph, FrameNode};
 use crate::program::Program;
-use crate::sim::{color_attr, index_of, num, text, FieldSrc, Graphs, ParticleFrame, ParticleShape};
+use crate::sim::{color_attr, flag, index_of, num, text, FieldSrc, Graphs, ParticleFrame, ParticleShape};
 use crate::value::Value;
 
 /// Simulation step of flocks and the grid simulations.
@@ -63,6 +63,9 @@ struct FlockLook {
     shape: ParticleShape,
     sprite: Option<Arc<str>>,
     trail: f64,
+    /// `orientToVelocity` (SREP 73): discs and sprites turn along the velocity, else keep rotation 0 in the flock's
+    /// space. Streaks always follow the velocity.
+    orient: bool,
 }
 
 pub(crate) struct Sim {
@@ -157,7 +160,9 @@ fn build(p: &Program, n: &FrameNode, problems: &mut Vec<String>) -> Sim {
             } else {
                 trail
             };
-            let look = FlockLook { size: size_px, color: color_attr(e, &n.props, "color"), shape, sprite, trail };
+            let orient = shape == ParticleShape::Streak || flag(e, "orientToVelocity", true);
+            let look =
+                FlockLook { size: size_px, color: color_attr(e, &n.props, "color"), shape, sprite, trail, orient };
             let init = flock::init(&spec);
             Kind::Flock { spec, tl: Timeline::new(0.0, STEP, init), look }
         }
@@ -424,6 +429,8 @@ fn cached(
 
 fn flock_frame(a: &flock::Agents, world: &Affine, look: &FlockLook) -> ParticleFrame {
     let [m0, m1, m2, m3, ..] = world.0;
+    // rotation 0 in the flock's space is the direction its +x axis takes in the frame
+    let upright = m1.atan2(m0);
     let mut f = ParticleFrame {
         shape: look.shape,
         color0: look.color.clone(),
@@ -431,7 +438,7 @@ fn flock_frame(a: &flock::Agents, world: &Affine, look: &FlockLook) -> ParticleF
         cols: 1,
         rows: 1,
         trail: look.trail,
-        orient: true,
+        orient: look.orient,
         ..Default::default()
     };
     for k in 0..a.x.len() {
@@ -440,7 +447,7 @@ fn flock_frame(a: &flock::Agents, world: &Affine, look: &FlockLook) -> ParticleF
         f.pos.push([p[0] as f32, p[1] as f32]);
         f.vel.push([v[0] as f32, v[1] as f32]);
         f.size.push(look.size as f32);
-        f.rot.push(v[1].atan2(v[0]).to_degrees() as f32);
+        f.rot.push(if look.orient { v[1].atan2(v[0]) } else { upright }.to_degrees() as f32);
         f.color_t.push(0.0);
         f.alpha.push(1.0);
         f.frame.push(0);

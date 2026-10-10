@@ -1282,6 +1282,7 @@
     "crater-repose.scene.xml": [],
     "crater.scene.xml": [],
     "ejecta-crater.scene.xml": [],
+    "flock-upright.scene.xml": [],
     "fracture-contact-tuned.scene.xml": [],
     "fracture-contact.scene.xml": [],
     "fracture.scene.xml": [],
@@ -1357,6 +1358,9 @@
     ],
     "a04-sequence-hold.scene.xml": [
       "A04"
+    ],
+    "inert-i16-streak-flock.scene.xml": [
+      "INERT-I16"
     ],
     "voxel-body.scene.xml": [
       "W09"
