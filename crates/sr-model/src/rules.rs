@@ -432,6 +432,8 @@ fn build_sets<'a>(scene: Option<Node<'a, '_>>) -> Sets<'a> {
     collect("parameters", "variant", &mut s.variants);
     collect("parameters", "param", &mut s.params);
     collect("parameters", "data", &mut s.data);
+    // a data program is a data source (SREP 66)
+    collect("parameters", "program", &mut s.data);
     collect("safeAreas", "safeArea", &mut s.safe_areas);
     collect("symbols", "symbol", &mut s.symbols);
     collect("tracking", "trackData", &mut s.track_data);
@@ -815,6 +817,55 @@ impl<'a> Eval<'a> {
         });
     }
 
+    /// p-srep66-gate and p-srep66 (SREPs 66 and 69): programs need version 1.6, their parameter names are unique,
+    /// repeat/@over names only data programs, and stepping programs have a size. STP1 on programs is p-srep68's.
+    fn programs(&mut self, n: Node, local: &str) {
+        let a = |k: &str| n.attribute(k);
+        match local {
+            "scene"
+                if n.parent_element().is_none()
+                    && matches!(a("version"), Some("1.0" | "1.1" | "1.2" | "1.3" | "1.4" | "1.5")) =>
+            {
+                let uses = n.descendants().any(|d| is(d, "program"));
+                self.check(!uses, n, "V12", || "program needs version=\"1.6\".".into());
+            }
+            "param" if n.parent_element().is_some_and(|p| is(p, "program")) => {
+                let name = a("name");
+                let repeated = n
+                    .parent_element()
+                    .into_iter()
+                    .flat_map(|p| p.children())
+                    .take_while(|c| *c != n)
+                    .any(|c| is(c, "param") && c.attribute("name") == name);
+                self.check(!repeated, n, "PRG1", || "a program's parameter names are unique.".into());
+            }
+            "repeat" => {
+                if let Some(over) = a("over") {
+                    let root = n.document().root_element();
+                    let program = |d: &Node| is(*d, "program") && d.attribute("id") == Some(over);
+                    let any = root.descendants().any(|d| program(&d));
+                    let data = root
+                        .children()
+                        .filter(|c| is(*c, "parameters"))
+                        .flat_map(|p| p.children())
+                        .any(|c| program(&c));
+                    self.check(!any || data, n, "PRG2", || {
+                        "repeat/@over names a data program (one in parameters), not a node program.".into()
+                    });
+                }
+            }
+            "program" => {
+                let step = a("mode") == Some("step");
+                if step {
+                    self.check(a("width").is_some() && a("height").is_some(), n, "PRG3", || {
+                        "a stepping program needs width and height (SREP 69).".into()
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// p1: what version="1.0" documents cannot use.
     fn version_1_0(&mut self, n: Node) {
         self.check(!V1_SECTIONS.iter().any(|s| has_kid(n, s)), n, "V1", || {
@@ -911,9 +962,12 @@ impl<'a> Eval<'a> {
             };
             self.check(ok, n, "SRT1", || "segmented-sort needs low <= high.".into());
         }
-        // SREP 68 (p-srep68): stepping applies to shader effects (and to stepping programs, SREP 69, not implemented)
-        if local == "effect" && parent_is("effects") && (a("stepsPerFrame").is_some() || a("prewarm").is_some()) {
-            self.check(a("type") == Some("shader"), n, "STP1", || {
+        // SREP 68 (p-srep68): stepping applies to shader effects and to stepping programs (SREP 69)
+        let steps = a("stepsPerFrame").is_some() || a("prewarm").is_some();
+        let stepping_effect = local == "effect" && parent_is("effects");
+        if steps && (stepping_effect || local == "program") {
+            let ok = if stepping_effect { a("type") == Some("shader") } else { a("mode") == Some("step") };
+            self.check(ok, n, "STP1", || {
                 "stepsPerFrame and prewarm apply to shader effects and stepping programs (SREP 69) only.".into()
             });
         }
@@ -922,6 +976,7 @@ impl<'a> Eval<'a> {
                 "audiogram/@source names an audioTrack of audioMix.".into()
             });
         }
+        self.programs(n, local);
 
         if local == "scene" && n.parent_element().is_none() && a("version") != Some("1.3") {
             let uses_volume = n.descendants().any(|d| {
@@ -2087,7 +2142,9 @@ impl<'a> Eval<'a> {
                 });
                 let c18 =
                     !has("over") || contains(&self.sets.data, a("over")) || contains(&self.sets.list_params, a("over"));
-                self.check(c18, n, "C18", || "repeat/@over must name a data source or a list parameter.".into());
+                self.check(c18, n, "C18", || {
+                    "repeat/@over must name a data source, a list parameter or a data program (SREP 66).".into()
+                });
             }
             // p71 (SREP 16)
             "connector" => self.connector(n),

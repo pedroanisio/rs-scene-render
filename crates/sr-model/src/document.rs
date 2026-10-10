@@ -171,6 +171,8 @@ impl Index {
                     ParametersChild::Data(x) => put(x.id(), Target::DataSource(i)),
                     ParametersChild::Variant(x) => put(x.id(), Target::Variant(i)),
                     ParametersChild::Bind(_) => {}
+                    // data programs are replaced by their rows before the model is built (SREP 66)
+                    ParametersChild::Program(_) => {}
                 }
             }
         }
@@ -467,6 +469,37 @@ fn run(xml: &str, base_dir: PathBuf, opts: &LoadOptions, build: bool) -> Outcome
         report.sort();
         if !build || report.has_errors() {
             return Outcome { report, document: None };
+        }
+        // SREP 66: build-mode programs run now, and the document is loaded again with their output in place
+        match crate::program::expand(&doc, xml, &base_dir) {
+            None => {}
+            Some(Err(errors)) => {
+                report.diagnostics.extend(errors);
+                report.sort();
+                return Outcome { report, document: None };
+            }
+            Some(Ok(expanded)) => {
+                let mut inner = run(&expanded.xml, base_dir.clone(), opts, true);
+                if inner.document.is_none() {
+                    // the output is invalid in place: every error is the output's (the document was valid without it)
+                    let mut mapped = Report::default();
+                    for d in inner.report.diagnostics.iter().filter(|d| d.severity == crate::diag::Severity::Error) {
+                        let at = d.loc.offset as usize;
+                        let owner = expanded.outputs.iter().find(|o| o.0.contains(&at)).or(expanded.outputs.first());
+                        let (id, loc, path) =
+                            owner.map(|o| (o.1.as_str(), o.2, o.3.clone())).unwrap_or(("", d.loc, d.path.clone()));
+                        mapped.diagnostics.push(Diagnostic::error(
+                            "PRG14",
+                            format!("program {id:?}: its output is not valid in place: {} {}", d.code, d.message),
+                            loc,
+                            path,
+                        ));
+                    }
+                    mapped.sort();
+                    inner.report = mapped;
+                }
+                return inner;
+            }
         }
         match Scene::build(&doc) {
             Ok(scene) => {

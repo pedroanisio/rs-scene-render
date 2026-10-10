@@ -240,6 +240,8 @@ pub fn verify(doc: &Document<'_>, base_dir: &Path, out: &mut Vec<Diagnostic>) {
             };
             let (missing, missing_code) = match (name, attr) {
                 ("physics", "cache") => (Severity::Warning, "A06"),
+                // a program's module is checked under its own code (SREP 66, PRG10)
+                ("program", "src") => (Severity::Error, "PRG10"),
                 (_, "proxy") => (Severity::Warning, "A01"),
                 _ => (Severity::Error, "A01"),
             };
@@ -296,6 +298,9 @@ pub fn verify(doc: &Document<'_>, base_dir: &Path, out: &mut Vec<Diagnostic>) {
 
     for c in &checks {
         let ename = c.node.tag_name().name();
+        // a program's module that cannot be read or does not match its digest is PRG10 (SREP 66)
+        let module = ename == "program" && c.attr == "src";
+        let unreadable = if module { "PRG10" } else { "A05" };
         let loc = attr_loc(c.node, c.attr);
         let path = element_path(c.node);
         let shown = format!("{:?}", c.value);
@@ -321,7 +326,7 @@ pub fn verify(doc: &Document<'_>, base_dir: &Path, out: &mut Vec<Diagnostic>) {
             }
             Err(e) => {
                 out.push(Diagnostic::error(
-                    "A05",
+                    unreadable,
                     format!("@{} of <{ename}>: cannot read {shown}: {e}", c.attr),
                     loc,
                     path,
@@ -330,7 +335,7 @@ pub fn verify(doc: &Document<'_>, base_dir: &Path, out: &mut Vec<Diagnostic>) {
             }
             Ok(m) if m.is_dir() => {
                 out.push(Diagnostic::error(
-                    "A05",
+                    unreadable,
                     format!("@{} of <{ename}>: {shown} is a directory, not a file", c.attr),
                     loc,
                     path,
@@ -359,7 +364,7 @@ pub fn verify(doc: &Document<'_>, base_dir: &Path, out: &mut Vec<Diagnostic>) {
             Ok(actual) if *actual == expected => {}
             Ok(actual) => out.push(
                 Diagnostic::error(
-                    "A02",
+                    if module { "PRG10" } else { "A02" },
                     format!(
                         "{shown} does not match @{} of <{ename}>: expected {}, found {}",
                         c.hash_attr,
@@ -375,7 +380,7 @@ pub fn verify(doc: &Document<'_>, base_dir: &Path, out: &mut Vec<Diagnostic>) {
                     "the file changed since the digest was recorded; regenerate it or update the digest"
                 }),
             ),
-            Err(e) => out.push(Diagnostic::error("A05", format!("cannot read {shown}: {e}"), loc, path)),
+            Err(e) => out.push(Diagnostic::error(unreadable, format!("cannot read {shown}: {e}"), loc, path)),
         }
     }
 }

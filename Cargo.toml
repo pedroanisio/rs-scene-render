@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/sr-model", "crates/sr-eval", "crates/sr-gpu", "crates/sr-media", "crates/sr-audio", "crates/sr-deliver", "crates/sr-vector", "crates/sr-text", "crates/sr-3d", "crates/sr-sim", "crates/sr-volume", "crates/sr-geo", "crates/sr-resolve", "crates/sr-fuzz", "crates/scene-render"]
+members = ["crates/sr-model", "crates/sr-eval", "crates/sr-gpu", "crates/sr-media", "crates/sr-audio", "crates/sr-deliver", "crates/sr-vector", "crates/sr-text", "crates/sr-3d", "crates/sr-sim", "crates/sr-volume", "crates/sr-geo", "crates/sr-wasm", "crates/sr-resolve", "crates/sr-fuzz", "crates/scene-render"]
 resolver = "2"
 # vendored crates are dependencies, not members (see vendor/README.md)
 exclude = ["vendor"]
@@ -25,6 +25,7 @@ sr-deliver = { path = "crates/sr-deliver" }
 sr-vector = { path = "crates/sr-vector" }
 sr-text = { path = "crates/sr-text" }
 sr-volume = { path = "crates/sr-volume" }
+sr-wasm = { path = "crates/sr-wasm" }
 wgpu = "30"
 pollster = "1"
 bytemuck = { version = "1", features = ["derive"] }

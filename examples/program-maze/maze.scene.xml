@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SREP 66: the maze and its solution are computed by maze.wasm (source in maze/, built by build.sh) when the
+     document is loaded; no script writes this XML. The seed picks the maze: change it and the maze changes, keep it
+     and every host draws the same one: outputSha256 pins the output, so a host that computed another maze would
+     fail with PRG15 instead of drawing it. -->
+<scene version="1.6">
+  <project width="1920" height="1080" fps="30" duration="10" background="#14161C" seed="2026"/>
+  <output id="master" path="maze.mp4" codec="h264" container="mp4"/>
+  <composition>
+    <shape id="glow" shape="rect" width="1920" height="1080" fill="#1B1F29"/>
+    <program id="maze" src="maze.wasm" sha256="3392a0266455736c1cca6f3656019af701def85ee306875213e0c53c81b32767" seed="7" fuel="50000000"
+             outputSha256="b719a5d44066774efc158a761ca71bff838c08fcec06f81153d202c5ae5a3ffc">
+      <param name="cols" value="32"/>
+      <param name="rows" value="18"/>
+      <param name="cell" value="50"/>
+      <param name="x" value="160"/>
+      <param name="y" value="90"/>
+      <param name="draw" value="6"/>
+      <param name="solve" value="3"/>
+    </program>
+  </composition>
+</scene>

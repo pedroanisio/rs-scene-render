@@ -1,0 +1,19 @@
+[package]
+name = "sr-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Deterministic WebAssembly programs for scene-render (SREPs 66 and 69): Wasmtime with fuel, canonical NaNs, a memory limit and four host imports"
+
+[dependencies]
+sha2.workspace = true
+thiserror.workspace = true
+# 41.0.4: the newest release whose minimum Rust (1.90) matches the workspace's. Only the compiler and the runtime:
+# no threads, no GC, no component model, no WASI, no on-disk compilation cache.
+wasmtime = { version = "=41.0.4", default-features = false, features = ["cranelift", "runtime", "std"] }
+
+[dev-dependencies]
+wat = "1.243"

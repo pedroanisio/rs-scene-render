@@ -522,11 +522,21 @@ for attr in ["attenuationColor", "baseColor", "colorEnd", "colorHigh", "colorLow
         CASES.append((f"r31-{attr}", [f"R31-{attr}"], with_attr(attr, "var(--nope)")))
 
 # Asset cases: the oracle sees a valid document; the Rust verifier must not.
+# SREPs 66 and 69: the version gate V12, PRG1 to PRG3 and STP1 on programs
+CASES += [
+    ("v12-program", ["V12"], lambda _: PROGRAMS.replace('version="1.6"', 'version="1.5"')),
+    ("prg1-param-twice", ["PRG1"], lambda _: PROGRAMS.replace('<param name="side" value="1"/>', '<param name="side" value="1"/><param name="side" value="0"/>')),
+    ("prg2-over-node-program", ["C18", "PRG2"], lambda _: PROGRAMS.replace('over="rows"', 'over="build"')),
+    ("prg3-step-size", ["PRG3"], lambda _: PROGRAMS.replace(' width="8" height="8"', '')),
+    ("stp1-build-program", ["STP1"], lambda _: PROGRAMS.replace(' seed="3"', ' seed="3" prewarm="2"')),
+]
 ASSET_CASES = [
     ("a01-missing-file", ["A01"], sub('src="../media/clip.mp4"', 'src="../media/clip-missing.mp4"')),
     ("a02-hash-mismatch", ["A02"], lambda t: re.sub(r'(src="\.\./media/music\.wav" sha256=")[0-9a-f]{4}', r'\g<1>0000', t)),
     ("a02-generated-cache", ["A02"], lambda t: re.sub(r'(cache="\.\./media/voice\.wav" cacheSha256=")[0-9a-f]{4}', r'\g<1>ffff', t)),
     ("a04-sequence-frames", ["A04"], sub('first="1" last="5"', 'first="1" last="9"')),
+    ("prg10-program-hash", ["PRG10"], lambda _: PROGRAMS.replace(PROGRAM_SHA["rect"], "0" * 64)),
+    ("prg10-program-missing", ["PRG10"], lambda _: PROGRAMS.replace("../media/rect.wasm", "../media/missing.wasm")),
 ]
 WARN_CASES = [
     ("a03-remote", ["A03"], sub('src="../media/clip.mp4"', 'src="https://cdn.example.com/clip.mp4"')),
@@ -543,6 +553,14 @@ WARN_CASES = [
     ("w01-non-finite", ["W01"], sub('<marker id="drop" time="4.2"', '<marker id="drop" time="4.2" duration="1"/>\n    <marker id="late" time="INF"')),
 ]
 
+# SREPs 66 and 69: a build program in the composition, a data program feeding a repeat and a stepping program
+PROGRAM_SHA = {k: hashlib.sha256((MEDIA / f"{k}.wasm").read_bytes()).hexdigest() for k in ("rect", "rows", "counter")}
+PROGRAMS = ('<scene version="1.6"><project width="64" height="64" fps="24" duration="1"/>'
+    '<parameters><program id="rows" src="../media/rows.wasm" sha256="' + PROGRAM_SHA["rows"] + '"/></parameters><composition>'
+    '<program id="build" src="../media/rect.wasm" sha256="' + PROGRAM_SHA["rect"] + '" seed="3" fuel="100000"><param name="side" value="1"/></program>'
+    '<repeat id="rep" over="rows"><shape id="c" shape="rect" width="4" height="4" fill="#FF0000"/></repeat>'
+    '<program id="steps" mode="step" width="8" height="8" src="../media/counter.wasm" sha256="' + PROGRAM_SHA["counter"] + '" stepsPerFrame="2" prewarm="3"/>'
+    '</composition></scene>\n')
 VALID = {
     "solid-colliders": SOLID_COLLIDERS,
     "fracture": FRACTURE,
@@ -558,6 +576,7 @@ VALID = {
     "ocean-depth-filtered-drag": OCEAN_COUPLED.replace('<ocean ', '<ocean bedResponse="depthFiltered" bodyDrag="2" '),
     "model-select": MODEL_SELECT,
     "repeat-points": POINTS,
+    "programs": PROGRAMS,
     "repeat-points-neutral-steps": POINTS.replace('<repeat id="r"', '<repeat id="r" from="0" step="1"'),
     "connector": CONNECTOR,
     "connector-points": CONNECTOR.replace(' to="b"', ' toX="50%" toY="100%"').replace('route="orthogonal"', 'route="curved" bend="-20"').replace(' label="note"', ''),
