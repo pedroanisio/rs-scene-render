@@ -184,10 +184,13 @@ fn stars(dir: vec3<f32>, pixel_angle: f32) -> vec3<f32> {
 // ---------------------------------------------------------------- the disk
 
 // Temperature profile of a thin disk with no torque at the inner edge: T ~ x^(-3/4) (1 - x^(-1/2))^(1/4)
-// with x = r / r_in, normalized to 1 at its maximum, x = 49/36.
+// with x = r / r_in, normalized to 1 at its maximum, x = 49/36, where it is (6/7)^(3/2) 7^(-1/4) (draft SREP 76,
+// Semantics 8; the rounded 0.4880 drew the peak at 0.99974 of temperatureScale).
+const DISK_PROFILE_PEAK: f32 = 0.4878713392322761;
+
 fn profile(x: f32) -> f32 {
     if (x <= 1.0) { return 0.0; }
-    return pow(x, -0.75) * pow(1.0 - inverseSqrt(x), 0.25) / 0.4880;
+    return pow(x, -0.75) * pow(1.0 - inverseSqrt(x), 0.25) / DISK_PROFILE_PEAK;
 }
 
 fn value_noise(psi: f32, s: f32, cells: f32, ds: f32, seed: u32) -> f32 {

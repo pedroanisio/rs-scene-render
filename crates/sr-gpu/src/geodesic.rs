@@ -276,3 +276,32 @@ impl GeodesicGpu {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// The thin-disk profile f(x) = x^(-3/4) (1 - x^(-1/2))^(1/4), x = r / r_in.
+    fn profile(x: f64) -> f64 {
+        if x <= 1.0 {
+            0.0
+        } else {
+            x.powf(-0.75) * (1.0 - x.powf(-0.5)).powf(0.25)
+        }
+    }
+
+    #[test]
+    fn the_disk_profile_is_normalised_by_its_exact_maximum() {
+        // draft SREP 76, Semantics 8 and open issue 7: f(49/36) = (6/7)^(3/2) 7^(-1/4) = 0.4878713..., not 0.4880
+        let exact = (6.0f64 / 7.0).powf(1.5) * 7.0f64.powf(-0.25);
+        assert!((profile(49.0 / 36.0) - exact).abs() < 1e-15);
+        // and it is the maximum: f' = 0 at x = 49/36, f below it on a fine grid
+        assert!((1..20000).map(|i| 1.0 + f64::from(i) * 1e-3).all(|x| profile(x) <= exact + 1e-15));
+        let src = include_str!("geodesic.wgsl");
+        let line = src
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("const DISK_PROFILE_PEAK: f32 = "))
+            .expect("geodesic.wgsl names the profile's maximum DISK_PROFILE_PEAK");
+        let peak: f32 = line.trim_end_matches(';').trim().parse().expect("a number");
+        assert_eq!(peak, exact as f32, "the shader divides by f(49/36) rounded to f32");
+        assert!(src.contains("/ DISK_PROFILE_PEAK"), "profile() divides by it");
+    }
+}
