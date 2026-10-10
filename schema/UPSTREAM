@@ -40,3 +40,8 @@ Added here ahead of an sr-core release: SREP 68 (accepted 2026-10-09), effectTyp
 Schematron pattern p-srep68 with STP1, with the syntax of srep/srep-0068.md in sr-core branch srep/drafts-2026-10. The
 pattern's context leaves out program[@mode='step'] (SREP 69, not in this schema). A vendoring of the sr-core release that
 contains SREP 68 replaces these.
+Unverified for SREP 67 in this engine:
+- Real-GPU carry is unverified, because there is no discrete GPU we may use. The two-word 64-bit cells are tested on
+  llvmpipe only, in CI and on the prod VM (raster_effects::srep67_compute).
+- The error-diffusion kernel weights are checked against the SREP's table and against the commonly republished values,
+  not against the original publications, which could not be read from here.
