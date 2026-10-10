@@ -543,7 +543,13 @@ impl Renderer {
         srgb: bool,
         owner: &str,
     ) -> Option<Arc<crate::three::TexGpu>> {
-        let Some((a, doc)) = crate::text::asset_of(ctx.p, asset) else {
+        // the program lists the assets its nodes name; a map names one from the document's materials, which are the
+        // main document's (as `document_material` reads them)
+        let found = crate::text::asset_of(ctx.p, asset).or_else(|| {
+            let a = ctx.p.scene.assets.as_ref()?.children.iter().find(|c| c.id() == Some(asset))?;
+            Some((a, 0))
+        });
+        let Some((a, doc)) = found else {
             plan.stats.errors.push(format!("{owner}: material map #{asset} names no asset"));
             return None;
         };
