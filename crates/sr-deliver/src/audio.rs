@@ -285,6 +285,50 @@ pub(crate) struct Automation {
     props: HashMap<String, HashMap<&'static str, Vec<f64>>>,
     layer_times: HashMap<String, Vec<Option<f64>>>,
     layer_volume: HashMap<String, Vec<f64>>,
+    /// The gain the transitions give each audio layer per control frame ([`transition_gains`]).
+    layer_gain: HashMap<String, Vec<f64>>,
+}
+
+/// The gains a transition's `audio` gives the sound of its outgoing and incoming sides at eased progress `p`:
+/// `crossfade` 1 − p and p, `equal-power` cos(πp/2) and sin(πp/2), `cut` the outgoing side until p reaches ½ and the
+/// incoming one from there, and `none` both at their own volume over the whole window.
+pub fn transition_gains(audio: m::TransitionAudio, p: f64) -> (f64, f64) {
+    let p = p.clamp(0.0, 1.0);
+    match audio {
+        m::TransitionAudio::Crossfade => (1.0 - p, p),
+        m::TransitionAudio::EqualPower => {
+            let a = std::f64::consts::FRAC_PI_2 * p;
+            (a.cos(), a.sin())
+        }
+        m::TransitionAudio::Cut if p < 0.5 => (1.0, 0.0),
+        m::TransitionAudio::Cut => (0.0, 1.0),
+        m::TransitionAudio::None => (1.0, 1.0),
+    }
+}
+
+/// The gain the frame's active transitions give the sound of node `i`: the product, over every transition whose
+/// outgoing or incoming side is `i` or contains it, of that side's [`transition_gains`]. Sequence junctions, which
+/// have no element, crossfade (the attribute's default).
+fn transition_gain(g: &sr_eval::FrameGraph, i: usize) -> f64 {
+    let mut gain = 1.0;
+    for tr in &g.transitions {
+        let audio = match tr.elem.as_deref() {
+            Some(m::Node::Transition(t)) => t.audio,
+            _ => m::TransitionAudio::Crossfade,
+        };
+        let (from, to) = transition_gains(audio, tr.progress);
+        let mut cur = Some(i as u32);
+        while let Some(k) = cur {
+            if tr.from == Some(k) {
+                gain *= from;
+            }
+            if tr.to == Some(k) {
+                gain *= to;
+            }
+            cur = g.nodes[k as usize].parent;
+        }
+    }
+    gain
 }
 
 impl Automation {
@@ -359,7 +403,7 @@ pub fn mix_scene(ev: &Evaluator, fps: f64, representation: Option<&str>) -> Resu
     let layout = am.map(|a| Layout::parse(a.channel_layout.as_str(), a.channels as u32)).unwrap_or(Layout::Stereo);
     // automation and media clocks, one sample per frame
     let frames = (p.duration * fps).ceil() as usize + 1;
-    let mut auto = Automation { props: HashMap::new(), layer_times: HashMap::new(), layer_volume: HashMap::new() };
+    let mut auto = Automation::default();
     let layer_ids: HashMap<&str, ()> = audio_layers.iter().map(|(i, ..)| (&*p.nodes[*i as usize].id, ())).collect();
     let animated_audio = p.elements.iter().any(|e| {
         let k = &*e.key;
@@ -378,7 +422,7 @@ pub fn mix_scene(ev: &Evaluator, fps: f64, representation: Option<&str>) -> Resu
                 auto.record(e, k, frames);
             }
             let mut seen: HashMap<&str, ()> = HashMap::new();
-            for n in &g.nodes {
+            for (i, n) in g.nodes.iter().enumerate() {
                 if layer_ids.contains_key(&*n.id) {
                     seen.insert(&n.id, ());
                     let t = auto.layer_times.entry(n.id.to_string()).or_insert_with(|| vec![None; frames]);
@@ -386,6 +430,10 @@ pub fn mix_scene(ev: &Evaluator, fps: f64, representation: Option<&str>) -> Resu
                     let vol = n.props.get("volume").and_then(Value::as_num);
                     let v = auto.layer_volume.entry(n.id.to_string()).or_insert_with(|| vec![f64::NAN; frames]);
                     v[k] = vol.unwrap_or(f64::NAN);
+                    if !g.transitions.is_empty() {
+                        let gain = transition_gain(&g, i);
+                        auto.layer_gain.entry(n.id.to_string()).or_insert_with(|| vec![1.0; frames])[k] = gain;
+                    }
                 }
             }
         }
@@ -412,8 +460,18 @@ pub fn mix_scene(ev: &Evaluator, fps: f64, representation: Option<&str>) -> Resu
         let Some(path) = source_path(p, asset, *doc, representation) else { continue };
         let times = auto.layer_times.get(&id).cloned().unwrap_or_default();
         let vols = auto.layer_volume.get(&id).cloned().unwrap_or_default();
-        let volume = if vols.iter().any(|v| v.is_finite() && (v - l.volume.get()).abs() > 1e-12) {
-            Curve::Frames(vols.iter().map(|v| if v.is_finite() { *v } else { l.volume.get() }).collect())
+        let gains = auto.layer_gain.get(&id);
+        // the animated volume (or the static one), times the transitions' gains
+        let vols: Vec<f64> = vols
+            .iter()
+            .enumerate()
+            .map(|(k, v)| {
+                let v = if v.is_finite() { *v } else { l.volume.get() };
+                v * gains.and_then(|g| g.get(k)).copied().unwrap_or(1.0)
+            })
+            .collect();
+        let volume = if vols.iter().any(|v| (v - l.volume.get()).abs() > 1e-12) {
+            Curve::Frames(vols)
         } else {
             Curve::Const(l.volume.get())
         };

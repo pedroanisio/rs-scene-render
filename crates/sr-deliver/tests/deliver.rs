@@ -130,6 +130,87 @@ fn unread_tracks_are_not_analysed() {
     assert_eq!(sa.analysis.beats.as_ref().map(Vec::len), Some(4), "beats still come from the grid's source");
 }
 
+/// A transition between two video layers mixes their sound by its `audio` (default `crossfade`) at the transition's
+/// eased progress p: crossfade a·(1 − p) + b·p, equal-power a·cos(πp/2) + b·sin(πp/2), cut a until p reaches ½ and b
+/// from there, none leaves both sides at their own volume over the handles. Outside the window nothing changes.
+#[test]
+fn a_transition_mixes_the_sound_of_its_sides_by_its_audio() {
+    let Some(dir) = fixtures() else { return };
+    // one control frame per video frame: 25 per second; the window is [0.8, 1.2), frames 20 to 29, p = (t − 0.8) / 0.4
+    let volumes = |audio: &str| {
+        let xml = format!(
+            r##"<scene version="1.1">
+  <project width="64" height="36" fps="25" duration="2" background="#000000"/>
+  <assets><video id="clip" src="clip.mp4" width="64" height="36" fps="25" duration="2" hasAudio="true" colorSpace="rec709"/></assets>
+  <composition>
+    <layer id="a" asset="clip" end="1" volume="0.8"/>
+    <layer id="b" asset="clip" start="1"/>
+    <transition type="wipe" from="a" to="b" duration="0.4" curve="linear" {audio}/>
+  </composition>
+</scene>"##
+        );
+        let d = doc(&dir, &xml);
+        let ev = sr_eval::Evaluator::new(&d, &Default::default()).unwrap();
+        let sa = sr_deliver::audio::mix_scene(&ev, 25.0, None).unwrap().expect("the layers carry sound");
+        let at = |id: &str| {
+            let n = sa.mix.nodes.iter().find(|n| n.id == id).unwrap_or_else(|| panic!("no audio node {id}"));
+            let v = n.volume.clone();
+            move |k: usize| v.at(k as f64 / 25.0, 25.0)
+        };
+        (at("a"), at("b"))
+    };
+    let near = |got: f64, want: f64, what: &str| assert!((got - want).abs() < 1e-6, "{what}: {got}, want {want}");
+    // the default is a crossfade
+    for audio in ["", r#"audio="crossfade""#] {
+        let (a, b) = volumes(audio);
+        near(a(10), 0.8, "a before the window keeps its own volume");
+        near(a(20), 0.8, "a at p = 0");
+        near(a(25), 0.4, "a at p = 1/2");
+        near(b(25), 0.5, "b at p = 1/2");
+        near(a(29), 0.8 * 0.1, "a at p = 0.9");
+        near(b(29), 0.9, "b at p = 0.9");
+        near(b(20), 0.0, "b at p = 0");
+        near(b(40), 1.0, "b after the window");
+    }
+    let (a, b) = volumes(r#"audio="equal-power""#);
+    let h = std::f64::consts::FRAC_1_SQRT_2;
+    near(a(25), 0.8 * h, "equal-power a at p = 1/2");
+    near(b(25), h, "equal-power b at p = 1/2");
+    near(b(22), (std::f64::consts::FRAC_PI_2 * 0.2).sin(), "equal-power b at p = 0.2");
+    let (a, b) = volumes(r#"audio="cut""#);
+    near(a(24), 0.8, "cut: a until p reaches 1/2");
+    near(b(24), 0.0, "cut: b silent before");
+    near(a(25), 0.0, "cut: a silent from p = 1/2");
+    near(b(25), 1.0, "cut: b from p = 1/2");
+    let (a, b) = volumes(r#"audio="none""#);
+    for k in [20, 25, 29] {
+        near(a(k), 0.8, "none: a keeps its volume over the handle");
+        near(b(k), 1.0, "none: b keeps its volume over the handle");
+    }
+}
+
+/// A transition of one node fades its sound in or out with the picture; a transition from a group reaches the sound
+/// of the video layers inside it.
+#[test]
+fn a_one_sided_transition_fades_the_sound_of_its_node_and_reaches_into_groups() {
+    let Some(dir) = fixtures() else { return };
+    let xml = r##"<scene version="1.1">
+  <project width="64" height="36" fps="25" duration="2" background="#000000"/>
+  <assets><video id="clip" src="clip.mp4" width="64" height="36" fps="25" duration="2" hasAudio="true" colorSpace="rec709"/></assets>
+  <composition>
+    <group id="g" end="1"><layer id="a" asset="clip"/></group>
+    <transition type="crossfade" from="g" duration="0.4" alignment="end" curve="linear"/>
+  </composition>
+</scene>"##;
+    let d = doc(&dir, xml);
+    let ev = sr_eval::Evaluator::new(&d, &Default::default()).unwrap();
+    let sa = sr_deliver::audio::mix_scene(&ev, 25.0, None).unwrap().expect("the layer carries sound");
+    let n = sa.mix.nodes.iter().find(|n| n.id == "a").expect("audio node a");
+    // window [0.6, 1.0): frame 20 is p = 0.5
+    assert!((n.volume.at(10.0 / 25.0, 25.0) - 1.0).abs() < 1e-6);
+    assert!((n.volume.at(20.0 / 25.0, 25.0) - 0.5).abs() < 1e-6, "{:?}", n.volume.at(0.8, 25.0));
+}
+
 /// Per-frame MD5 of the decoded video stream (`ffmpeg -f framemd5`).
 fn framemd5(path: &std::path::Path) -> String {
     let out = std::process::Command::new(sr_media::ffmpeg())
