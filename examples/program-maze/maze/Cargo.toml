@@ -1,0 +1,20 @@
+[package]
+name = "sr-example-maze"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "A scene-render <program> (SREP 66): a maze by recursive backtracking, and its solution, as animated paths"
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+# its own workspace: built for wasm32-unknown-unknown by build.sh, not by the engine's workspace
+[workspace]
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+codegen-units = 1
+strip = true

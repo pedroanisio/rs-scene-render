@@ -106,3 +106,16 @@ fn validation_alone_does_not_run_programs() {
     let r = validate_str(&doc(&program("srep66-loop", r#" fuel="100000""#, "")), &opts());
     assert!(!r.has_errors(), "{r}");
 }
+
+#[test]
+fn the_maze_example_loads_with_its_pinned_output() {
+    // examples/program-maze: outputSha256 was computed from the module's output under V8 (Node 24); the same
+    // digest here shows a second runtime and host computing the same maze
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/program-maze/maze.scene.xml");
+    std::env::set_var("SR_PROGRAM_CACHE", "off");
+    let d = sr_model::load_file(&path, &LoadOptions::default()).expect("the example loads");
+    assert!(matches!(d.node("maze"), Some(Node::Group(_))));
+    assert!(
+        matches!(d.node("maze-walls"), Some(Node::Shape(_))) && matches!(d.node("maze-route"), Some(Node::Shape(_)))
+    );
+}
